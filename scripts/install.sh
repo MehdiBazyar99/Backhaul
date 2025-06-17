@@ -1,6 +1,45 @@
 #!/usr/bin/env bash
 set -e
 
+install_pkg() {
+  if command -v apt-get >/dev/null; then
+    apt-get update -y && apt-get install -y "$@"
+  elif command -v dnf >/dev/null; then
+    dnf install -y "$@"
+  elif command -v yum >/dev/null; then
+    yum install -y "$@"
+  elif command -v pacman >/dev/null; then
+    pacman -Sy --noconfirm "$@"
+  elif command -v zypper >/dev/null; then
+    zypper --non-interactive install "$@"
+  else
+    return 1
+  fi
+}
+
+ensure_tool() {
+  local bin="$1" pkg="$2"
+  if ! command -v "$bin" >/dev/null; then
+    echo "Installing missing dependency: $bin"
+    install_pkg "$pkg" || { echo "Failed to install $bin" >&2; exit 1; }
+  fi
+}
+
+ensure_go() {
+  if ! command -v go >/dev/null; then
+    echo "Go compiler is required. Installing..."
+    if command -v apt-get >/dev/null; then
+      install_pkg golang-go
+    else
+      install_pkg go || install_pkg golang
+    fi
+  fi
+}
+
+ensure_git() {
+  ensure_tool git git
+}
+
 if [[ $EUID -ne 0 ]]; then
   echo "Please run as root" >&2
   exit 1
@@ -13,9 +52,9 @@ if [[ $OS != "Linux" ]]; then
   exit 1
 fi
 
-for tool in curl tar; do
-  command -v "$tool" >/dev/null || { echo "Missing required utility: $tool" >&2; exit 1; }
-done
+ensure_tool curl curl
+ensure_tool tar tar
+command -v systemctl >/dev/null || { echo "systemctl not found. Please install systemd." >&2; exit 1; }
 
 echo "Detected architecture: $ARCH"
 
@@ -29,8 +68,8 @@ tmpdir=$(mktemp -d)
 BIN=""
 case $CHOICE in
  1)
-   command -v git >/dev/null || { echo "git is required"; exit 1; }
-   command -v go >/dev/null || { echo "Go compiler is required"; exit 1; }
+   ensure_git
+   ensure_go
    git clone https://github.com/MehdiBazyar99/Backhaul "$tmpdir/src"
    cd "$tmpdir/src"
    go build -o backhaul

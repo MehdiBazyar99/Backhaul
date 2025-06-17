@@ -4,7 +4,7 @@ This repository is a Linux‑first fork of the original Backhaul reverse tunneli
 
 ## Key Improvements
 
-- **Guided installer**: `install.sh` helps you build from source or use a local/remote binary and sets up systemd automatically.
+- **Guided installer**: `install.sh` installs missing dependencies, helps you build from source or use a local/remote binary, and sets up systemd automatically.
 - **Interactive manager**: `backhaul-manager.sh` offers menus for service control, safe upgrades and a configuration wizard.
 - **TLS utilities and monitoring**: helper scripts simplify certificate generation and include cron‑based tunnel watchdogs.
 
@@ -20,7 +20,7 @@ Backhaul automatically applies recommended defaults for the selected mode (serve
 
 ### Installation options
 
-The installer works even when release binaries are not available. When run it will prompt you to choose one of the following methods:
+The installer works even when release binaries are not available. It automatically installs missing dependencies such as `git` and the Go compiler. When run it will prompt you to choose one of the following methods:
 
 1. **Build from source** – clones this repository and compiles `backhaul` with Go.
 2. **Use an existing binary** – provide the path to a previously built `backhaul` executable.
