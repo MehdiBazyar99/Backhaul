@@ -5,7 +5,7 @@ import (
 	"io"
 	"net"
 
-	"github.com/MehdiBazyar99/Backhaul/internal/web"
+	"github.com/musix/backhaul/internal/web"
 	"github.com/quic-go/quic-go"
 	"github.com/sirupsen/logrus"
 )
