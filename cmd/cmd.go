@@ -3,10 +3,10 @@ package cmd
 import (
 	"context"
 
-	"github.com/musix/backhaul/internal/client"
-	"github.com/musix/backhaul/internal/config"
-	"github.com/musix/backhaul/internal/server"
-	"github.com/musix/backhaul/internal/utils"
+	"github.com/MehdiBazyar99/Backhaul/internal/client"
+	"github.com/MehdiBazyar99/Backhaul/internal/config"
+	"github.com/MehdiBazyar99/Backhaul/internal/server"
+	"github.com/MehdiBazyar99/Backhaul/internal/utils"
 
 	"github.com/BurntSushi/toml"
 )
