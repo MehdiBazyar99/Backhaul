@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/musix/backhaul/internal/utils"
-	"github.com/musix/backhaul/internal/web"
+	"github.com/MehdiBazyar99/Backhaul/internal/utils"
+	"github.com/MehdiBazyar99/Backhaul/internal/web"
 	"github.com/quic-go/quic-go"
 
 	"github.com/sirupsen/logrus"

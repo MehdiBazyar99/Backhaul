@@ -4,11 +4,11 @@ import (
 	"context"
 	"time"
 
-	"github.com/musix/backhaul/internal/utils"
+	"github.com/MehdiBazyar99/Backhaul/internal/utils"
 
-	"github.com/musix/backhaul/internal/config"
+	"github.com/MehdiBazyar99/Backhaul/internal/config"
 
-	"github.com/musix/backhaul/internal/client/transport"
+	"github.com/MehdiBazyar99/Backhaul/internal/client/transport"
 
 	"net/http"
 	_ "net/http/pprof"

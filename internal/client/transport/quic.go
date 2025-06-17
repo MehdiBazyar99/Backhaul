@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/musix/backhaul/internal/utils"
-	"github.com/musix/backhaul/internal/web"
+	"github.com/MehdiBazyar99/Backhaul/internal/utils"
+	"github.com/MehdiBazyar99/Backhaul/internal/web"
 	"github.com/quic-go/quic-go"
 
 	"github.com/sirupsen/logrus"
@@ -47,7 +47,7 @@ type QuicConfig struct {
 	MaxStreamBuffer  int
 	ConnectionPool   int
 	WebPort          int
-	AggressivePool bool
+	AggressivePool   bool
 }
 
 func NewQuicClient(parentCtx context.Context, config *QuicConfig, logger *logrus.Logger) *QuicTransport {
