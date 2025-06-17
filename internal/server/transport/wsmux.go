@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/MehdiBazyar99/Backhaul/internal/config" // for mode
-	"github.com/MehdiBazyar99/Backhaul/internal/utils"
-	"github.com/MehdiBazyar99/Backhaul/internal/web"
+	"github.com/musix/backhaul/internal/config" // for mode
+	"github.com/musix/backhaul/internal/utils"
+	"github.com/musix/backhaul/internal/web"
 	"github.com/xtaci/smux"
 
 	"github.com/gorilla/websocket"

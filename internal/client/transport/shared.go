@@ -12,8 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/MehdiBazyar99/Backhaul/internal/config"
 	"github.com/gorilla/websocket"
+	"github.com/musix/backhaul/internal/config"
 	"golang.org/x/exp/rand"
 )
 

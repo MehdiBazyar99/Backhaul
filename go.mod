@@ -1,4 +1,4 @@
-module github.com/MehdiBazyar99/Backhaul
+module github.com/musix/backhaul
 
 go 1.23.1
 

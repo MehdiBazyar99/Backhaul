@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/MehdiBazyar99/Backhaul/internal/utils"
-	"github.com/MehdiBazyar99/Backhaul/internal/web"
+	"github.com/musix/backhaul/internal/utils"
+	"github.com/musix/backhaul/internal/web"
 
 	"github.com/sirupsen/logrus"
 	"github.com/xtaci/smux"
