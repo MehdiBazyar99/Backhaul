@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/musix/backhaul/internal/config"
-	"github.com/musix/backhaul/internal/utils"
-	"github.com/musix/backhaul/internal/web"
+	"github.com/MehdiBazyar99/Backhaul/internal/config"
+	"github.com/MehdiBazyar99/Backhaul/internal/utils"
+	"github.com/MehdiBazyar99/Backhaul/internal/web"
 
 	"github.com/gorilla/websocket"
 	"github.com/sirupsen/logrus"
