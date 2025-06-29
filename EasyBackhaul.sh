@@ -2,7 +2,7 @@
 
 # ==============================================================================
 # EasyBackhaul Installer & Management Script
-# Version: 12.4 (Branding & Credits)
+# Version: 12.5 (Line Ending Fix)
 #
 # Core Backhaul Development: Musixal
 # Installer Script by: @N4Xon (https://github.com/MehdiBazyar99/EasyBackhaul)
@@ -12,6 +12,7 @@
 # ==============================================================================
 #
 # CHANGELOG:
+# - FIXED: Converted all line endings to Unix (LF) format to fix execution errors.
 # - ADDED: Renamed to EasyBackhaul and added developer credits.
 # - FIXED: Switched to `systemctl list-unit-files` for reliable service listing.
 # - ADDED: Port conflict detection to prevent service creation on an occupied port.
@@ -648,7 +649,7 @@ remove_cron_job() {
 main_menu() {
     clear
     get_server_info
-    print_info "      EasyBackhaul Installer & Management Menu (v12.4)"
+    print_info "      EasyBackhaul Installer & Management Menu (v12.5)"
     print_info "================================================================"
     print_info "  Core by Musixal  |  Installer by @N4Xon"
     print_info "----------------------------------------------------------------"
