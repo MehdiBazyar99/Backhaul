@@ -2,44 +2,7 @@
 
 Welcome to `EasyBackhaul`, a user-friendly and powerful management script for the **[Backhaul](https://github.com/Musixal/Backhaul)** reverse tunneling solution. This script simplifies the installation, configuration, and day-to-day management of Backhaul, making it accessible to everyone.
 
-This script, developed by **@N4Xon**, provides a menu-driven interface to manage the core Backhaul reverse tunnel, which was developed by **Musixal**.
-
------
-
-## About the Core Backhaul Project
-
-Backhaul is a high-performance reverse tunneling solution optimized for handling massive concurrent connections through NATs and firewalls.
-
-### Core Features
-
-  * **High Performance**: Optimized for handling massive concurrent connections efficiently.
-  * **Protocol Flexibility**: Supports TCP, UDP, WebSocket (WS), and Secure WebSocket (WSS) transports.
-  * **Multiplexing**: Enables multiple connections over a single transport with SMUX for greater efficiency.
-  * **NAT & Firewall Bypass**: Overcomes network restrictions with robust reverse tunneling.
-  * **TLS Encryption**: Secures connections via WSS with support for custom TLS certificates.
-
------
-
-## EasyBackhaul Script Features
-
-The `EasyBackhaul` script automates the entire lifecycle of your Backhaul tunnels with an easy-to-use wizard.
-
-  * **One-Line Installer**: Get up and running in seconds.
-  * **Guided Configuration**: An interactive wizard walks you through creating new server or client tunnels for all supported protocols (TCP, UDP, WS, WSS, and multiplexed variants).
-  * **Automatic Dependency Checks**: The script automatically checks for and installs required dependencies like `curl`, `jq`, and `ss`.
-  * **Systemd Service Management**: Automatically creates, enables, and manages `systemd` services for each tunnel, ensuring they run reliably in the background.
-  * **Port Conflict Detection**: Prevents you from creating a new tunnel on a port that is already in use.
-  * **UFW Integration**: Automatically manages UFW firewall rules for your server tunnels.
-  * **Full Management Menu**: A comprehensive menu to manage existing tunnels:
-      * Start, Stop, and Restart services.
-      * View live logs (`journalctl`).
-      * View and edit tunnel configuration files with `nano`.
-      * Perform connection tests to diagnose issues.
-  * **Configuration Backups**: Automatically backs up a configuration file before any edits are made.
-  * **Cron Job Management**: Set up custom auto-restart cron jobs for any tunnel to ensure maximum uptime.
-  * **Simple Updates & Uninstallation**: Update the Backhaul binary or completely remove all traces of EasyBackhaul from your system with simple menu options.
-
------
+This script, developed by **[@N4Xon (NaxonM)](https://www.google.com/search?q=https://github.com/NaxonM)**, provides a menu-driven interface to manage the core Backhaul reverse tunnel, which was developed by **Musixal**.
 
 ## Installation
 
@@ -51,12 +14,18 @@ bash <(curl -Ls https://raw.githubusercontent.com/NaxonM/EasyBackhaul/main/EasyB
 
 The script will first check for the Backhaul binary. If it's not found, it will automatically download the latest version from the official GitHub repository.
 
-## Usage
+-----
 
-After installation, run the script again using the same command to bring up the main menu.
+## How to Use: A Step-by-Step Guide
+
+This guide will walk you through setting up and managing a tunnel using the EasyBackhaul script.
+
+### Step 1: Run the Script & View the Main Menu
+
+After installation, run the command again to bring up the main menu. The script will greet you with server information and the main options.
 
 ```
-      EasyBackhaul Installer & Management Menu (v12.4)
+      EasyBackhaul Installer & Management Menu (v12.5)
 ================================================================
   Core by Musixal  |  Installer by @N4Xon
 ----------------------------------------------------------------
@@ -68,44 +37,80 @@ After installation, run the script again using the same command to bring up the 
 ----------------------------------------------------------------
 ```
 
-### 1\. Configure a New Tunnel
+### Step 2: Configure a New Tunnel (Server Example)
 
-This option launches the **New Tunnel Configuration Wizard**. It will guide you step-by-step:
+This wizard-driven process makes setup simple. Let's configure a `server` tunnel.
 
-1.  **Select Mode**: Choose whether this machine will be a `server` (listens for connections) or a `client` (connects to a server).
-2.  **Select Transport**: Pick the protocol for your tunnel (e.g., `tcp`, `wss`, `tcpmux`).
-3.  **Enter Configuration**: Provide necessary details like IP addresses, ports, and a secure token. The script validates your input and checks for port availability.
-4.  **Advanced Options**: Fine-tune advanced parameters like keep-alive periods, connection pools, and multiplexing settings, or just accept the sensible defaults.
-5.  **Confirmation**: Review the generated configuration and confirm. The script then creates the config file, sets up the firewall rule (if on a server), and creates/starts the `systemd` service.
+1.  **Select Option 1** from the main menu, "Configure a New Tunnel".
+2.  **Choose Mode**: You will be asked if this machine is a `Server` or a `Client`. Select `1` for Server.
+3.  **Select Transport**: Choose a transport protocol from the list (e.g., `tcp`, `udp`, `wss`, `tcpmux`).
+4.  **Enter Basic Configuration**:
+      * **Tunnel Port**: The main port the Backhaul server will listen on. The script will check if this port is already in use.
+      * **Forwarded Ports**: The service ports on the client you want to expose on the server (e.g., `80, 443, 2222=22`).
+      * **Authentication Token**: A secure password to authenticate the client and server.
+5.  **Enter Advanced Configuration**: You can now fine-tune advanced and transport-specific parameters or accept the sensible defaults for things like `log_level`, `keepalive_period`, and multiplexing (MUX) settings if you chose a MUX transport.
+6.  **Confirmation**: The script displays a summary of the configuration you've built. If it looks correct, confirm with `y`.
+7.  **Service Creation**: The script automatically:
+      * Creates a configuration file in `/etc/backhaul/`.
+      * Adds a firewall rule using `ufw` if it's active.
+      * Creates, enables, and starts a `systemd` service for the new tunnel.
 
-All configuration files are stored in `/etc/backhaul/`.
+Your new tunnel is now active and ready to accept a client connection.
 
-### 2\. Manage Existing Tunnels
+### Step 3: Manage Existing Tunnels
 
-This menu lists all Backhaul services running on your system, showing their current status (Active/Inactive). Selecting a service opens the management menu for that specific tunnel, where you can:
+This menu is the central hub for managing all your tunnels.
 
-  * **Control the Service**: Start, stop, or restart.
-  * **Monitor**: View its real-time logs or check its detailed status.
-  * **Configure**: View the current configuration or edit it directly using `nano`. The script will offer to restart the service to apply changes.
-  * **Test Connection**: Run a basic connectivity test to help troubleshoot issues.
-  * **Set Cron Job**: Create a scheduled task to automatically restart the service at a chosen interval.
-  * **Delete**: Permanently remove the service, its configuration file, and its associated firewall rule.
+1.  **Select Option 2** from the main menu, "Manage Existing Tunnels".
+2.  **Service List**: The script will display a list of all configured Backhaul services, showing whether they are `Active` or `Inactive`.
+3.  **Select a Service**: Choose the tunnel you wish to manage from the list. This will open the **Tunnel Management Menu**.
 
-### 3\. Update/Re-install Backhaul Binary
+#### Tunnel Management Menu Options
 
-This option fetches the latest version of the `Backhaul` binary from the GitHub releases page and installs it to `/usr/local/bin/backhaul`.
+Here are the available actions for your selected tunnel:
 
-### 4\. Uninstall EasyBackhaul
-
-This is a destructive action that completely removes EasyBackhaul and all related components from your system. It will:
-
-  * Stop and disable all `backhaul-*.service` units.
-  * Delete the Backhaul binary (`/usr/local/bin/backhaul`).
-  * Remove all configuration and backup files (`/etc/backhaul/`).
-  * Delete all Backhaul systemd service files.
-  * Remove all related cron jobs.
+  * `1. Start`: Starts the systemd service if it is inactive.
+  * `2. Stop`: Stops the systemd service.
+  * `3. Restart`: Restarts the service.
+  * `4. View Status`: Shows the detailed `systemd` status, including uptime and recent logs.
+  * `5. View Logs (Live)`: Streams the live service logs using `journalctl -f`.
+  * `6. View Configuration`: Displays the contents of the tunnel's configuration file.
+  * `7. Edit Configuration (nano)`: Backs up the current config and then opens it in the `nano` text editor for changes. You will be prompted to restart the service to apply the changes.
+  * `8. Test Connection`: Performs a basic connectivity test. For servers, it checks if the port is listening locally. For clients, it tries to connect to the remote server.
+  * `9. Manage Cron Auto-Restart`: Opens a sub-menu to set or remove a cron job that automatically restarts the service at a chosen interval (e.g., every hour, every day).
+  * `10. Delete Service`: A permanent action that stops and disables the service, then deletes its configuration file, systemd service file, firewall rule, and any associated cron jobs.
+  * `0. Back to Service List`: Returns to the previous menu.
 
 -----
+
+## Main Menu Options Explained
+
+  * **1. Configure a New Tunnel**: Launches a wizard to create a new client or server tunnel with a specific protocol.
+  * **2. Manage Existing Tunnels**: Allows you to view, control, monitor, edit, and delete any tunnel you have previously configured.
+  * **3. Update/Re-install Backhaul Binary**: Downloads the latest version of the core `backhaul` binary from GitHub and replaces the current one.
+  * **4. Uninstall EasyBackhaul**: This option completely and irreversibly removes the Backhaul binary and all related configurations, services, backups, and cron jobs managed by this script.
+  * **0. Exit**: Exits the EasyBackhaul script.
+
+## EasyBackhaul Script Features
+
+  * **One-Line Installer**: Get up and running in seconds.
+  * **Guided Configuration**: An interactive wizard for creating server or client tunnels.
+  * **Automatic Dependency Checks**: Installs required dependencies like `curl`, `jq`, and `ss`.
+  * **Systemd Service Management**: Automatically creates and manages `systemd` services for reliability.
+  * **Port Conflict Detection**: Prevents creating a service on an occupied port.
+  * **UFW Integration**: Automatically manages UFW firewall rules.
+  * **Configuration Backups**: Automatically backs up configs before edits.
+  * **Connection Testing**: A built-in function to help diagnose connection issues.
+  * **Cron Job Management**: Set up custom auto-restart cron jobs to ensure uptime.
+
+## About the Core Backhaul Project
+
+Backhaul is a high-performance reverse tunneling solution optimized for handling massive concurrent connections through NATs and firewalls.
+
+## Credits
+
+  * **Core Backhaul Project**: **Musixal**
+  * **EasyBackhaul Installer Script**: **[@N4Xon (NaxonM)](https://www.google.com/search?q=https://github.com/NaxonM)** (Telegram: @N4Xon)
 
 ## License
 
