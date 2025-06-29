@@ -1,83 +1,112 @@
-# Backhaul (Linux Usability Fork)
+# EasyBackhaul: The User-Friendly Backhaul Installer & Manager
 
-This repository is a Linux‑first fork of the original Backhaul reverse tunneling project. It is maintained by Mehdi Bazyar and focuses on easy installation and management on Linux systems. Windows support and NSSM helpers have been removed.
+Welcome to `EasyBackhaul`, a user-friendly and powerful management script for the **[Backhaul](https://github.com/Musixal/Backhaul)** reverse tunneling solution. This script simplifies the installation, configuration, and day-to-day management of Backhaul, making it accessible to everyone.
 
-## Key Improvements
+This script, developed by **@N4Xon**, provides a menu-driven interface to manage the core Backhaul reverse tunnel, which was developed by **Musixal**.
 
-- **Guided installer**: `install.sh` installs missing dependencies, helps you build from source or use a local/remote binary, and sets up systemd automatically.
-- **Interactive manager**: `backhaul-manager.sh` offers menus for service control, safe upgrades and a configuration wizard.
-- **TLS utilities and monitoring**: helper scripts simplify certificate generation and include cron‑based tunnel watchdogs.
+-----
 
-## Quick Start
+## About the Core Backhaul Project
+
+Backhaul is a high-performance reverse tunneling solution optimized for handling massive concurrent connections through NATs and firewalls.
+
+### Core Features
+
+  * **High Performance**: Optimized for handling massive concurrent connections efficiently.
+  * **Protocol Flexibility**: Supports TCP, UDP, WebSocket (WS), and Secure WebSocket (WSS) transports.
+  * **Multiplexing**: Enables multiple connections over a single transport with SMUX for greater efficiency.
+  * **NAT & Firewall Bypass**: Overcomes network restrictions with robust reverse tunneling.
+  * **TLS Encryption**: Secures connections via WSS with support for custom TLS certificates.
+
+-----
+
+## EasyBackhaul Script Features
+
+The `EasyBackhaul` script automates the entire lifecycle of your Backhaul tunnels with an easy-to-use wizard.
+
+  * **One-Line Installer**: Get up and running in seconds.
+  * **Guided Configuration**: An interactive wizard walks you through creating new server or client tunnels for all supported protocols (TCP, UDP, WS, WSS, and multiplexed variants).
+  * **Automatic Dependency Checks**: The script automatically checks for and installs required dependencies like `curl`, `jq`, and `ss`.
+  * **Systemd Service Management**: Automatically creates, enables, and manages `systemd` services for each tunnel, ensuring they run reliably in the background.
+  * **Port Conflict Detection**: Prevents you from creating a new tunnel on a port that is already in use.
+  * **UFW Integration**: Automatically manages UFW firewall rules for your server tunnels.
+  * **Full Management Menu**: A comprehensive menu to manage existing tunnels:
+      * Start, Stop, and Restart services.
+      * View live logs (`journalctl`).
+      * View and edit tunnel configuration files with `nano`.
+      * Perform connection tests to diagnose issues.
+  * **Configuration Backups**: Automatically backs up a configuration file before any edits are made.
+  * **Cron Job Management**: Set up custom auto-restart cron jobs for any tunnel to ensure maximum uptime.
+  * **Simple Updates & Uninstallation**: Update the Backhaul binary or completely remove all traces of EasyBackhaul from your system with simple menu options.
+
+-----
+
+## Installation
+
+You can install and run EasyBackhaul with a single command. The script requires `root` or `sudo` privileges to run.
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/MehdiBazyar99/Backhaul/main/scripts/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/MehdiBazyar99/EasyBackhaul/main/easybackhaul.sh)
 ```
 
-The installer detects your architecture, installs the `backhaul` binary, creates `/etc/backhaul/config.toml`, and enables a `backhaul.service` systemd unit. It offers prompts for bind ports, tokens, transport type, and web UI port so the defaults can be customized during setup.
+The script will first check for the Backhaul binary. If it's not found, it will automatically download the latest version from the official GitHub repository.
 
-Backhaul automatically applies recommended defaults for the selected mode (server or client). You can further adjust settings at any time.
+## Usage
 
-### Installation options
+After installation, run the script again using the same command to bring up the main menu.
 
-The installer works even when release binaries are not available. It automatically installs missing dependencies such as `git` and the Go compiler. When run it will prompt you to choose one of the following methods:
-
-1. **Build from source** – clones this repository and compiles `backhaul` with Go.
-2. **Use an existing binary** – provide the path to a previously built `backhaul` executable.
-3. **Download a tarball** – supply a URL to a `.tar.gz` archive that contains the binary.
-
-All required helper scripts and the manager are downloaded automatically.
-
-## Configuration
-
-Configuration lives in `/etc/backhaul/config.toml`. Both server and client sections are present with sensible defaults. Run `backhaul-manager.sh` and choose **Edit config** or edit the file manually to tweak options.
-
-Example snippet:
-
-```toml
-[server]
-bind_addr = "0.0.0.0:3080"
-transport = "tcp"
-
-[client]
-remote_addr = "0.0.0.0:3080"
-transport = "tcp"
+```
+      EasyBackhaul Installer & Management Menu (v12.4)
+================================================================
+  Core by Musixal  |  Installer by @N4Xon
+----------------------------------------------------------------
+ 1. Configure a New Tunnel
+ 2. Manage Existing Tunnels
+ 3. Update/Re-install Backhaul Binary
+ 4. Uninstall EasyBackhaul (Removes binary and ALL configs)
+ 0. Exit
+----------------------------------------------------------------
 ```
 
-After editing, restart the service with `sudo systemctl restart backhaul.service` or use the manager menu.
+### 1\. Configure a New Tunnel
 
-## Example: Tunneling Between Two Servers
+This option launches the **New Tunnel Configuration Wizard**. It will guide you step-by-step:
 
-1. **On the server (A)** run the installer and choose `server` mode. Note the public IP displayed at the end of the installation.
-2. **On the client (B)** run the installer and choose `client` mode. When prompted for the server address, enter the IP of server A.
-3. Start the service on both machines with `sudo systemctl start backhaul.service` (the installer enables it automatically).
-4. Verify connectivity using `backhaul-manager.sh` on either side and check the status.
+1.  **Select Mode**: Choose whether this machine will be a `server` (listens for connections) or a `client` (connects to a server).
+2.  **Select Transport**: Pick the protocol for your tunnel (e.g., `tcp`, `wss`, `tcpmux`).
+3.  **Enter Configuration**: Provide necessary details like IP addresses, ports, and a secure token. The script validates your input and checks for port availability.
+4.  **Advanced Options**: Fine-tune advanced parameters like keep-alive periods, connection pools, and multiplexing settings, or just accept the sensible defaults.
+5.  **Confirmation**: Review the generated configuration and confirm. The script then creates the config file, sets up the firewall rule (if on a server), and creates/starts the `systemd` service.
 
-## Using the Manager
+All configuration files are stored in `/etc/backhaul/`.
 
-Run `sudo backhaul-manager.sh` to open the interactive menu. Options include:
+### 2\. Manage Existing Tunnels
 
-- Start/stop/restart and view logs
-- Regenerate TLS certificates
-- Choose common transport presets
-- Backup or restore configuration
-- Launch a configuration wizard for adjusting ports, tokens and transport
-- Perform safe upgrades by providing a new binary path or URL
-- Enable a cron watchdog that restarts the service if the tunnel stops
-The **Advanced** submenu provides tools to backup/restore configs, apply recommended defaults and start the configuration wizard at any time.
+This menu lists all Backhaul services running on your system, showing their current status (Active/Inactive). Selecting a service opens the management menu for that specific tunnel, where you can:
 
-The banner shows your public IP, geolocation and web UI port if configured.
+  * **Control the Service**: Start, stop, or restart.
+  * **Monitor**: View its real-time logs or check its detailed status.
+  * **Configure**: View the current configuration or edit it directly using `nano`. The script will offer to restart the service to apply changes.
+  * **Test Connection**: Run a basic connectivity test to help troubleshoot issues.
+  * **Set Cron Job**: Create a scheduled task to automatically restart the service at a chosen interval.
+  * **Delete**: Permanently remove the service, its configuration file, and its associated firewall rule.
 
-## Troubleshooting
+### 3\. Update/Re-install Backhaul Binary
 
-- Logs are available via `journalctl -u backhaul.service`.
-- Backup files reside in `/etc/backhaul/backup/`.
-- If upgrades fail, the manager automatically rolls back to the previous binary and config.
+This option fetches the latest version of the `Backhaul` binary from the GitHub releases page and installs it to `/usr/local/bin/backhaul`.
 
-## About this fork
+### 4\. Uninstall EasyBackhaul
 
-This repository drops all Windows support from the original project and focuses on automation on Linux. Advanced configuration remains available via the manager menus or by editing `config.toml`.
+This is a destructive action that completely removes EasyBackhaul and all related components from your system. It will:
+
+  * Stop and disable all `backhaul-*.service` units.
+  * Delete the Backhaul binary (`/usr/local/bin/backhaul`).
+  * Remove all configuration and backup files (`/etc/backhaul/`).
+  * Delete all Backhaul systemd service files.
+  * Remove all related cron jobs.
+
+-----
 
 ## License
 
-Backhaul is released under the AGPL‑v3 license.
+The core Backhaul project is licensed under the AGPL-3.0 license.
