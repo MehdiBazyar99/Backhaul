@@ -5,7 +5,7 @@
 # Version: 12.5 (Line Ending Fix)
 #
 # Core Backhaul Development: Musixal
-# Installer Script by: @N4Xon (https://github.com/MehdiBazyar99/EasyBackhaul)
+# Installer Script by: @N4Xon (https://github.com/NaxonM/EasyBackhaul)
 #
 # A user-friendly script to install, configure, and manage the
 # Backhaul reverse tunneling solution.
