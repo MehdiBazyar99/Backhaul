@@ -15,7 +15,7 @@
 برای نصب و اجرای اسکریپت، تنها کافیست دستور زیر را در ترمینال خود وارد کنید. توجه داشته باشید که برای اجرای این اسکریپت به دسترسی `root` یا `sudo` نیاز دارید.
 
 ```bash
-bash <(curl -Ls [https://raw.githubusercontent.com/NaxonM/EasyBackhaul/main/EasyBackhaul.sh](https://raw.githubusercontent.com/NaxonM/EasyBackhaul/main/EasyBackhaul.sh))
+bash <(curl -Ls https://raw.githubusercontent.com/NaxonM/EasyBackhaul/main/EasyBackhaul.sh)
 ````
 
 اسکریپت ابتدا بررسی می‌کند که آیا برنامه اصلی Backhaul نصب شده است یا خیر. در غیر این صورت، جدیدترین نسخه را به صورت خودکار از مخزن رسمی گیت‌هاب دانلود و نصب می‌کند.
