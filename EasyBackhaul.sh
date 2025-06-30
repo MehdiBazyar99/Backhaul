@@ -2,7 +2,7 @@
 
 # ==============================================================================
 # EasyBackhaul Installer & Management Script
-# Version: 12.9 (Final & Hardened)
+# Version: 13.0 (Final & Hardened)
 #
 # Core Backhaul Development: Musixal
 # Installer Script by: @N4Xon (https://github.com/MehdiBazyar99/EasyBackhaul)
@@ -12,11 +12,11 @@
 # ==============================================================================
 #
 # CHANGELOG:
-# - FIXED: Corrected logic for Coordinated Restart to ensure signals are sent.
-# - ADDED: "Test Self-Healing" function to verify the coordinated restart channel.
+# - FIXED: Critical bug in "Test Self-Healing" function; variables are now parsed correctly.
+# - FIXED: Removed double "Press any key to continue" prompt after monitor setup.
+# - FIXED: Hardened cron job removal logic to prevent accidental deletion.
 # - ADDED: User-configurable interval for the error monitor cron job.
-# - ADDED: Hardened validation for user input during monitor setup.
-# - ADDED: Re-engineered Coordinated Restart to be fully bidirectional.
+# - ADDED: Bidirectional Coordinated Restart feature.
 # - FIXED: `systemctl list-unit-files` for reliable service listing.
 # - ADDED: Port conflict detection and numeric validation for MUX parameters.
 # ==============================================================================
@@ -29,7 +29,6 @@ LISTENER_DIR="/etc/backhaul/listeners"
 BIN_PATH="/usr/local/bin/backhaul"
 SERVICE_DIR="/etc/systemd/system"
 UFW_METADATA_FILE="/etc/backhaul/ufw_rules.meta"
-CRON_RESTART_TAG="easybackhaul-restart"
 MONITOR_LOG="/var/log/easybackhaul-monitor.log"
 CRON_MONITOR_TAG="easybackhaul-monitor"
 
@@ -599,16 +598,17 @@ manage_error_monitor_menu() {
 
         echo
         echo " 1. Configure / Re-Configure Monitor"
-        echo " 2. Test Coordinated Restart Signal"
+        echo " 2. Test Self-Healing Signal"
         echo " 3. Disable Monitor"
         echo " 4. View Monitor Log"
         echo " 0. Back to Tunnel Menu"
         read -p "Enter choice [0-4]: " choice
 
         case $choice in
-            1) enable_error_monitor "$service"; break;;
+            1) enable_error_monitor "$service";;
             2) test_coordinated_restart "$service"; press_any_key;;
-            3) disable_error_monitor "$service"; break;;
+            3) disable_error_monitor "$service";;
+            0) return;;
             4) 
                 if [ -f "$MONITOR_LOG" ]; then
                     less "$MONITOR_LOG"
@@ -617,11 +617,9 @@ manage_error_monitor_menu() {
                     press_any_key
                 fi
                 ;;
-            0) return;;
             *) print_warning "Invalid choice.";;
         esac
     done
-    press_any_key
 }
 
 enable_error_monitor() {
@@ -635,7 +633,6 @@ enable_error_monitor() {
     if [[ "${enable_coord:-y}" == "y" ]]; then
         print_warning "This requires setup on BOTH the client and server."
         
-        # 1. Configure this machine to LISTEN for restart signals
         print_info "\n--- [Step 1/2] Configuring LOCAL Listener ---"
         local shared_key
         while true; do
@@ -644,7 +641,6 @@ enable_error_monitor() {
         done
         setup_restart_listener "$service" "$shared_key"
         
-        # 2. Configure this machine to SEND restart signals
         print_info "\n--- [Step 2/2] Configuring REMOTE Trigger ---"
         local remote_ip remote_port
         while true; do
@@ -686,10 +682,11 @@ EOF
     chmod +x "$monitor_script_path"
     
     remove_cron_job "$service" "$CRON_MONITOR_TAG"
-    local cron_job="*/$interval * * * * $monitor_script_path # $CRON_MONITOR_TAG"
-    (crontab -l 2>/dev/null; echo "$cron_job") | crontab -
+    local cron_job="*/$interval * * * * $monitor_script_path"
+    (crontab -l 2>/dev/null; echo "$cron_job # $CRON_MONITOR_TAG for $service") | crontab -
     
     print_success "Monitor enabled. It will check for errors every $interval minutes."
+    press_any_key
 }
 
 disable_error_monitor() {
@@ -706,6 +703,7 @@ disable_error_monitor() {
     disable_restart_listener "$service"
     
     print_success "Monitor disabled successfully."
+    press_any_key
 }
 
 # --- Coordinated Restart Listener ---
@@ -803,9 +801,15 @@ test_coordinated_restart() {
         return
     fi
 
-    # Source the variables from the monitor script
-    source "$monitor_script_path"
+    # FIXED: Robustly parse variables from the monitor script instead of sourcing
+    local REMOTE_IP=$(grep "REMOTE_IP=" "$monitor_script_path" | cut -d'"' -f2)
+    local REMOTE_LISTENER_PORT=$(grep "REMOTE_LISTENER_PORT=" "$monitor_script_path" | cut -d'"' -f2)
 
+    if [ -z "$REMOTE_IP" ] || [ -z "$REMOTE_LISTENER_PORT" ]; then
+        print_error "Could not parse remote peer details from monitor script."
+        return
+    fi
+    
     print_info "Sending TEST signal to $REMOTE_IP on port $REMOTE_LISTENER_PORT..."
     if echo "TEST_SIGNAL" | nc -w 5 "$REMOTE_IP" "$REMOTE_LISTENER_PORT"; then
         print_success "Test signal sent successfully."
@@ -817,10 +821,9 @@ test_coordinated_restart() {
 
 remove_cron_job() {
     local service_pattern=$1 tag=$2
-    # This safer grep pattern removes only the specific line for the service and tag
-    if crontab -l 2>/dev/null | grep -q " $service_pattern # $tag"; then
-       (crontab -l 2>/dev/null | grep -v " $service_pattern # $tag") | crontab -
-       print_success "Cron job for ${service_pattern} with tag ${tag} removed."
+    if crontab -l 2>/dev/null | grep -q "for $service_pattern"; then
+       (crontab -l 2>/dev/null | grep -v "for $service_pattern") | crontab -
+       print_success "Cron job for ${service_pattern} removed."
     fi
 }
 
@@ -828,7 +831,7 @@ remove_cron_job() {
 main_menu() {
     clear
     get_server_info
-    print_info "      EasyBackhaul Installer & Management Menu (v12.9)"
+    print_info "      EasyBackhaul Installer & Management Menu (v13.0)"
     print_info "================================================================"
     print_info "  Core by Musixal  |  Installer by @N4Xon"
     print_info "----------------------------------------------------------------"
