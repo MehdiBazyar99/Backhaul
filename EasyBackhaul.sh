@@ -2,7 +2,7 @@
 
 # ==============================================================================
 # EasyBackhaul Installer & Management Script
-# Version: 12.6 (Auto-Restart Monitor)
+# Version: 12.7 (Coordinated Restart)
 #
 # Core Backhaul Development: Musixal
 # Installer Script by: @N4Xon (https://github.com/MehdiBazyar99/EasyBackhaul)
@@ -12,22 +12,21 @@
 # ==============================================================================
 #
 # CHANGELOG:
-# - ADDED: Auto-Restart Monitor feature to watch for errors and restart services.
-# - ADDED: Option to enable the monitor after tunnel creation.
-# - ADDED: Menu to manage the monitor for each service (enable/disable/view log).
-# - FIXED: Converted all line endings to Unix (LF) format to fix execution errors.
-# - FIXED: Switched to `systemctl list-unit-files` for reliable service listing.
-# - ADDED: Port conflict detection to prevent service creation on an occupied port.
-# - ADDED: Numeric validation for multiplexing (MUX) parameters.
-# - FIXED: Enforced universal '0' as the back/exit option in all interactive menus.
-# - FIXED: Set 600 permissions on all new config files.
-# - FIXED: Added timeouts and retries to network operations (curl/wget).
+# - ADDED: "Coordinated Restart" feature for client to trigger server restart.
+# - ADDED: Secure netcat listener service on server-side for restart commands.
+# - ADDED: Client-side monitor now sends restart signal to server on error.
+# - ADDED: UI integration for setting up Coordinated Restart.
+# - FIXED: Converted all line endings to Unix (LF) format.
+# - FIXED: `systemctl list-unit-files` for reliable service listing.
+# - ADDED: Port conflict detection.
+# - ADDED: Numeric validation for MUX parameters.
 # ==============================================================================
 
 # --- Global Variables ---
 CONFIG_DIR="/etc/backhaul"
 BACKUP_DIR="/etc/backhaul/backup"
 MONITOR_DIR="/etc/backhaul/monitors"
+LISTENER_DIR="/etc/backhaul/listeners"
 BIN_PATH="/usr/local/bin/backhaul"
 SERVICE_DIR="/etc/systemd/system"
 UFW_METADATA_FILE="/etc/backhaul/ufw_rules.meta"
@@ -358,7 +357,7 @@ configure_new_tunnel() {
 
     read -p "Enable Auto-Restart Monitor for this service? (Recommended) (y/n) [y]: " enable_monitor
     if [[ "${enable_monitor:-y}" == "y" ]]; then
-        enable_error_monitor "$service_name"
+        manage_error_monitor_menu "$service_name"
     fi
 }
 
@@ -530,11 +529,12 @@ manage_single_tunnel() {
                     print_warning "Stopping and disabling service..."
                     systemctl stop "$service" &>/dev/null
                     systemctl disable "$service" &>/dev/null
+                    disable_error_monitor "$service" # Also removes monitor script and cron job
+                    disable_restart_listener "$service" # Also removes listener service
                     print_warning "Removing files and related cron jobs..."
                     rm -f "$config_file" "$SERVICE_DIR/$service"
                     manage_ufw_delete "$suffix"
                     remove_cron_job "$service" "$CRON_RESTART_TAG"
-                    disable_error_monitor "$service" # This also removes the cron job
                     systemctl daemon-reload
                     print_success "Service $service and associated files have been deleted."
                     press_any_key
@@ -628,12 +628,12 @@ set_cron_job() {
 }
 
 remove_cron_job() {
-    local service=$1 tag=$2
-    if crontab -l 2>/dev/null | grep -q "$service" | grep -q "$tag"; then
-       (crontab -l | grep -v "$service" | grep -v "$tag") | crontab -
-       print_success "Cron job for $service with tag $tag removed."
-    fi
+    local service_pattern=$1 tag=$2
+    # Use a different delimiter for sed to handle the service name safely
+    (crontab -l 2>/dev/null | sed "\#${service_pattern}#d" | sed "\#${tag}#d") | crontab -
+    print_success "Cron job for ${service_pattern} with tag ${tag} removed."
 }
+
 
 # --- Auto-Restart Monitor (on Error) ---
 manage_error_monitor_menu() {
@@ -646,6 +646,9 @@ manage_error_monitor_menu() {
 
         if [ -f "$monitor_script_path" ]; then
             print_success "Monitor Status: ENABLED"
+            if grep -q "COORDINATED_RESTART_KEY" "$monitor_script_path"; then
+                print_info "  -> Coordinated Restart: ENABLED"
+            fi
         else
             print_warning "Monitor Status: DISABLED"
         fi
@@ -678,25 +681,51 @@ manage_error_monitor_menu() {
 enable_error_monitor() {
     local service=$1
     local monitor_script_path="$MONITOR_DIR/monitor_${service}.sh"
-
+    
     print_info "--> Enabling error monitor for $service..."
     
-    # Create the monitor script
+    local is_client=false
+    [[ $service == *"client"* ]] && is_client=true
+
+    local coordinated_restart_vars=""
+    if $is_client; then
+        read -p "Enable Coordinated Restart (client triggers server restart)? (y/n) [n]: " enable_coord
+        if [[ "${enable_coord,,}" == "y" ]]; then
+            local server_ip server_port restart_key
+            read -p "Enter the server's public IP address: " server_ip
+            read -p "Enter the server's restart listener port: " server_port
+            read -p "Enter the secret restart key: " restart_key
+            coordinated_restart_vars="SERVER_IP=\"$server_ip\"\nLISTENER_PORT=\"$server_port\"\nCOORDINATED_RESTART_KEY=\"$restart_key\""
+        fi
+    else # is server
+        read -p "Enable Coordinated Restart (listen for client trigger)? (y/n) [n]: " enable_coord
+        if [[ "${enable_coord,,}" == "y" ]]; then
+            setup_restart_listener "$service"
+        fi
+    fi
+
     cat > "$monitor_script_path" << EOF
 #!/bin/bash
 SERVICE_NAME="$service"
 LOG_FILE="$MONITOR_LOG"
+$coordinated_restart_vars
+
 # Check for error keywords in the last 5 log lines for the specific service
-if journalctl -u \$SERVICE_NAME -n 5 --no-pager | grep -E -i 'ERROR|failed|invalid token'; then
+if journalctl -u \$SERVICE_NAME -n 5 --no-pager | grep -E -i 'ERROR|failed|invalid token|connection reset'; then
     echo "\$(date): Detected error in \$SERVICE_NAME logs. Restarting service..." >> \$LOG_FILE
     systemctl restart \$SERVICE_NAME
+    
+    # If coordinated restart is configured, send signal to server
+    if [ -n "\$COORDINATED_RESTART_KEY" ]; then
+        echo "\$(date): Sending restart signal to server \$SERVER_IP:\$LISTENER_PORT" >> \$LOG_FILE
+        echo "\$COORDINATED_RESTART_KEY" | nc -w 5 \$SERVER_IP \$LISTENER_PORT
+    fi
 fi
 EOF
 
     chmod +x "$monitor_script_path"
     
-    # Add cron job for the monitor script
-    remove_cron_job "$service" "$CRON_MONITOR_TAG" # Remove old one if exists
+    remove_cron_job "$service" "$CRON_MONITOR_TAG"
     local cron_job="*/3 * * * * $monitor_script_path # $CRON_MONITOR_TAG"
     (crontab -l 2>/dev/null; echo "$cron_job") | crontab -
     
@@ -708,23 +737,104 @@ disable_error_monitor() {
     local monitor_script_path="$MONITOR_DIR/monitor_${service}.sh"
 
     print_info "--> Disabling error monitor for $service..."
-    
-    # Remove cron job
     remove_cron_job "$service" "$CRON_MONITOR_TAG"
     
-    # Remove monitor script
     if [ -f "$monitor_script_path" ]; then
         rm -f "$monitor_script_path"
     fi
+
+    # Also disable the listener if it's a server service
+    if [[ $service == *"server"* ]]; then
+        disable_restart_listener "$service"
+    fi
     
     print_success "Monitor disabled successfully."
+}
+
+# --- Coordinated Restart Listener (Server-Side) ---
+setup_restart_listener() {
+    local target_service=$1
+    local listener_port restart_key listener_service_name
+    listener_service_name="bh-listener-for-$(echo $target_service | sed 's/\.service//').service"
+    
+    print_info "--- Setting up Coordinated Restart Listener ---"
+    while true; do
+        read -p "Enter a high port for the listener (e.g., 48123): " listener_port
+        if ! validate_port "$listener_port"; then
+            print_warning "Invalid port."
+        elif ! check_port_availability "$listener_port"; then
+            continue
+        else
+            break
+        fi
+    done
+    read -p "Enter a secret key the client must send to trigger a restart: " restart_key
+    
+    local listener_script_path="$LISTENER_DIR/$(basename $listener_service_name .service).sh"
+    cat > "$listener_script_path" << EOF
+#!/bin/bash
+TARGET_SERVICE="$target_service"
+RESTART_KEY="$restart_key"
+LOG_FILE="$MONITOR_LOG"
+
+while true; do
+    command=\$(nc -l -p $listener_port)
+    if [ "\$command" == "\$RESTART_KEY" ]; then
+        echo "\$(date): Received valid restart signal for \$TARGET_SERVICE. Restarting..." >> \$LOG_FILE
+        systemctl restart \$TARGET_SERVICE
+    else
+        echo "\$(date): Received invalid restart signal on port $listener_port." >> \$LOG_FILE
+    fi
+done
+EOF
+    chmod +x "$listener_script_path"
+
+    cat > "$SERVICE_DIR/$listener_service_name" << EOL
+[Unit]
+Description=Backhaul Restart Listener for $target_service
+After=network.target
+
+[Service]
+ExecStart=$listener_script_path
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+    systemctl daemon-reload
+    systemctl enable --now "$listener_service_name"
+    manage_ufw_add "$listener_port" "tcp" "$(basename $listener_service_name .service)"
+    
+    print_success "Listener service '$listener_service_name' created and started."
+    print_warning "IMPORTANT: You must provide the client with port '$listener_port' and the secret key."
+}
+
+disable_restart_listener() {
+    local target_service=$1
+    local listener_service_name="bh-listener-for-$(echo $target_service | sed 's/\.service//').service"
+    
+    if systemctl list-unit-files | grep -q "$listener_service_name"; then
+        print_info "--> Disabling and removing listener for $target_service..."
+        systemctl disable --now "$listener_service_name" &>/dev/null
+        rm -f "$SERVICE_DIR/$listener_service_name"
+        rm -f "$LISTENER_DIR/$(basename $listener_service_name .service).sh"
+        # Extract port from listener script to remove UFW rule
+        local listener_port=$(grep 'nc -l -p' "$LISTENER_DIR/$(basename $listener_service_name .service).sh" | awk '{print $4}')
+        if [ -n "$listener_port" ]; then
+             manage_ufw_delete "$(basename $listener_service_name .service)"
+        fi
+        systemctl daemon-reload
+        print_success "Listener service disabled."
+    fi
 }
 
 # --- Main Menu Logic ---
 main_menu() {
     clear
     get_server_info
-    print_info "      EasyBackhaul Installer & Management Menu (v12.6)"
+    print_info "      EasyBackhaul Installer & Management Menu (v12.7)"
     print_info "================================================================"
     print_info "  Core by Musixal  |  Installer by @N4Xon"
     print_info "----------------------------------------------------------------"
@@ -744,12 +854,12 @@ main_menu() {
            read -p "This will REMOVE the binary and ALL configs/services. This is irreversible. Are you sure? (y/n): " confirm
            if [[ "${confirm,,}" == "y" ]]; then
                 print_warning "Stopping and disabling all backhaul services..."
-                systemctl stop backhaul-*.service &>/dev/null
-                systemctl disable backhaul-*.service &>/dev/null
+                systemctl stop backhaul-*.service bh-listener-*.service &>/dev/null
+                systemctl disable backhaul-*.service bh-listener-*.service &>/dev/null
                 print_warning "Removing all related files..."
                 rm -f "$BIN_PATH"
-                rm -rf "$CONFIG_DIR" # Also removes monitor scripts inside
-                rm -f "$SERVICE_DIR"/backhaul-*.service
+                rm -rf "$CONFIG_DIR" # Also removes monitor/listener scripts inside
+                rm -f "$SERVICE_DIR"/backhaul-*.service "$SERVICE_DIR"/bh-listener-*.service
                 (crontab -l 2>/dev/null | grep -v "$CRON_RESTART_TAG" | grep -v "$CRON_MONITOR_TAG") | crontab -
                 systemctl daemon-reload
                 print_success "EasyBackhaul has been completely uninstalled."
@@ -764,7 +874,7 @@ main_menu() {
 # --- Script Execution ---
 check_root
 check_dependencies
-mkdir -p "$CONFIG_DIR" "$BACKUP_DIR" "$MONITOR_DIR"
+mkdir -p "$CONFIG_DIR" "$BACKUP_DIR" "$MONITOR_DIR" "$LISTENER_DIR"
 touch "$MONITOR_LOG"
 chmod 666 "$MONITOR_LOG"
 
