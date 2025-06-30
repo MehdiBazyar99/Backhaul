@@ -2,7 +2,7 @@
 
 # ==============================================================================
 # EasyBackhaul Installer & Management Script
-# Version: 12.7 (Coordinated Restart)
+# Version: 12.8 (Bidirectional Coordinated Restart)
 #
 # Core Backhaul Development: Musixal
 # Installer Script by: @N4Xon (https://github.com/MehdiBazyar99/EasyBackhaul)
@@ -12,11 +12,9 @@
 # ==============================================================================
 #
 # CHANGELOG:
-# - ADDED: "Coordinated Restart" feature for client to trigger server restart.
-# - ADDED: Secure netcat listener service on server-side for restart commands.
-# - ADDED: Client-side monitor now sends restart signal to server on error.
-# - ADDED: UI integration for setting up Coordinated Restart.
-# - FIXED: Converted all line endings to Unix (LF) format.
+# - ADDED: Re-engineered Coordinated Restart to be fully bidirectional.
+# - ADDED: Both client and server can now trigger and receive restart signals.
+# - ADDED: Unified setup process for the monitor on both client and server.
 # - FIXED: `systemctl list-unit-files` for reliable service listing.
 # - ADDED: Port conflict detection.
 # - ADDED: Numeric validation for MUX parameters.
@@ -529,8 +527,7 @@ manage_single_tunnel() {
                     print_warning "Stopping and disabling service..."
                     systemctl stop "$service" &>/dev/null
                     systemctl disable "$service" &>/dev/null
-                    disable_error_monitor "$service" # Also removes monitor script and cron job
-                    disable_restart_listener "$service" # Also removes listener service
+                    disable_error_monitor "$service"
                     print_warning "Removing files and related cron jobs..."
                     rm -f "$config_file" "$SERVICE_DIR/$service"
                     manage_ufw_delete "$suffix"
@@ -629,9 +626,10 @@ set_cron_job() {
 
 remove_cron_job() {
     local service_pattern=$1 tag=$2
-    # Use a different delimiter for sed to handle the service name safely
-    (crontab -l 2>/dev/null | sed "\#${service_pattern}#d" | sed "\#${tag}#d") | crontab -
-    print_success "Cron job for ${service_pattern} with tag ${tag} removed."
+    if crontab -l 2>/dev/null | grep -q "$service_pattern" | grep -q "$tag"; then
+       (crontab -l | grep -v "$service_pattern" | grep -v "$tag") | crontab -
+       print_success "Cron job for ${service_pattern} with tag ${tag} removed."
+    fi
 }
 
 
@@ -684,24 +682,23 @@ enable_error_monitor() {
     
     print_info "--> Enabling error monitor for $service..."
     
-    local is_client=false
-    [[ $service == *"client"* ]] && is_client=true
-
     local coordinated_restart_vars=""
-    if $is_client; then
-        read -p "Enable Coordinated Restart (client triggers server restart)? (y/n) [n]: " enable_coord
-        if [[ "${enable_coord,,}" == "y" ]]; then
-            local server_ip server_port restart_key
-            read -p "Enter the server's public IP address: " server_ip
-            read -p "Enter the server's restart listener port: " server_port
-            read -p "Enter the secret restart key: " restart_key
-            coordinated_restart_vars="SERVER_IP=\"$server_ip\"\nLISTENER_PORT=\"$server_port\"\nCOORDINATED_RESTART_KEY=\"$restart_key\""
-        fi
-    else # is server
-        read -p "Enable Coordinated Restart (listen for client trigger)? (y/n) [n]: " enable_coord
-        if [[ "${enable_coord,,}" == "y" ]]; then
-            setup_restart_listener "$service"
-        fi
+    read -p "Enable Bidirectional Coordinated Restart? (y/n) [y]: " enable_coord
+    if [[ "${enable_coord:-y}" == "y" ]]; then
+        print_warning "This requires setup on BOTH the client and server."
+        
+        # 1. Configure this machine to LISTEN for restart signals
+        print_info "\n--- [Step 1/2] Configuring LOCAL Listener ---"
+        local shared_key
+        read -p "Enter a SHARED secret key for the restart signal: " shared_key
+        setup_restart_listener "$service" "$shared_key"
+        
+        # 2. Configure this machine to SEND restart signals
+        print_info "\n--- [Step 2/2] Configuring REMOTE Trigger ---"
+        local remote_ip remote_port
+        read -p "Enter the REMOTE peer's public IP address: " remote_ip
+        read -p "Enter the REMOTE peer's listener port: " remote_port
+        coordinated_restart_vars="REMOTE_IP=\"$remote_ip\"\nREMOTE_LISTENER_PORT=\"$remote_port\"\nCOORDINATED_RESTART_KEY=\"$shared_key\""
     fi
 
     cat > "$monitor_script_path" << EOF
@@ -715,10 +712,10 @@ if journalctl -u \$SERVICE_NAME -n 5 --no-pager | grep -E -i 'ERROR|failed|inval
     echo "\$(date): Detected error in \$SERVICE_NAME logs. Restarting service..." >> \$LOG_FILE
     systemctl restart \$SERVICE_NAME
     
-    # If coordinated restart is configured, send signal to server
+    # If coordinated restart is configured, send signal to the remote peer
     if [ -n "\$COORDINATED_RESTART_KEY" ]; then
-        echo "\$(date): Sending restart signal to server \$SERVER_IP:\$LISTENER_PORT" >> \$LOG_FILE
-        echo "\$COORDINATED_RESTART_KEY" | nc -w 5 \$SERVER_IP \$LISTENER_PORT
+        echo "\$(date): Sending restart signal to remote peer \$REMOTE_IP:\$REMOTE_LISTENER_PORT" >> \$LOG_FILE
+        echo "\$COORDINATED_RESTART_KEY" | nc -w 5 \$REMOTE_IP \$REMOTE_LISTENER_PORT
     fi
 fi
 EOF
@@ -743,10 +740,7 @@ disable_error_monitor() {
         rm -f "$monitor_script_path"
     fi
 
-    # Also disable the listener if it's a server service
-    if [[ $service == *"server"* ]]; then
-        disable_restart_listener "$service"
-    fi
+    disable_restart_listener "$service"
     
     print_success "Monitor disabled successfully."
 }
@@ -754,12 +748,12 @@ disable_error_monitor() {
 # --- Coordinated Restart Listener (Server-Side) ---
 setup_restart_listener() {
     local target_service=$1
-    local listener_port restart_key listener_service_name
+    local shared_key=$2
+    local listener_port listener_service_name
     listener_service_name="bh-listener-for-$(echo $target_service | sed 's/\.service//').service"
     
-    print_info "--- Setting up Coordinated Restart Listener ---"
     while true; do
-        read -p "Enter a high port for the listener (e.g., 48123): " listener_port
+        read -p "Enter a high, unused port for THIS machine's listener (e.g., 48123): " listener_port
         if ! validate_port "$listener_port"; then
             print_warning "Invalid port."
         elif ! check_port_availability "$listener_port"; then
@@ -768,13 +762,12 @@ setup_restart_listener() {
             break
         fi
     done
-    read -p "Enter a secret key the client must send to trigger a restart: " restart_key
     
     local listener_script_path="$LISTENER_DIR/$(basename $listener_service_name .service).sh"
     cat > "$listener_script_path" << EOF
 #!/bin/bash
 TARGET_SERVICE="$target_service"
-RESTART_KEY="$restart_key"
+RESTART_KEY="$shared_key"
 LOG_FILE="$MONITOR_LOG"
 
 while true; do
@@ -807,24 +800,29 @@ EOL
     systemctl enable --now "$listener_service_name"
     manage_ufw_add "$listener_port" "tcp" "$(basename $listener_service_name .service)"
     
-    print_success "Listener service '$listener_service_name' created and started."
-    print_warning "IMPORTANT: You must provide the client with port '$listener_port' and the secret key."
+    print_success "Listener service '$listener_service_name' created and started on port $listener_port."
+    print_warning "IMPORTANT: You must configure the REMOTE peer to send its signal to this port."
 }
 
 disable_restart_listener() {
     local target_service=$1
     local listener_service_name="bh-listener-for-$(echo $target_service | sed 's/\.service//').service"
+    local listener_script_path="$LISTENER_DIR/$(basename $listener_service_name .service).sh"
     
     if systemctl list-unit-files | grep -q "$listener_service_name"; then
         print_info "--> Disabling and removing listener for $target_service..."
         systemctl disable --now "$listener_service_name" &>/dev/null
-        rm -f "$SERVICE_DIR/$listener_service_name"
-        rm -f "$LISTENER_DIR/$(basename $listener_service_name .service).sh"
+        
         # Extract port from listener script to remove UFW rule
-        local listener_port=$(grep 'nc -l -p' "$LISTENER_DIR/$(basename $listener_service_name .service).sh" | awk '{print $4}')
-        if [ -n "$listener_port" ]; then
-             manage_ufw_delete "$(basename $listener_service_name .service)"
+        if [ -f "$listener_script_path" ]; then
+            local listener_port=$(grep 'nc -l -p' "$listener_script_path" | awk '{print $4}')
+            if [ -n "$listener_port" ]; then
+                 manage_ufw_delete "$(basename $listener_service_name .service)"
+            fi
         fi
+
+        rm -f "$SERVICE_DIR/$listener_service_name"
+        rm -f "$listener_script_path"
         systemctl daemon-reload
         print_success "Listener service disabled."
     fi
@@ -834,7 +832,7 @@ disable_restart_listener() {
 main_menu() {
     clear
     get_server_info
-    print_info "      EasyBackhaul Installer & Management Menu (v12.7)"
+    print_info "      EasyBackhaul Installer & Management Menu (v12.8)"
     print_info "================================================================"
     print_info "  Core by Musixal  |  Installer by @N4Xon"
     print_info "----------------------------------------------------------------"
