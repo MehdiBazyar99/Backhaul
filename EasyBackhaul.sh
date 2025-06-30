@@ -2,7 +2,7 @@
 
 # ==============================================================================
 # EasyBackhaul Installer & Management Script
-# Version: 13.1 (Final & Hardened)
+# Version: 12.5 (Line Ending Fix)
 #
 # Core Backhaul Development: Musixal
 # Installer Script by: @N4Xon (https://github.com/MehdiBazyar99/EasyBackhaul)
@@ -12,28 +12,28 @@
 # ==============================================================================
 #
 # CHANGELOG:
-# - FIXED: Critical bug in "Test Self-Healing" function; variables are now parsed correctly with awk.
-# - ADDED: Option in setup wizard to configure a simple periodic restart cron job.
-# - ADDED: Consolidated restart options under a new "Manage Auto-Restart Rules" menu.
-# - FIXED: Removed double "Press any key" prompt after monitor setup.
-# - FIXED: Hardened cron job removal logic to prevent accidental deletion.
-# - ADDED: User-configurable interval for the error monitor cron job.
-# - ADDED: Bidirectional Coordinated Restart feature.
-# - FIXED: `systemctl list-unit-files` for reliable service listing.
-# - ADDED: Port conflict detection and numeric validation for MUX parameters.
+# - FIXED: Converted all line endings to Unix (LF) format to fix execution errors.
+# - ADDED: Renamed to EasyBackhaul and added developer credits.
+# - FIXED: Switched to `systemctl list-unit-files` for reliable service listing.
+# - ADDED: Port conflict detection to prevent service creation on an occupied port.
+# - ADDED: Numeric validation for multiplexing (MUX) parameters.
+# - FIXED: Enforced universal '0' as the back/exit option in all interactive menus.
+# - FIXED: Set 600 permissions on all new config files.
+# - FIXED: Added timeouts and retries to network operations (curl/wget).
+# - ADDED: Transport-specific configuration for all protocols.
+# - ADDED: Option to edit existing tunnel configs with nano.
+# - ADDED: Automatic configuration backup before any edits.
+# - ADDED: Connection testing function.
+# - ADDED: Comprehensive cron job management menu.
 # ==============================================================================
 
 # --- Global Variables ---
 CONFIG_DIR="/etc/backhaul"
 BACKUP_DIR="/etc/backhaul/backup"
-MONITOR_DIR="/etc/backhaul/monitors"
-LISTENER_DIR="/etc/backhaul/listeners"
 BIN_PATH="/usr/local/bin/backhaul"
 SERVICE_DIR="/etc/systemd/system"
 UFW_METADATA_FILE="/etc/backhaul/ufw_rules.meta"
-MONITOR_LOG="/var/log/easybackhaul-monitor.log"
-CRON_MONITOR_TAG="easybackhaul-monitor"
-CRON_PERIODIC_RESTART_TAG="easybackhaul-periodic-restart"
+CRON_COMMENT_TAG="backhaul-installer" # Used to identify cron jobs managed by this script
 
 # --- Helper Functions ---
 print_info() { echo -e "\e[34m$1\e[0m"; }
@@ -55,6 +55,7 @@ check_dependencies() {
     local needs_install=()
     for cmd in curl wget tar jq nc ss; do
         if ! command -v $cmd &> /dev/null; then
+            # 'ss' is usually in 'iproute2' or 'iproute' package
             if [[ "$cmd" == "ss" ]]; then
                 needs_install+=("iproute2")
             else
@@ -170,6 +171,7 @@ configure_new_tunnel() {
     print_info "      New Tunnel Configuration Wizard"
     print_info "=========================================="
 
+    # --- Step 1: Mode ---
     local mode_choice
     while true; do
         echo
@@ -185,11 +187,13 @@ configure_new_tunnel() {
         esac
     done
 
+    # --- Step 2: Transport ---
     print_info "\nSelect transport protocol (see README for details):"
     select TRANSPORT in "tcp" "tcpmux" "udp" "ws" "wsmux" "wss" "wssmux"; do
         if [ -n "$TRANSPORT" ]; then break; else echo "Invalid option."; fi
     done
 
+    # --- Step 3: Basic Config ---
     print_info "\n--- Basic Configuration ---"
     local tunnel_port server_ip token forwarded_ports_input
     if [[ "$INSTALL_MODE" == "server" ]]; then
@@ -220,6 +224,7 @@ configure_new_tunnel() {
         [ -n "$token" ] && break || print_warning "Token cannot be empty."
     done
 
+    # --- Step 4: Transport-Specific & Advanced Config ---
     local log_level="info" nodelay="true" keepalive_period=75
     local heartbeat=40 connection_pool=8 retry_interval=3 dial_timeout=10
     local tls_cert="" tls_key="" edge_ip=""
@@ -277,6 +282,7 @@ configure_new_tunnel() {
         done
     fi
 
+    # --- Step 5: Build Config & Service ---
     local config_content service_name_suffix
     if [[ "$INSTALL_MODE" == "server" ]]; then
         service_name_suffix="server-${TRANSPORT}-${tunnel_port}"
@@ -333,6 +339,7 @@ configure_new_tunnel() {
         config_content+="mux_streambuffer = $mux_streambuffer\n"
     fi
 
+    # --- Step 6: Confirmation and Creation ---
     clear
     print_info "--- Configuration Summary ---"
     echo -e "$config_content"
@@ -353,18 +360,7 @@ configure_new_tunnel() {
         manage_ufw_add "$tunnel_port" "$TRANSPORT" "$service_name_suffix"
     fi
 
-    local service_name="backhaul-${service_name_suffix}.service"
-    create_systemd_service "$service_name" "$config_file"
-
-    read -p "Enable Self-Healing (Coordinated Restart) for this service? (Recommended) (y/n) [y]: " enable_monitor
-    if [[ "${enable_monitor:-y}" == "y" ]]; then
-        manage_error_monitor_menu "$service_name"
-    fi
-
-    read -p "Set up a simple periodic restart cron job? (Optional) (y/n) [n]: " enable_cron
-    if [[ "${enable_cron,,}" == "y" ]]; then
-        manage_simple_cron_menu "$service_name"
-    fi
+    create_systemd_service "$service_name_suffix" "$config_file"
 }
 
 manage_ufw_add() {
@@ -404,13 +400,13 @@ manage_ufw_delete() {
 }
 
 create_systemd_service() {
-    local service_name=$1 config_path=$2
-    local service_file="$SERVICE_DIR/$service_name"
+    local name_suffix=$1 config_path=$2
+    local service_file="$SERVICE_DIR/backhaul-${name_suffix}.service"
 
     print_info "--> Creating systemd service file: $service_file"
     cat > "$service_file" <<EOL
 [Unit]
-Description=Backhaul Service ($(basename "$service_name" .service))
+Description=Backhaul Service (${name_suffix})
 After=network.target
 
 [Service]
@@ -425,19 +421,19 @@ WantedBy=multi-user.target
 EOL
     systemctl daemon-reload
     print_info "--> Enabling and starting service..."
-    if ! systemctl enable "$service_name" >/dev/null 2>&1; then
+    if ! systemctl enable "backhaul-${name_suffix}.service" >/dev/null 2>&1; then
         print_error "Failed to enable service. Please check systemd logs."
         return 1
     fi
-    if ! systemctl start "$service_name"; then
-        print_error "Failed to start service. Check config and logs with 'journalctl -u $service_name'."
+    if ! systemctl start "backhaul-${name_suffix}.service"; then
+        print_error "Failed to start service. Check config and logs with 'journalctl -u backhaul-${name_suffix}.service'."
         return 1
     fi
-    print_success "Service $service_name created and started."
+    print_success "Service backhaul-${name_suffix}.service created and started."
 
     read -p "Check service status now? (y/n) [y]: " check_status
     if [[ "${check_status:-y}" == "y" ]]; then
-        systemctl status "$service_name" --no-pager
+        systemctl status "backhaul-${name_suffix}.service" --no-pager
     fi
 }
 
@@ -488,8 +484,10 @@ manage_single_tunnel() {
 
     while true; do
         clear
+        local status
+        status=$(systemctl is-active "$service")
         local status_text
-        if systemctl is-active --quiet "$service"; then
+        if [[ "$status" == "active" ]]; then
              status_text="\e[32mActive\e[0m"
         else
              status_text="\e[31mInactive\e[0m"
@@ -503,8 +501,8 @@ manage_single_tunnel() {
         echo " 5. View Logs (Live)"
         echo " 6. View Configuration"
         echo " 7. Edit Configuration (nano)"
-        echo " 8. Manage Auto-Restart Rules"
-        echo " 9. Test Connection"
+        echo " 8. Test Connection"
+        echo " 9. Manage Cron Auto-Restart"
         echo " 10. Delete Service"
         echo " 0. Back to Service List"
 
@@ -525,19 +523,18 @@ manage_single_tunnel() {
                 read -p "Restart service to apply changes? (y/n) [y]: " confirm_restart
                 if [[ "${confirm_restart:-y}" == "y" ]]; then systemctl restart "$service"; print_success "Service restarted."; fi
                 press_any_key;;
-            8) manage_restart_rules_menu "$service";;
-            9) test_connection "$config_file"; press_any_key;;
+            8) test_connection "$config_file"; press_any_key;;
+            9) manage_cron_menu "$service";;
             10) 
                 read -p "Are you sure you want to PERMANENTLY delete '$service' and its config? (y/n): " confirm_delete
                 if [[ "${confirm_delete,,}" == "y" ]]; then
                     print_warning "Stopping and disabling service..."
                     systemctl stop "$service" &>/dev/null
                     systemctl disable "$service" &>/dev/null
-                    disable_error_monitor "$service" # Disables monitor and listener
-                    remove_cron_job "$service" "$CRON_PERIODIC_RESTART_TAG"
                     print_warning "Removing files..."
                     rm -f "$config_file" "$SERVICE_DIR/$service"
                     manage_ufw_delete "$suffix"
+                    remove_cron_job "$service"
                     systemctl daemon-reload
                     print_success "Service $service and associated files have been deleted."
                     press_any_key
@@ -587,313 +584,64 @@ test_connection() {
     fi
 }
 
-# --- Auto-Restart Rules ---
-manage_restart_rules_menu() {
+manage_cron_menu() {
     local service=$1
     while true; do
         clear
-        print_info "--- Auto-Restart Rules for $service ---"
-        echo "Select the type of auto-restart to manage."
-        echo
-        echo "1. Self-Healing (on Error)"
-        echo "2. Simple Periodic Restart"
-        echo "0. Back to Tunnel Menu"
-        read -p "Enter choice [0-2]: " choice
-
-        case $choice in
-            1) manage_error_monitor_menu "$service";;
-            2) manage_simple_cron_menu "$service";;
-            0) return;;
-            *) print_warning "Invalid choice.";;
-        esac
-    done
-}
-
-manage_simple_cron_menu() {
-    local service=$1
-    while true; do
-        clear
-        print_info "--- Simple Periodic Restart for $service ---"
+        print_info "--- Cron Auto-Restart for $service ---"
         
         local current_job
-        current_job=$(crontab -l 2>/dev/null | grep "$service" | grep "$CRON_PERIODIC_RESTART_TAG")
+        current_job=$(crontab -l 2>/dev/null | grep "$service" | grep "$CRON_COMMENT_TAG")
         if [ -n "$current_job" ]; then
             print_success "Current Cron Job: $current_job"
         else
-            print_warning "No periodic restart cron job is currently set."
+            print_warning "No cron job is currently set for this service."
         fi
         
         print_info "\nSelect an option:"
-        echo " 1. Set/Update Job: Every 6 Hours"
-        echo " 2. Set/Update Job: Every 12 Hours"
-        echo " 3. Set/Update Job: Every 24 Hours"
-        echo " 4. Remove Existing Cron Job"
-        echo " 0. Back to Auto-Restart Menu"
-        read -p "Enter choice [0-4]: " choice
+        echo " 1. Set/Update Job: Every 15 Minutes"
+        echo " 2. Set/Update Job: Every Hour"
+        echo " 3. Set/Update Job: Every 6 Hours"
+        echo " 4. Set/Update Job: Every 24 Hours"
+        echo " 5. Set/Update Job: Custom Interval (minutes)"
+        echo " 6. Remove Existing Cron Job"
+        echo " 0. Back to Tunnel Menu"
+        read -p "Enter choice [1-6, 0]: " choice
 
         case $choice in
-            1) set_simple_cron_job "0 */6 * * *" "$service"; break;;
-            2) set_simple_cron_job "0 */12 * * *" "$service"; break;;
-            3) set_simple_cron_job "0 0 * * *" "$service"; break;;
-            4) remove_cron_job "$service" "$CRON_PERIODIC_RESTART_TAG"; break;;
-            0) return;;
-            *) print_warning "Invalid choice.";;
-        esac
-    done
-    press_any_key
-}
-
-set_simple_cron_job() {
-    local schedule=$1 service=$2
-    remove_cron_job "$service" "$CRON_PERIODIC_RESTART_TAG"
-    local cron_job="$schedule systemctl restart $service # $CRON_PERIODIC_RESTART_TAG for $service"
-    (crontab -l 2>/dev/null; echo "$cron_job") | crontab -
-    print_success "Periodic restart cron job set successfully for $service."
-}
-
-manage_error_monitor_menu() {
-    local service=$1
-    while true; do
-        clear
-        print_info "--- Self-Healing (on Error) for $service ---"
-        local monitor_script_path="$MONITOR_DIR/monitor_${service}.sh"
-
-        if [ -f "$monitor_script_path" ]; then
-            print_success "Monitor Status: ENABLED"
-            if grep -q "COORDINATED_RESTART_KEY" "$monitor_script_path"; then
-                print_info "  -> Coordinated Restart: ENABLED"
-            fi
-        else
-            print_warning "Monitor Status: DISABLED"
-        fi
-
-        echo
-        echo " 1. Configure / Re-Configure Monitor"
-        echo " 2. Test Self-Healing Signal"
-        echo " 3. Disable Monitor"
-        echo " 4. View Monitor Log"
-        echo " 0. Back to Auto-Restart Menu"
-        read -p "Enter choice [0-4]: " choice
-
-        case $choice in
-            1) enable_error_monitor "$service";;
-            2) test_coordinated_restart "$service"; press_any_key;;
-            3) disable_error_monitor "$service";;
-            4) 
-                if [ -f "$MONITOR_LOG" ]; then
-                    less "$MONITOR_LOG"
+            1) set_cron_job "*/15 * * * *" "$service"; break;;
+            2) set_cron_job "0 * * * *" "$service"; break;;
+            3) set_cron_job "0 */6 * * *" "$service"; break;;
+            4) set_cron_job "0 0 * * *" "$service"; break;;
+            5) 
+                read -p "Enter interval in minutes: " interval
+                if validate_number "$interval"; then
+                    set_cron_job "*/$interval * * * *" "$service"
                 else
-                    print_warning "Monitor log file does not exist yet."
-                    press_any_key
+                    print_error "Invalid interval. Must be a number."; sleep 2
                 fi
-                ;;
+                break;;
+            6) remove_cron_job "$service"; break;;
             0) return;;
             *) print_warning "Invalid choice.";;
         esac
     done
-}
-
-enable_error_monitor() {
-    local service=$1
-    local monitor_script_path="$MONITOR_DIR/monitor_${service}.sh"
-    
-    print_info "--> Configuring Self-Healing Monitor for $service..."
-    
-    local coordinated_restart_vars=""
-    read -p "Enable Bidirectional Coordinated Restart? (y/n) [y]: " enable_coord
-    if [[ "${enable_coord:-y}" == "y" ]]; then
-        print_warning "This requires setup on BOTH the client and server."
-        
-        print_info "\n--- [Step 1/2] Configuring LOCAL Listener ---"
-        local shared_key
-        while true; do
-            read -p "Enter a SHARED secret key for the restart signal: " shared_key
-            [ -n "$shared_key" ] && break || print_error "Secret key cannot be empty."
-        done
-        setup_restart_listener "$service" "$shared_key"
-        
-        print_info "\n--- [Step 2/2] Configuring REMOTE Trigger ---"
-        local remote_ip remote_port
-        while true; do
-            read -p "Enter the REMOTE peer's public IP address: " remote_ip
-            validate_ip "$remote_ip" && break || print_error "Invalid IP address format."
-        done
-        while true; do
-            read -p "Enter the REMOTE peer's listener port: " remote_port
-            validate_port "$remote_port" && break || print_error "Invalid port number."
-        done
-        coordinated_restart_vars="REMOTE_IP=\"$remote_ip\"\nREMOTE_LISTENER_PORT=\"$remote_port\"\nCOORDINATED_RESTART_KEY=\"$shared_key\""
-    fi
-
-    local interval
-    while true; do
-        read -p "Enter log check interval in minutes (e.g., 3): " interval
-        validate_number "$interval" && break || print_error "Must be a positive number."
-    done
-
-    cat > "$monitor_script_path" << EOF
-#!/bin/bash
-SERVICE_NAME="$service"
-LOG_FILE="$MONITOR_LOG"
-$coordinated_restart_vars
-
-# Check for error keywords in the last 5 log lines for the specific service
-if journalctl -u \$SERVICE_NAME -n 5 --no-pager | grep -E -i 'ERROR|failed|invalid token|connection reset'; then
-    echo "\$(date): [\$SERVICE_NAME] Detected error. Restarting service..." >> \$LOG_FILE
-    systemctl restart \$SERVICE_NAME
-    
-    # If coordinated restart is configured, send signal to the remote peer
-    if [ -n "\$COORDINATED_RESTART_KEY" ]; then
-        echo "\$(date): [\$SERVICE_NAME] Sending restart signal to remote peer \$REMOTE_IP:\$REMOTE_LISTENER_PORT" >> \$LOG_FILE
-        echo "\$COORDINATED_RESTART_KEY" | nc -w 5 \$REMOTE_IP \$REMOTE_LISTENER_PORT
-    fi
-fi
-EOF
-
-    chmod +x "$monitor_script_path"
-    
-    remove_cron_job "$service" "$CRON_MONITOR_TAG"
-    local cron_job="*/$interval * * * * $monitor_script_path"
-    (crontab -l 2>/dev/null; echo "$cron_job # $CRON_MONITOR_TAG for $service") | crontab -
-    
-    print_success "Monitor enabled. It will check for errors every $interval minutes."
     press_any_key
 }
 
-disable_error_monitor() {
-    local service=$1
-    local monitor_script_path="$MONITOR_DIR/monitor_${service}.sh"
-
-    print_info "--> Disabling error monitor for $service..."
-    remove_cron_job "$service" "$CRON_MONITOR_TAG"
-    
-    if [ -f "$monitor_script_path" ]; then
-        rm -f "$monitor_script_path"
-    fi
-
-    disable_restart_listener "$service"
-    
-    print_success "Monitor disabled successfully."
-    press_any_key
-}
-
-setup_restart_listener() {
-    local target_service=$1
-    local shared_key=$2
-    local listener_port listener_service_name
-    listener_service_name="bh-listener-for-$(echo $target_service | sed 's/\.service//').service"
-    
-    while true; do
-        read -p "Enter a high, unused port for THIS machine's listener (e.g., 48123): " listener_port
-        if ! validate_port "$listener_port"; then
-            print_warning "Invalid port."
-        elif ! check_port_availability "$listener_port"; then
-            continue
-        else
-            break
-        fi
-    done
-    
-    local listener_script_path="$LISTENER_DIR/$(basename $listener_service_name .service).sh"
-    cat > "$listener_script_path" << EOF
-#!/bin/bash
-TARGET_SERVICE="$target_service"
-RESTART_KEY="$shared_key"
-LOG_FILE="$MONITOR_LOG"
-TEST_KEY="TEST_SIGNAL"
-
-while true; do
-    command=\$(nc -l -p $listener_port)
-    if [ "\$command" == "\$RESTART_KEY" ]; then
-        echo "\$(date): [LISTENER] Received valid restart signal for \$TARGET_SERVICE. Restarting..." >> \$LOG_FILE
-        systemctl restart \$TARGET_SERVICE
-    elif [ "\$command" == "\$TEST_KEY" ]; then
-        echo "\$(date): [LISTENER] Received valid TEST signal for \$TARGET_SERVICE. Connection is OK." >> \$LOG_FILE
-    else
-        echo "\$(date): [LISTENER] Received invalid signal on port $listener_port." >> \$LOG_FILE
-    fi
-done
-EOF
-    chmod +x "$listener_script_path"
-
-    cat > "$SERVICE_DIR/$listener_service_name" << EOL
-[Unit]
-Description=Backhaul Restart Listener for $target_service
-After=network.target
-
-[Service]
-ExecStart=$listener_script_path
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOL
-
-    systemctl daemon-reload
-    systemctl enable --now "$listener_service_name"
-    manage_ufw_add "$listener_port" "tcp" "$(basename $listener_service_name .service)"
-    
-    print_success "Listener service '$listener_service_name' created and started on port $listener_port."
-    print_warning "IMPORTANT: You must configure the REMOTE peer to send its signal to this port."
-}
-
-disable_restart_listener() {
-    local target_service=$1
-    local listener_service_name="bh-listener-for-$(echo $target_service | sed 's/\.service//').service"
-    local listener_script_path="$LISTENER_DIR/$(basename $listener_service_name .service).sh"
-    
-    if systemctl list-unit-files | grep -q "$listener_service_name"; then
-        print_info "--> Disabling and removing listener for $target_service..."
-        systemctl disable --now "$listener_service_name" &>/dev/null
-        
-        if [ -f "$listener_script_path" ]; then
-            local listener_port=$(grep 'nc -l -p' "$listener_script_path" | awk '{print $4}')
-            if [ -n "$listener_port" ]; then
-                 manage_ufw_delete "$(basename $listener_service_name .service)"
-            fi
-        fi
-
-        rm -f "$SERVICE_DIR/$listener_service_name"
-        rm -f "$listener_script_path"
-        systemctl daemon-reload
-        print_success "Listener service disabled."
-    fi
-}
-
-test_coordinated_restart() {
-    local service=$1
-    local monitor_script_path="$MONITOR_DIR/monitor_${service}.sh"
-    print_info "--- Testing Coordinated Restart Signal ---"
-
-    if [ ! -f "$monitor_script_path" ] || ! grep -q "COORDINATED_RESTART_KEY" "$monitor_script_path"; then
-        print_error "Coordinated Restart is not configured for this service."
-        return
-    fi
-
-    # FIXED: Robustly parse variables from the monitor script using awk.
-    local REMOTE_IP=$(awk -F'"' '/REMOTE_IP=/ {print $2}' "$monitor_script_path")
-    local REMOTE_LISTENER_PORT=$(awk -F'"' '/REMOTE_LISTENER_PORT=/ {print $2}' "$monitor_script_path")
-
-    if [ -z "$REMOTE_IP" ] || [ -z "$REMOTE_LISTENER_PORT" ]; then
-        print_error "Could not parse remote peer details from monitor script."
-        return
-    fi
-    
-    print_info "Sending TEST signal to $REMOTE_IP on port $REMOTE_LISTENER_PORT..."
-    if echo "TEST_SIGNAL" | nc -w 5 "$REMOTE_IP" "$REMOTE_LISTENER_PORT"; then
-        print_success "Test signal sent successfully."
-        print_warning "Check the monitor log on the remote machine for a confirmation message."
-    else
-        print_error "Failed to send test signal. Check firewall rules and listener status on the remote machine."
-    fi
+set_cron_job() {
+    local schedule=$1 service=$2
+    remove_cron_job "$service"
+    local cron_job="$schedule systemctl restart $service # $CRON_COMMENT_TAG"
+    (crontab -l 2>/dev/null; echo "$cron_job") | crontab -
+    print_success "Cron job set successfully for $service."
 }
 
 remove_cron_job() {
-    local service_pattern=$1 tag=$2
-    if crontab -l 2>/dev/null | grep -q "for $service_pattern"; then
-       (crontab -l 2>/dev/null | grep -v "for $service_pattern") | crontab -
-       print_success "Cron job for ${service_pattern} removed."
+    local service=$1
+    if crontab -l 2>/dev/null | grep -q "$service"; then
+       (crontab -l | grep -v "$service") | crontab -
+       print_success "Cron job for $service removed."
     fi
 }
 
@@ -901,7 +649,7 @@ remove_cron_job() {
 main_menu() {
     clear
     get_server_info
-    print_info "      EasyBackhaul Installer & Management Menu (v13.1)"
+    print_info "      EasyBackhaul Installer & Management Menu (v12.5)"
     print_info "================================================================"
     print_info "  Core by Musixal  |  Installer by @N4Xon"
     print_info "----------------------------------------------------------------"
@@ -921,13 +669,13 @@ main_menu() {
            read -p "This will REMOVE the binary and ALL configs/services. This is irreversible. Are you sure? (y/n): " confirm
            if [[ "${confirm,,}" == "y" ]]; then
                 print_warning "Stopping and disabling all backhaul services..."
-                systemctl stop backhaul-*.service bh-listener-*.service &>/dev/null
-                systemctl disable backhaul-*.service bh-listener-*.service &>/dev/null
+                systemctl stop backhaul-*.service &>/dev/null
+                systemctl disable backhaul-*.service &>/dev/null
                 print_warning "Removing all related files..."
                 rm -f "$BIN_PATH"
-                rm -rf "$CONFIG_DIR" # Also removes monitor/listener scripts inside
-                rm -f "$SERVICE_DIR"/backhaul-*.service "$SERVICE_DIR"/bh-listener-*.service
-                (crontab -l 2>/dev/null | grep -v "$CRON_MONITOR_TAG" | grep -v "$CRON_PERIODIC_RESTART_TAG") | crontab -
+                rm -rf "$CONFIG_DIR"
+                rm -f "$SERVICE_DIR"/backhaul-*.service
+                (crontab -l 2>/dev/null | grep -v "$CRON_COMMENT_TAG") | crontab -
                 systemctl daemon-reload
                 print_success "EasyBackhaul has been completely uninstalled."
            fi
@@ -941,9 +689,7 @@ main_menu() {
 # --- Script Execution ---
 check_root
 check_dependencies
-mkdir -p "$CONFIG_DIR" "$BACKUP_DIR" "$MONITOR_DIR" "$LISTENER_DIR"
-touch "$MONITOR_LOG"
-chmod 666 "$MONITOR_LOG"
+mkdir -p "$CONFIG_DIR" "$BACKUP_DIR"
 
 if [ ! -f "$BIN_PATH" ]; then
     print_warning "Backhaul binary not found. Running initial installation..."
