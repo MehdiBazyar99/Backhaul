@@ -60,7 +60,9 @@ configure_tunnel() {
     local local_port=""
     local auth_token=""
     
-    print_submenu_header "Tunnel Configuration Wizard"
+    clear
+    print_server_info_banner_minimal
+    print_info "--- Tunnel Configuration Wizard ---"
     
     print_info "This wizard will help you create a new Backhaul tunnel configuration."
     print_info "You can cancel at any time by entering '0' or press '?' for help."

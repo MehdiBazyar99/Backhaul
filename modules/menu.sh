@@ -404,7 +404,6 @@ show_system_health_monitor() {
 main_menu() {
     clear
     print_server_info_banner
-    
     # Show binary status
     if [[ -f "$BIN_PATH" ]]; then
         # Check if binary is executable
@@ -418,11 +417,9 @@ main_menu() {
             elif "$BIN_PATH" --version >/dev/null 2>&1; then
                 version_output=$("$BIN_PATH" --version 2>/dev/null | head -n1)
             fi
-            
             # Check if any backhaul services are running
             local running_services
             running_services=$(systemctl list-units --type=service --state=running | grep -c "backhaul-" 2>/dev/null || echo "0")
-            
             if [[ "$running_services" -gt 0 ]]; then
                 if [[ -n "$version_output" ]]; then
                     print_success "Binary Status: $version_output (Services: $running_services running)"
@@ -441,7 +438,6 @@ main_menu() {
         print_error "✗ Binary Status: Not installed"
     fi
     echo
-    
     while true; do
         echo
         echo " 1. Configure a New Tunnel"
@@ -459,24 +455,23 @@ main_menu() {
         echo
         read -p "Please select an option [0-8, ? for help]: " choice
         case $choice in
-            1) configure_new_tunnel; press_any_key ;;
-            2) manage_tunnels ;;
-            3) download_backhaul; press_any_key ;;
-            4) generate_self_signed_cert; press_any_key ;;
+            1) configure_new_tunnel; press_any_key; main_menu ;;
+            2) manage_tunnels; main_menu ;;
+            3) download_backhaul; press_any_key; main_menu ;;
+            4) generate_self_signed_cert; press_any_key; main_menu ;;
             5)
                read -e -p "Enter the full path for the Backhaul binary (e.g., /usr/local/bin/backhaul): " new_bin_path
                if [[ -n "$new_bin_path" ]]; then
                    BIN_PATH="$new_bin_path"
-                   print_success "✓ Backhaul binary path set to: $BIN_PATH (for this session)"
+                   print_success "Backhaul binary path set to: $BIN_PATH (for this session)"
                else
                    print_warning "⚠ No path entered. Keeping current: $BIN_PATH"
                fi
                press_any_key
+               main_menu
                ;;
             6)
-               show_system_health_monitor
-               press_any_key
-               ;;
+               show_system_health_monitor; press_any_key; main_menu ;;
             7)
                clear
                print_server_info_banner_minimal
@@ -486,6 +481,7 @@ main_menu() {
                echo
                cleanup_zombie_processes
                press_any_key
+               main_menu
                ;;
             8)
                read -p "This will REMOVE the binary and ALL configs/services. This is irreversible. Are you sure? [y/N]: " confirm
@@ -504,39 +500,29 @@ main_menu() {
                     if [[ "$really_delete" != "DELETE" ]]; then
                         print_warning "❌ Uninstall cancelled. Nothing was deleted."
                         press_any_key
+                        main_menu
                         return
                     fi
-                    
                     print_warning "Stopping and disabling all backhaul services..."
                     systemctl stop backhaul-*.service &>/dev/null
                     systemctl disable backhaul-*.service &>/dev/null
-                    
-                    # Clean up all watcher processes and files with robust termination
                     print_warning "Cleaning up all watcher processes and files..."
                     for pid_file in /tmp/backhaul-watcher-*.pid; do
                         if [[ -f "$pid_file" ]]; then
                             local watcher_pid=$(cat "$pid_file")
                             if [[ -n "$watcher_pid" ]]; then
                                 print_info "Stopping watcher process (PID: $watcher_pid)..."
-                                
-                                # Try graceful termination first
                                 kill "$watcher_pid" 2>/dev/null
-                                
-                                # Wait up to 5 seconds for graceful shutdown
                                 local count=0
                                 while kill -0 "$watcher_pid" 2>/dev/null && [[ $count -lt 5 ]]; do
                                     sleep 1
                                     ((count++))
                                 done
-                                
-                                # If still running, force kill
                                 if kill -0 "$watcher_pid" 2>/dev/null; then
                                     print_warning "Process not responding to SIGTERM, forcing termination..."
                                     kill -9 "$watcher_pid" 2>/dev/null
                                     sleep 1
                                 fi
-                                
-                                # Verify process is dead
                                 if kill -0 "$watcher_pid" 2>/dev/null; then
                                     print_error "Failed to terminate watcher process (PID: $watcher_pid)"
                                 else
@@ -546,16 +532,11 @@ main_menu() {
                             rm -f "$pid_file"
                         fi
                     done
-                    
-                    # Kill any remaining watcher processes by pattern
                     pkill -f "backhaul-watcher" 2>/dev/null
-                    
-                    # Remove all watcher scripts and logs
                     rm -f /tmp/backhaul-watcher-*.sh
                     rm -f /tmp/backhaul-watcher-*.log
                     rm -f /tmp/restart_ack_*
                     print_info "Removed all watcher scripts, logs, and temporary files"
-                    
                     print_warning "Removing all related files..."
                     rm -f "$BIN_PATH"
                     rm -rf "$CONFIG_DIR"
@@ -564,19 +545,6 @@ main_menu() {
                     rm -f "$UFW_METADATA_FILE"
                     (crontab -l 2>/dev/null | grep -v "$CRON_COMMENT_TAG") | crontab -
                     systemctl daemon-reload
-                    
-                    # Clean up UFW rules
-                    if command -v ufw >/dev/null 2>&1; then
-                        print_info "Cleaning up UFW rules..."
-                        # Remove all backhaul-related UFW rules
-                        ufw status numbered | grep -E "(backhaul|45680|45690)" | awk '{print $1}' | tac | while read -r rule_num; do
-                            if [[ -n "$rule_num" ]]; then
-                                echo "y" | ufw delete "$rule_num" >/dev/null 2>&1
-                            fi
-                        done
-                    fi
-                    
-                    # Cert removal prompt
                     local CERT_DIR="/etc/backhaul/certs"
                     if [ -d "$CERT_DIR" ] && compgen -G "$CERT_DIR/*.crt" > /dev/null; then
                         read -p "Do you also want to delete all TLS certificates in $CERT_DIR? (y/n): " delcerts
@@ -587,18 +555,16 @@ main_menu() {
                             print_info "Certificates in $CERT_DIR have been preserved."
                         fi
                     fi
-                    
-                    # Run zombie cleanup
                     cleanup_zombie_processes
-                    
-                    print_success "✓ EasyBackhaul has been completely uninstalled (including all watchers and related files)."
+                    print_success "EasyBackhaul has been completely uninstalled (including all watchers and related files)."
                     exit 0
                fi
                press_any_key
+               main_menu
                ;;
-            \?) show_help; press_any_key ;;
+            \?) show_help; press_any_key; main_menu ;;
             0) exit 0 ;;
-            *) print_warning "❌ Invalid option. Please enter 0-8 or ? for help."; press_any_key ;;
+            *) print_warning "❌ Invalid option. Please enter 0-8 or ? for help."; press_any_key; main_menu ;;
         esac
     done
 }
