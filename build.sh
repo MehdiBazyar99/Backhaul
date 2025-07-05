@@ -12,8 +12,8 @@ MODULES=(
   "modules/ufw.sh"              # UFW firewall management
   "modules/systemd.sh"           # Systemd service management
   "modules/cron.sh"             # Cron job management (needed by tunnel_mgmt.sh)
+  "modules/restart_watcher.sh"   # Restart watcher functionality (needs helpers.sh functions)
   "modules/tunnel_mgmt.sh"       # Tunnel management and operations
-  "modules/restart_watcher.sh"   # Restart watcher functionality
   "modules/menu.sh"             # Main menu and navigation
 )
 
@@ -33,8 +33,8 @@ MODULES=(
   echo "# 7. ufw.sh - Firewall management"
   echo "# 8. systemd.sh - Service management"
   echo "# 9. cron.sh - Cron job management"
-  echo "# 10. tunnel_mgmt.sh - Tunnel operations"
-  echo "# 11. restart_watcher.sh - Restart watcher"
+  echo "# 10. restart_watcher.sh - Restart watcher (needs helpers.sh functions)"
+  echo "# 11. tunnel_mgmt.sh - Tunnel operations"
   echo "# 12. menu.sh - Main interface"
   echo "# ======================================================================"
   for mod in "${MODULES[@]}"; do

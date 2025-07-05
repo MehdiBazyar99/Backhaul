@@ -28,10 +28,7 @@ get_server_info() {
             response=$(timeout 10 curl -s --connect-timeout 3 --max-time 8 "$service" 2>/dev/null)
         else
             # Fallback without timeout command
-            response=$(curl -s --connect-timeout 3 --max-time 8 "$service" 2>/dev/null)
-        fi
-        
-        if [ $? -eq 0 ] && [ -n "$response" ]; then
+            if response=$(curl -s --connect-timeout 3 --max-time 8 "$service" 2>/dev/null) && [ -n "$response" ]; then
             # Try to parse the response
             local ip=""
             local country=""
@@ -123,9 +120,9 @@ verify_binary_installation() {
 }
 
 # Test network connectivity to various sources
-test_network_connectivity() {
+run_network_diagnostics_menu() {
     clear
-    print_submenu_header "Network Connectivity Test"
+    print_secondary_menu_header "Network Connectivity Test"
     
     print_info "Testing connectivity to various sources..."
     echo
@@ -153,10 +150,10 @@ test_network_connectivity() {
         
         print_info "Testing $name ($url)..."
         if curl -s --connect-timeout 5 --max-time 10 "$url" >/dev/null 2>&1; then
-            print_success "✓ $name is accessible"
+            print_success "$name is accessible"
             ((accessible_count++))
         else
-            print_error "✗ $name is not accessible"
+            print_error "$name is not accessible"
         fi
     done
     
@@ -185,11 +182,9 @@ test_network_connectivity() {
 
 download_backhaul() {
     clear
-    print_menu_header "Backhaul Binary Installation"
+    print_primary_menu_header "Backhaul Binary Installation"
     
-    # Show server info banner
-    get_server_info
-    print_info "📍 Server: $SERVER_IP | 🌍 $SERVER_COUNTRY | 🏢 $SERVER_ISP"
+    # Server info is already shown in the banner, no need to fetch and print again
     echo
     
     print_info "--> Identifying system architecture..."
@@ -215,11 +210,7 @@ download_backhaul() {
     print_info "--> Fetching latest version from GitHub..."
     local LATEST_VERSION_JSON
     local curl_exit_code
-    LATEST_VERSION_JSON=$(curl -s --connect-timeout 10 "https://api.github.com/repos/Musixal/Backhaul/releases/latest")
-    curl_exit_code=$?
-
-    local LATEST_VERSION=""
-    if [ $curl_exit_code -eq 0 ] && [ -n "$LATEST_VERSION_JSON" ]; then
+    if LATEST_VERSION_JSON=$(curl -s --connect-timeout 10 "https://api.github.com/repos/Musixal/Backhaul/releases/latest") && [ -n "$LATEST_VERSION_JSON" ]; then
         # Check if the response is valid JSON and contains tag_name
         if echo "$LATEST_VERSION_JSON" | jq -e . >/dev/null 2>&1; then
             LATEST_VERSION=$(echo "$LATEST_VERSION_JSON" | jq -r .tag_name)
@@ -238,11 +229,25 @@ download_backhaul() {
         echo
         
         # Standardized menu structure
-        echo " 1. Use local binary file (if you have downloaded it manually)"
-        echo " 2. Use alternative download source"
-        echo " 3. Use fallback version (v0.6.6) and try GitHub again"
-        echo " 4. Show alternative download sources and tips"
-        echo " 5. Test network connectivity"
+        echo " 1. Automatic GitHub Download:"
+        echo "    Downloads and installs the latest version from GitHub"
+        echo "    (Requires GitHub access)"
+        echo
+        echo " 2. Local File Installation:"
+        echo "    Install from a local binary file you've already downloaded"
+        echo "    (Useful if GitHub is blocked)"
+        echo
+        echo " 3. Alternative Download Source:"
+        echo "    Use a custom download URL or mirror"
+        echo "    (For advanced users)"
+        echo
+        echo " 4. Network Diagnostics:"
+        echo "    Test connectivity to various sources"
+        echo "    (Helps troubleshoot network issues)"
+        echo
+        echo " 5. Skip Installation:"
+        echo "    Continue without installing the binary"
+        echo "    (You can install later from the main menu)"
         echo " 0. Cancel installation"
         echo " ?. Show help"
         echo
@@ -251,22 +256,17 @@ download_backhaul() {
         menu_loop "Select installation method" "0" "5" "?" download_installation_choice
         
         case $download_choice in
-            1) download_from_local_file "$OS" "$ARCH" ;;
-            2) download_from_alternative_source "$OS" "$ARCH" ;;
-            3) 
-                LATEST_VERSION="v0.6.6"
-                download_from_github "$LATEST_VERSION" "$OS" "$ARCH"
-                ;;
+            1) download_from_github "$LATEST_VERSION" "$OS" "$ARCH" ;;
+            2) download_from_local_file "$OS" "$ARCH" ;;
+            3) download_from_alternative_source "$OS" "$ARCH" ;;
             4) 
-                check_alternative_sources "$OS" "$ARCH"
-                # After showing tips, ask again
+                run_network_diagnostics_menu
+                # After testing, ask again
                 download_backhaul
                 return 0
                 ;;
             5) 
-                test_network_connectivity
-                # After testing, ask again
-                download_backhaul
+                print_info "Installation skipped."
                 return 0
                 ;;
             0) 
@@ -345,7 +345,7 @@ download_from_local_file() {
     local arch="$2"
     
     clear
-    print_submenu_header "Local File Installation"
+    print_secondary_menu_header "Local File Installation"
     
     print_info "Please provide the path to your local Backhaul binary file."
     print_info "Supported formats: .tar.gz, .zip, or direct binary file"
@@ -429,7 +429,7 @@ download_from_alternative_source() {
     local arch="$2"
     
     clear
-    print_submenu_header "Alternative Download Source"
+    print_secondary_menu_header "Alternative Download Source"
     
     print_info "Please provide an alternative download URL for the Backhaul binary."
     print_info "The URL should point to a .tar.gz file containing the binary."

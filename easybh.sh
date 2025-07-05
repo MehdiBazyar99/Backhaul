@@ -29,7 +29,6 @@ BIN_PATH="/usr/local/bin/backhaul"
 SERVICE_DIR="/etc/systemd/system"
 UFW_METADATA_FILE="/etc/backhaul/ufw_rules.meta"
 CRON_COMMENT_TAG="backhaul-installer" # Used to identify cron jobs managed by this script
-RESTART_WATCHER_PORT=45679
 # Generate a random secret for restart watcher if not already set
 if [[ -z "$RESTART_WATCHER_SECRET" ]]; then
     # Try to read from existing config, or generate new one
@@ -46,43 +45,31 @@ if [[ -z "$RESTART_WATCHER_SECRET" ]]; then
         chmod 600 "/etc/backhaul/watcher_secret"
     fi
 fi
-RESTART_WATCHER_DIR="/etc/backhaul/restart_watchers"
 
 # --- Enhanced Logging System ---
 LOG_DIR="/var/log/backhaul"
 LOG_LEVEL="INFO"  # DEBUG, INFO, WARN, ERROR
-LOG_MAX_SIZE="10M"
 LOG_MAX_FILES=5
 LOG_FORMAT="json"  # json, text
 
 # --- Health Monitoring ---
-HEALTH_CHECK_INTERVAL=30  # seconds
-HEALTH_CHECK_TIMEOUT=10   # seconds
 HEALTH_LOG_FILE="$LOG_DIR/health.log"
 PERFORMANCE_LOG_FILE="$LOG_DIR/performance.log"
 
 # --- Performance Settings ---
 MAX_CONCURRENT_OPERATIONS=3
-OPERATION_TIMEOUT=300  # seconds
-RESOURCE_CHECK_INTERVAL=60  # seconds
 
 # --- Advanced Error Recovery ---
 MAX_RESTART_ATTEMPTS=3
 RESTART_COOLDOWN=10  # seconds
-ERROR_RECOVERY_ENABLED=true
 
 # --- Resource Management ---
-MAX_MEMORY_USAGE="512M"
-MAX_CPU_USAGE=80  # percentage
 PROCESS_PRIORITY=0  # nice value (-20 to 19)
 
 # --- Configuration Validation ---
-CONFIG_VALIDATION_STRICT=true
 CONFIG_BACKUP_ON_CHANGE=true
-CONFIG_VERSION="1.0"
 
 # --- Security Enhancements ---
-SECURE_MODE_ENABLED=true
 FILE_PERMISSIONS_STRICT=true
 TEMP_FILE_SECURE_DELETE=true
 
@@ -144,7 +131,8 @@ EOF
 log_message() {
     local level="$1"
     local message="$2"
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     local log_file="$LOG_DIR/easybackhaul.log"
     
     # Check log level
@@ -215,7 +203,8 @@ check_tunnel_health() {
     fi
     
     # Log health status
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo "{\"timestamp\":\"$timestamp\",\"tunnel\":\"$tunnel_name\",\"status\":\"$health_status\"}" >> "$HEALTH_LOG_FILE"
     
     echo "$health_status"
@@ -255,7 +244,8 @@ track_performance() {
     local success="$4"
     
     local duration=$((end_time - start_time))
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     
     echo "{\"timestamp\":\"$timestamp\",\"operation\":\"$operation\",\"duration\":$duration,\"success\":$success}" >> "$PERFORMANCE_LOG_FILE"
     
@@ -270,17 +260,23 @@ with_performance_tracking() {
     local operation="$1"
     shift
     
-    local start_time=$(date +%s)
+    local start_time
+    start_time=$(date +%s)
     local success=false
     
     if "$@"; then
         success=true
     fi
     
-    local end_time=$(date +%s)
+    local end_time
+    end_time=$(date +%s)
     track_performance "$operation" "$start_time" "$end_time" "$success"
     
-    return $([[ "$success" == "true" ]] && echo 0 || echo 1)
+    if [[ "$success" == "true" ]]; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 # --- Advanced Error Recovery ---
@@ -304,7 +300,7 @@ retry_operation() {
         
         if [[ $retry_count -lt $max_retries ]]; then
             log_warn "Operation failed, retrying in $delay seconds (attempt $((retry_count + 1))/$max_retries)"
-            sleep $delay
+            sleep "$delay"
             delay=$((delay * 2))  # Exponential backoff
         fi
     done
@@ -332,8 +328,12 @@ graceful_restart() {
     # Wait for cooldown with progress indicator
     local cooldown="${RESTART_COOLDOWN:-10}"
     echo "Waiting ${cooldown}s for service to fully stop..."
-    for i in $(seq 1 $cooldown); do
-        echo -ne "\rCooldown: $i/$cooldown seconds [$(printf '%*s' $((i * 20 / cooldown)) | tr ' ' '#')$(printf '%*s' $((20 - i * 20 / cooldown)) | tr ' ' '-')]"
+    for i in $(seq 1 "$cooldown"); do
+        local progress_width
+        progress_width=$((i * 20 / cooldown))
+        local remaining_width
+        remaining_width=$((20 - progress_width))
+        echo -ne "\rCooldown: $i/$cooldown seconds [$(printf '%*s' "$progress_width" | tr ' ' '#')$(printf '%*s' "$remaining_width" | tr ' ' '-')]"
         sleep 1
     done
     echo -e "\nCooldown complete. Starting service..."
@@ -359,9 +359,12 @@ graceful_restart() {
 # --- Resource Management ---
 # Check system resources
 check_system_resources() {
-    local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
-    local mem_usage=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}')
-    local disk_usage=$(df / | tail -1 | awk '{print $5}' | cut -d'%' -f1)
+    local cpu_usage
+    cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
+    local mem_usage
+    mem_usage=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}')
+    local disk_usage
+    disk_usage=$(df / | tail -1 | awk '{print $5}' | cut -d'%' -f1)
     
     echo "System Resources:"
     echo "  CPU: ${cpu_usage}%"
@@ -540,7 +543,7 @@ confirm_action() {
     fi
     
     while true; do
-        read -p "$prompt $format: " user_input
+        read -r -p "$prompt $format: " user_input
         user_input=$(echo "$user_input" | tr '[:upper:]' '[:lower:]')
         
         if [[ -z "$user_input" ]]; then
@@ -611,7 +614,7 @@ menu_loop() {
     fi
     
     while true; do
-        read -p "$prompt: " choice
+        read -r -p "$prompt: " choice
         
         # Handle empty input
         if [[ -z "$choice" ]]; then
@@ -1039,11 +1042,11 @@ show_spinner() {
     local pid=$1
     local delay=0.1
     local spinstr='|/-\'
-    while kill -0 $pid 2>/dev/null; do
+    while kill -0 "$pid" 2>/dev/null; do
         local temp=${spinstr#?}
         printf " [%c]  " "$spinstr"
-        spinstr=$temp${spinstr%$temp}
-        sleep $delay
+        spinstr=$temp${spinstr%"$temp"}
+        sleep "$delay"
         printf "\b\b\b\b\b\b"
     done
     printf "    \b\b\b\b"
@@ -1055,7 +1058,7 @@ with_spinner() {
     echo -n "$msg... "
     "$@" &
     local pid=$!
-    show_spinner $pid
+    show_spinner "$pid"
     wait $pid
     local rc=$?
     if [ $rc -eq 0 ]; then
@@ -1076,7 +1079,7 @@ sanitize_input() {
     local max_length="${2:-100}"
     
     # Remove dangerous characters and limit length
-    echo "$input" | sed 's/[<>"'\''&|;`$(){}[\]\\]/_/g' | head -c "$max_length"
+    echo "$input" | sed "s/[<>\"'&|;\`\$(){}[\]\\\\]/_/g" | head -c "$max_length"
 }
 
 validate_port() {
@@ -1155,23 +1158,29 @@ secure_config_file() {
 
 # Performance monitoring
 get_system_resources() {
-    local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
-    local mem_usage=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}')
-    local disk_usage=$(df / | tail -1 | awk '{print $5}' | sed 's/%//')
+    local cpu_usage
+    cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
+    local mem_usage
+    mem_usage=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}')
+    local disk_usage
+    disk_usage=$(df / | tail -1 | awk '{print $5}' | sed 's/%//')
     
     echo "CPU: ${cpu_usage}% | Memory: ${mem_usage}% | Disk: ${disk_usage}%"
 }
 
 monitor_performance() {
     local operation="$1"
-    local start_time=$(date +%s.%N)
+    local start_time
+    start_time=$(date +%s.%N)
     
     # Execute the operation
     "$@"
     local exit_code=$?
     
-    local end_time=$(date +%s.%N)
-    local duration=$(echo "$end_time - $start_time" | bc -l 2>/dev/null || echo "0")
+    local end_time
+    end_time=$(date +%s.%N)
+    local duration
+    duration=$(echo "$end_time - $start_time" | bc -l 2>/dev/null || echo "0")
     
     log_message "PERFORMANCE" "$operation completed in ${duration}s"
     

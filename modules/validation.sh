@@ -540,14 +540,14 @@ validate_config_detailed() {
     echo
     print_info "--- Validation Summary ---"
     if [[ $validation_result -eq 0 ]]; then
-        print_success "✓ Configuration is valid"
+        print_success "Configuration is valid"
         if [[ $warnings_found -gt 0 ]]; then
             print_info "Found $warnings_found warning(s) - review recommended"
         else
             print_info "All checks passed successfully"
         fi
     else
-        print_error "✗ Configuration has issues"
+        print_error "Configuration has issues"
         print_info "Found $issues_found error(s) that need attention"
         
         if confirm_action "Would you like to create a backup before attempting fixes?" "y"; then

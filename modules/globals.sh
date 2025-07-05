@@ -9,45 +9,47 @@ BIN_PATH="/usr/local/bin/backhaul"
 SERVICE_DIR="/etc/systemd/system"
 UFW_METADATA_FILE="/etc/backhaul/ufw_rules.meta"
 CRON_COMMENT_TAG="backhaul-installer" # Used to identify cron jobs managed by this script
-RESTART_WATCHER_PORT=45679
-RESTART_WATCHER_SECRET="easybackhaul-restart-secret"
-RESTART_WATCHER_DIR="/etc/backhaul/restart_watchers"
+# Generate a random secret for restart watcher if not already set
+if [[ -z "$RESTART_WATCHER_SECRET" ]]; then
+    # Try to read from existing config, or generate new one
+    if [[ -f "/etc/backhaul/watcher_secret" ]]; then
+        RESTART_WATCHER_SECRET=$(cat "/etc/backhaul/watcher_secret" 2>/dev/null)
+    fi
+    
+    # If still empty, generate a new secure secret
+    if [[ -z "$RESTART_WATCHER_SECRET" ]]; then
+        RESTART_WATCHER_SECRET=$(openssl rand -hex 32 2>/dev/null || tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 64)
+        # Save the secret securely
+        mkdir -p "/etc/backhaul"
+        echo "$RESTART_WATCHER_SECRET" > "/etc/backhaul/watcher_secret"
+        chmod 600 "/etc/backhaul/watcher_secret"
+    fi
+fi
 
 # --- Enhanced Logging System ---
 LOG_DIR="/var/log/backhaul"
 LOG_LEVEL="INFO"  # DEBUG, INFO, WARN, ERROR
-LOG_MAX_SIZE="10M"
 LOG_MAX_FILES=5
 LOG_FORMAT="json"  # json, text
 
 # --- Health Monitoring ---
-HEALTH_CHECK_INTERVAL=30  # seconds
-HEALTH_CHECK_TIMEOUT=10   # seconds
 HEALTH_LOG_FILE="$LOG_DIR/health.log"
 PERFORMANCE_LOG_FILE="$LOG_DIR/performance.log"
 
 # --- Performance Settings ---
 MAX_CONCURRENT_OPERATIONS=3
-OPERATION_TIMEOUT=300  # seconds
-RESOURCE_CHECK_INTERVAL=60  # seconds
 
 # --- Advanced Error Recovery ---
 MAX_RESTART_ATTEMPTS=3
 RESTART_COOLDOWN=10  # seconds
-ERROR_RECOVERY_ENABLED=true
 
 # --- Resource Management ---
-MAX_MEMORY_USAGE="512M"
-MAX_CPU_USAGE=80  # percentage
 PROCESS_PRIORITY=0  # nice value (-20 to 19)
 
 # --- Configuration Validation ---
-CONFIG_VALIDATION_STRICT=true
 CONFIG_BACKUP_ON_CHANGE=true
-CONFIG_VERSION="1.0"
 
 # --- Security Enhancements ---
-SECURE_MODE_ENABLED=true
 FILE_PERMISSIONS_STRICT=true
 TEMP_FILE_SECURE_DELETE=true
 

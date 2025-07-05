@@ -3,98 +3,61 @@
 
 # --- Installation Wizard ---
 installation_wizard() {
-    clear
-    print_server_info_banner
-    print_menu_header "EasyBackhaul Installation Wizard (v13.0-beta)" "Core by Musixal  |  Installer by @N4Xon"
-    echo
-    print_info "Welcome to EasyBackhaul! This wizard will help you install the Backhaul binary."
-    echo
-    print_info "Please choose your preferred installation method:"
-    echo
-    echo " 1. Automatic GitHub Download (Recommended)"
-    echo "    - Downloads latest version from GitHub"
-    echo "    - Includes connection testing and fallback options"
-    echo
-    echo " 2. Local File Installation"
-    echo "    - Use a binary file you've downloaded manually"
-    echo "    - Supports .tar.gz, .zip, or direct binary files"
-    echo
-    echo " 3. Alternative Download Source"
-    echo "    - Download from your own server or alternative URL"
-    echo "    - Useful when GitHub is not accessible"
-    echo
-    echo " 4. Network Diagnostics"
-    echo "    - Test connectivity to various sources"
-    echo "    - Help diagnose network issues"
-    echo
-    echo " 5. Skip Installation (Advanced)"
-    echo "    - Continue without installing binary"
-    echo "    - You can install manually later"
-    echo
-    print_menu_footer
+    push_menu "installation_wizard"
     while true; do
-        read -p "Please select an option [0-5, ? for help]: " install_choice
-        case $install_choice in
+        clear
+        print_server_info_banner
+        print_primary_menu_header "EasyBackhaul Installation Wizard (v13.0-beta)" "Core by Musixal  |  Installer by @N4Xon"
+        echo
+        print_info "Welcome to EasyBackhaul! This wizard will help you install the Backhaul binary."
+        echo
+        print_info "Please choose your preferred installation method:"
+        echo
+        echo " 1. Automatic GitHub Download (Recommended)"
+        echo "    - Downloads latest version from GitHub"
+        echo "    - Includes connection testing and fallback options"
+        echo
+        echo " 2. Local File Installation"
+        echo "    - Use a binary file you've downloaded manually"
+        echo "    - Supports .tar.gz, .zip, or direct binary files"
+        echo
+        echo " 3. Alternative Download Source"
+        echo "    - Download from your own server or alternative URL"
+        echo "    - Useful when GitHub is not accessible"
+        echo
+        echo " 4. Network Diagnostics"
+        echo "    - Test connectivity to various sources"
+        echo "    - Help diagnose network issues"
+        echo
+        echo " 5. Skip Installation (Advanced)"
+        echo "    - Continue without installing binary"
+        echo "    - You can install manually later"
+        echo
+        print_menu_footer
+        read -p "Select an option [0-5, ? for help]: " choice
+        case $choice in
             1)
-                print_info "Starting automatic GitHub download..."
-                if download_backhaul; then
-                    return 0
-                else
-                    print_warning "⚠ Installation failed or was cancelled."
-                    press_any_key
-                    return 1
-                fi
+                download_from_github "latest" "$(uname -s | tr '[:upper:]' '[:lower:]')" "$(uname -m)"
                 ;;
             2)
-                print_info "Starting local file installation..."
-                local os=$(uname -s | tr '[:upper:]' '[:lower:]')
-                local arch=$(uname -m)
-                case $arch in
-                    x86_64) arch="amd64" ;;
-                    aarch64) arch="arm64" ;;
-                    *) print_error "✗ Unsupported architecture: $arch"; press_any_key; return 1 ;;
-                esac
-                if download_from_local_file "$os" "$arch"; then
-                    return 0
-                else
-                    print_warning "⚠ Local installation failed or was cancelled."
-                    press_any_key
-                    return 1
-                fi
+                download_from_local_file "$(uname -s | tr '[:upper:]' '[:lower:]')" "$(uname -m)"
                 ;;
             3)
-                print_info "Starting alternative source download..."
-                local os=$(uname -s | tr '[:upper:]' '[:lower:]')
-                local arch=$(uname -m)
-                case $arch in
-                    x86_64) arch="amd64" ;;
-                    aarch64) arch="arm64" ;;
-                    *) print_error "✗ Unsupported architecture: $arch"; press_any_key; return 1 ;;
-                esac
-                if download_from_alternative_source "$os" "$arch"; then
-                    return 0
-                else
-                    print_warning "⚠ Alternative installation failed or was cancelled."
-                    press_any_key
-                    return 1
-                fi
+                download_from_alternative_source "$(uname -s | tr '[:upper:]' '[:lower:]')" "$(uname -m)"
                 ;;
             4)
-                test_network_connectivity
-                installation_wizard
-                return 0
+                run_network_diagnostics_menu
                 ;;
             5)
-                print_warning "⚠ Skipping binary installation."
+                print_warning "Skipping binary installation."
                 print_info "You can install the binary manually later using option 3 in the main menu."
                 print_info "Make sure to place it at: $BIN_PATH"
                 press_any_key
+                return_to_previous_menu
                 return 0
                 ;;
             \?)
                 show_installation_help
-                installation_wizard
-                return 0
                 ;;
             0)
                 print_info "Exiting EasyBackhaul installer."
@@ -151,8 +114,8 @@ show_installation_help() {
 # --- System Health & Performance Monitor ---
 show_system_health_monitor() {
     clear
-    print_server_info_banner_minimal
-    print_info "=== System Health & Performance Monitor ==="
+    print_server_info_banner
+    print_secondary_menu_header "System Health & Performance Monitor"
     echo
     
     # Initialize logging if not already done
@@ -166,7 +129,7 @@ show_system_health_monitor() {
     echo
     print_info "--- Tunnel Health Status ---"
     local tunnels
-    tunnels=$(find "$CONFIG_DIR" -name "*.conf" -exec basename {} .conf \; 2>/dev/null)
+    tunnels=$(find "$CONFIG_DIR" -name "config-*.toml" -exec basename {} .toml \; 2>/dev/null | sed 's/^config-//')
     
     if [[ -n "$tunnels" ]]; then
         local healthy_count=0
@@ -177,35 +140,35 @@ show_system_health_monitor() {
             health_status=$(check_tunnel_health "$tunnel")
             ((total_count++))
             
-            case "$health_status" in
-                "running")
-                    print_success "✓ $tunnel: Running"
-                    ((healthy_count++))
-                    ;;
-                "dead")
-                    print_error "✗ $tunnel: Dead"
-                    ;;
-                "not_started")
-                    print_warning "⚠ $tunnel: Not Started"
-                    ;;
-                *)
-                    print_warning "? $tunnel: Unknown"
-                    ;;
-            esac
+                    case "$health_status" in
+            "running")
+                print_status_running "$tunnel"
+                ((healthy_count++))
+                ;;
+            "dead")
+                print_status_dead "$tunnel"
+                ;;
+            "not_started")
+                print_status_not_started "$tunnel"
+                ;;
+            *)
+                print_status_warning "$tunnel" "Unknown"
+                ;;
+        esac
         done
         
         echo
         print_info "Health Summary: $healthy_count/$total_count tunnels healthy"
         
         if [[ $healthy_count -eq $total_count ]]; then
-            print_success "✓ All tunnels are healthy!"
+            print_success "All tunnels are healthy!"
         elif [[ $healthy_count -eq 0 ]]; then
-            print_error "✗ No tunnels are healthy!"
+            print_error "No tunnels are healthy!"
         else
-            print_warning "⚠ Some tunnels need attention"
+            print_warning "Some tunnels need attention"
         fi
     else
-        print_warning "⚠ No tunnels found"
+        print_warning "No tunnels found"
     fi
     
     # Show performance metrics
@@ -243,14 +206,14 @@ show_system_health_monitor() {
     
     if [[ -n "$backhaul_services" ]]; then
         for service in $backhaul_services; do
-            if systemctl is-active --quiet "$service"; then
-                print_success "✓ $service: Active"
-            else
-                print_error "✗ $service: Inactive"
-            fi
+                    if systemctl is-active --quiet "$service"; then
+            print_status_active "$service"
+        else
+            print_status_inactive "$service"
+        fi
         done
     else
-        print_warning "⚠ No Backhaul services found"
+        print_warning "No Backhaul services found"
     fi
     
     # Show watcher status
@@ -266,14 +229,14 @@ show_system_health_monitor() {
             local pid
             pid=$(cat "$pid_file" 2>/dev/null)
             
-            if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-                print_success "✓ Watcher for $tunnel_name: Running (PID: $pid)"
-            else
-                print_error "✗ Watcher for $tunnel_name: Dead"
-            fi
+                    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            print_success "Watcher for $tunnel_name: Running (PID: $pid)"
+        else
+            print_status_dead "Watcher for $tunnel_name"
+        fi
         done
     else
-        print_warning "⚠ No watchers found"
+        print_warning "No watchers found"
     fi
     
     # Show disk usage
@@ -285,11 +248,11 @@ show_system_health_monitor() {
     usage_percent=$(echo "$disk_usage" | sed 's/%//')
     
     if [[ $usage_percent -gt 90 ]]; then
-        print_error "✗ Critical disk usage: $disk_usage"
+        print_error "Critical disk usage: $disk_usage"
     elif [[ $usage_percent -gt 80 ]]; then
-        print_warning "⚠ High disk usage: $disk_usage"
+        print_warning "High disk usage: $disk_usage"
     else
-        print_success "✓ Disk usage: $disk_usage"
+        print_success "Disk usage: $disk_usage"
     fi
     
     # Show log file sizes
@@ -322,7 +285,7 @@ show_system_health_monitor() {
     echo " 4. Optimize all tunnel processes"
     echo " 0. Back to main menu"
     echo
-    print_info "----------------------------------------------------------------"
+    print_menu_footer
     while true; do
         read -p "Select action [0-4]: " action_choice
         case $action_choice in
@@ -331,14 +294,15 @@ show_system_health_monitor() {
                 ;;
             2)
                 cleanup_zombie_processes
-                print_success "✓ Zombie processes cleaned up"
+                print_success "Zombie processes cleaned up"
                 press_any_key
                 show_system_health_monitor
                 ;;
             3)
                 if [[ -d "$LOG_DIR" ]]; then
                     clear
-                    print_info "=== Log Files ==="
+                    print_server_info_banner_minimal
+                    print_secondary_menu_header "Log Files"
                     echo
                     local log_files
                     log_files=$(find "$LOG_DIR" -name "*.log" -type f 2>/dev/null)
@@ -359,7 +323,8 @@ show_system_health_monitor() {
                                 selected_log=$(echo "$log_files" | sed -n "${log_choice}p")
                                 if [[ -f "$selected_log" ]]; then
                                     clear
-                                    print_info "=== $(basename "$selected_log") ==="
+                                    print_server_info_banner_minimal
+                                    print_secondary_menu_header "$(basename "$selected_log")"
                                     echo
                                     if command -v less >/dev/null 2>&1; then
                                         less "$selected_log"
@@ -374,11 +339,11 @@ show_system_health_monitor() {
                             fi
                         done
                     else
-                        print_warning "⚠ No log files found"
+                        print_warning "No log files found"
                         press_any_key
                     fi
                 else
-                    print_warning "⚠ Log directory not found"
+                    print_warning "Log directory not found"
                     press_any_key
                 fi
                 show_system_health_monitor
@@ -386,7 +351,7 @@ show_system_health_monitor() {
             4)
                 print_info "Optimizing all tunnel processes..."
                 optimize_all_tunnel_processes
-                print_success "✓ All tunnel processes optimized"
+                print_success "All tunnel processes optimized"
                 press_any_key
                 show_system_health_monitor
                 ;;
@@ -403,12 +368,12 @@ show_system_health_monitor() {
 # --- Main Menu Logic & Entrypoint ---
 main_menu() {
     clear
-    print_main_menu_header "EasyBackhaul Management Menu" "Core by Musixal  |  Installer by @N4Xon"
+    print_primary_menu_header "EasyBackhaul Management Menu" "Core by Musixal  |  Installer by @N4Xon"
     
     # Check binary status
     if [ -f "$BIN_PATH" ]; then
         if [[ ! -x "$BIN_PATH" ]]; then
-            print_warning "⚠ Binary Status: Found but not executable"
+            print_warning "Binary Status: Found but not executable"
         else
             # Try to get version, but don't fail if it doesn't work
             local version_output=""
@@ -435,7 +400,7 @@ main_menu() {
             fi
         fi
     else
-        print_error "✗ Binary Status: Not installed"
+        print_error "Binary Status: Not installed"
     fi
     echo
     
@@ -448,7 +413,7 @@ main_menu() {
     echo " 7. Clean Up Zombie/Orphaned Processes"
     echo " 8. Uninstall EasyBackhaul (Removes binary and ALL configs)"
     echo
-    print_menu_footer_unified "true" "false" "true"
+    print_menu_footer "true" "false" "true"
     
     # Help function for main menu
     main_menu_help() {
@@ -460,53 +425,57 @@ main_menu() {
         echo "This menu provides access to all management functions."
         echo
         echo "Available options:"
-        echo "  • Configure New Tunnel: Create and configure a new Backhaul tunnel"
-        echo "  • Manage Existing Tunnels: Start, stop, and manage existing tunnels"
-        echo "  • Update/Re-install Binary: Download and install the latest Backhaul binary"
-        echo "  • Generate TLS Certificate: Create self-signed certificates for secure connections"
-        echo "  • Select Binary Directory: Change where the Backhaul binary is located"
-        echo "  • System Health Monitor: Monitor system resources and tunnel performance"
-        echo "  • Clean Up Processes: Remove zombie and orphaned processes"
-        echo "  • Uninstall: Completely remove EasyBackhaul and all configurations"
+        echo " 1. Configure New Tunnel: Create and configure a new Backhaul tunnel"
+        echo " 2. Manage Existing Tunnels: Start, stop, and manage existing tunnels"
+        echo " 3. Update/Re-install Binary: Download and install the latest Backhaul binary"
+        echo " 4. Generate TLS Certificate: Create self-signed certificates for secure connections"
+        echo " 5. Select Binary Directory: Change where the Backhaul binary is located"
+        echo " 6. System Health Monitor: Monitor system resources and tunnel performance"
+        echo " 7. Clean Up Processes: Remove zombie and orphaned processes"
+        echo " 8. Uninstall: Completely remove EasyBackhaul and all configurations"
+        echo " 0. Exit: Quit the application"
+        echo " ?. Help: Show this help screen"
         echo
         print_info "Note: The binary status shows if Backhaul is installed and working."
         echo "================================================================"
         press_any_key
     }
     
-    menu_loop 0 8 "?" "main_menu_help" "Please select an option [0-8, ? for help]"
+    menu_loop 0 8 "?" "main_menu_help" "Select an option [0-8, ? for help]"
     
     case $choice in
-        1) configure_new_tunnel; press_any_key; main_menu ;;
-        2) manage_tunnels; main_menu ;;
-        3) download_backhaul; press_any_key; main_menu ;;
-        4) generate_self_signed_cert; press_any_key; main_menu ;;
+        1) configure_tunnel ;;
+        2) manage_tunnels ;;
+        3) download_backhaul ;;
+        4) generate_self_signed_cert ;;
         5)
            read -e -p "Enter the full path for the Backhaul binary (e.g., /usr/local/bin/backhaul): " new_bin_path
            if [[ -n "$new_bin_path" ]]; then
                BIN_PATH="$new_bin_path"
                print_success "Backhaul binary path set to: $BIN_PATH (for this session)"
            else
-               print_warning "⚠ No path entered. Keeping current: $BIN_PATH"
+               print_warning "No path entered. Keeping current: $BIN_PATH"
            fi
            press_any_key
-           main_menu
            ;;
         6)
-           show_system_health_monitor; press_any_key; main_menu ;;
+           show_system_health_monitor ;;
         7)
            clear
-           print_server_info_banner_minimal
-           print_info "--- Clean Up Zombie/Orphaned Processes ---"
+           print_server_info_banner
+           print_secondary_menu_header "Clean Up Zombie/Orphaned Processes"
            echo
            print_info "This will clean up any zombie processes and orphaned watcher processes."
            echo
            cleanup_zombie_processes
            press_any_key
-           main_menu
            ;;
         8)
-           read -p "This will REMOVE the binary and ALL configs/services. This is irreversible. Are you sure? [y/N]: " confirm
+           if confirm_action "This will REMOVE the binary and ALL configs/services. This is irreversible. Are you sure?" "n"; then
+               confirm="y"
+           else
+               confirm="n"
+           fi
            if [[ "${confirm,,}" == "y" ]]; then
                 echo
                 print_warning "Summary of what will be deleted:"
@@ -522,7 +491,6 @@ main_menu() {
                 if [[ "$really_delete" != "DELETE" ]]; then
                     print_warning "Uninstall cancelled. Nothing was deleted."
                     press_any_key
-                    main_menu
                     return
                 fi
                 print_warning "Stopping and disabling all backhaul services..."
@@ -569,7 +537,11 @@ main_menu() {
                 systemctl daemon-reload
                 local CERT_DIR="/etc/backhaul/certs"
                 if [ -d "$CERT_DIR" ] && compgen -G "$CERT_DIR/*.crt" > /dev/null; then
-                    read -p "Do you also want to delete all TLS certificates in $CERT_DIR? (y/n): " delcerts
+                    if confirm_action "Do you also want to delete all TLS certificates in $CERT_DIR?" "n"; then
+                        delcerts="y"
+                    else
+                        delcerts="n"
+                    fi
                     if [[ "${delcerts,,}" == "y" ]]; then
                         rm -rf "$CERT_DIR"
                         print_success "All certificates in $CERT_DIR have been deleted."
@@ -582,7 +554,6 @@ main_menu() {
                 exit 0
            fi
            press_any_key
-           main_menu
            ;;
         0) exit 0 ;;
         *) print_warning "Invalid option. Please enter 0-8 or ? for help."; press_any_key ;;
@@ -601,7 +572,7 @@ init_logging
 # Check if binary exists, if not run installation wizard
 if [ ! -f "$BIN_PATH" ]; then
     echo
-    print_warning "⚠ Backhaul binary not found at: $BIN_PATH"
+    print_warning "Backhaul binary not found at: $BIN_PATH"
     echo
     print_info "The Backhaul binary is required to create and manage tunnels."
     print_info "Please complete the installation to continue."
@@ -615,7 +586,7 @@ if [ ! -f "$BIN_PATH" ]; then
     # Check if installation was successful
     if [ ! -f "$BIN_PATH" ]; then
         echo
-        print_warning "⚠ Binary installation was not completed."
+        print_warning "Binary installation was not completed."
         print_info "You can still use the script to manage existing tunnels or install later."
         echo
         print_info "To install the binary later, use option 3 in the main menu."

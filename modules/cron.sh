@@ -42,7 +42,7 @@ manage_cron_menu() {
         fi
         
         echo
-        print_info "Select an option:"
+        print_info "Select an option [0-9, ? for help]:"
         echo " 1. Set/Update Job: Every 15 Minutes"
         echo " 2. Set/Update Job: Every Hour"
         echo " 3. Set/Update Job: Every 6 Hours"
@@ -51,7 +51,7 @@ manage_cron_menu() {
         echo " 6. Remove Existing Cron Job"
         print_menu_footer
         
-        menu_loop 0 6 "?" "cron_menu_help" "Enter choice [0-6, ? for help]"
+        menu_loop 0 6 "?" "cron_menu_help" "Select an option [0-6, ? for help]"
         
         case $choice in
             1) set_cron_job "*/15 * * * *" "$service"; break;;
@@ -76,7 +76,7 @@ manage_cron_menu() {
                         set_cron_job "*/$interval * * * *" "$service"
                         break
                     else
-                        print_warning "❌ Invalid interval. Please enter a number between 1 and 1440."
+                        print_warning "Invalid interval. Please enter a number between 1 and 1440."
                         press_any_key
                     fi
                 done
@@ -93,15 +93,15 @@ set_cron_job() {
     remove_cron_job "$service"
     local cron_job="$schedule systemctl restart $service # $CRON_COMMENT_TAG"
     (crontab -l 2>/dev/null; echo "$cron_job") | crontab -
-    print_success "✅ Cron job set successfully for $service."
+    print_success "Cron job set successfully for $service."
 }
 
 remove_cron_job() {
     local service=$1
     if crontab -l 2>/dev/null | grep -q "$service"; then
        (crontab -l 2>/dev/null | grep -v "$service") | crontab -
-       print_success "✅ Cron job for $service removed."
+       print_success "Cron job for $service removed."
     else
-       print_warning "⚠ No cron job found for $service."
+               print_warning "No cron job found for $service."
     fi
 } 

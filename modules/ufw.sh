@@ -12,7 +12,11 @@ manage_ufw_add() {
     fi
     if ! ufw status | grep -q "Status: active"; then
         print_warning "UFW is not active."
-        read -p "Do you want to enable UFW and add the required rules? (y/n): " enable_ufw
+        if confirm_action "Do you want to enable UFW and add the required rules?" "n"; then
+        enable_ufw="y"
+    else
+        enable_ufw="n"
+    fi
         if [[ "${enable_ufw,,}" == "y" ]]; then
             # Detect SSH port(s) from sshd_config and listening ports
             local ssh_ports
@@ -123,74 +127,79 @@ remove_ufw_rules() {
     fi
 }
 
+# UFW Firewall Management
 ufw_menu() {
-    clear
-    print_server_info_banner
-    print_menu_header "UFW Firewall Management"
-    
-    # Check UFW status
-    local ufw_status=$(ufw status 2>/dev/null | head -n1 | grep -o "Status: .*" | cut -d' ' -f2)
-    local ufw_active=false
-    
-    if [[ "$ufw_status" == "active" ]]; then
-        ufw_active=true
-        print_success "UFW Status: Active"
-    else
-        print_warning "UFW Status: Inactive"
-    fi
-    
-    echo
-    echo "1. Enable UFW Firewall"
-    echo "2. Disable UFW Firewall"
-    echo "3. Reset UFW Rules"
-    echo "4. View UFW Status"
-    echo "5. Fix UFW Rules"
-    echo "0. Back to Main Menu"
-    echo
-    
     # Help function for UFW menu
     ufw_menu_help() {
         clear
         print_server_info_banner_minimal
         print_info "================= UFW Firewall Management Help ================="
-        echo
-        echo "UFW (Uncomplicated Firewall) is a frontend for iptables."
-        echo "This menu helps you manage firewall rules for EasyBackhaul tunnels."
+        echo "This menu helps you manage the UFW (Uncomplicated Firewall) on your system."
         echo
         echo "Available options:"
-        echo "  • Enable UFW: Turn on the firewall (requires SSH access)"
-        echo "  • Disable UFW: Turn off the firewall (security risk)"
-        echo "  • Reset UFW Rules: Remove all rules and reset to default"
-        echo "  • View UFW Status: See current firewall status and rules"
-        echo "  • Fix UFW Rules: Remove orphaned rules for deleted tunnels"
+        echo " 1. Enable UFW Firewall"
+        echo " 2. Disable UFW Firewall"
+        echo " 3. Reset UFW Rules"
+        echo " 4. View UFW Status"
+        echo " 5. Fix UFW Rules"
+        echo " 0. Back to Main Menu: Return to the main menu"
         echo
-        print_info "Note: Enabling UFW may block SSH access if not configured properly."
-        print_info "Make sure you have alternative access before enabling UFW."
+        print_info "Important Notes:"
+        echo "- Enabling UFW may block SSH access if not configured properly"
+        echo "- Always ensure SSH access is allowed before enabling UFW"
+        echo "- Backhaul tunnels will automatically add required UFW rules"
+        echo "- Use 'Fix UFW Rules' to clean up rules for deleted tunnels"
         echo "================================================================"
         press_any_key
     }
-    
-    menu_loop 0 5 "?" "ufw_menu_help" "Enter choice [0-5, ? for help]"
-    
-    case $choice in
-        1) enable_ufw ;;
-        2) disable_ufw ;;
-        3) reset_ufw ;;
-        4) view_ufw_status ;;
-        5) fix_ufw_rules ;;
-        0) main_menu ;;
-        *) print_warning "Invalid option. Please enter 0-5."; press_any_key; ufw_menu ;;
-    esac
+
+    while true; do
+        clear
+        print_server_info_banner
+        print_info "--- UFW Firewall Management ---"
+        echo
+        
+        # Check UFW status
+        local ufw_status
+        ufw_status=$(ufw status 2>/dev/null | head -n1 | awk '{print $2}')
+        local ufw_active=false
+        
+        if [[ "$ufw_status" == "active" ]]; then
+            ufw_active=true
+            print_success "UFW Status: Active"
+        else
+            print_warning "UFW Status: Inactive"
+        fi
+        
+        echo
+        echo "1. Enable UFW Firewall"
+        echo "2. Disable UFW Firewall"
+        echo "3. Reset UFW Rules"
+        echo "4. View UFW Status"
+        echo "5. Fix UFW Rules"
+        print_menu_footer
+        
+        menu_loop 0 5 "?" "ufw_menu_help" "Select an option [0-5, ? for help]:"
+        
+        case $choice in
+            1) enable_ufw ;;
+            2) disable_ufw ;;
+            3) reset_ufw ;;
+            4) view_ufw_status ;;
+            5) fix_ufw_rules ;;
+            0) return_to_previous_menu; return ;;
+            *) print_warning "Invalid option. Please enter 0-5."; press_any_key ;;
+        esac
+    done
 }
 
 enable_ufw() {
     clear
-    print_submenu_header_unified "Enable UFW Firewall"
+    print_secondary_menu_header "Enable UFW Firewall"
     
     if [[ "$ufw_active" == "true" ]]; then
         print_warning "UFW is already active"
         press_any_key
-        ufw_menu
         return
     fi
     
@@ -198,8 +207,12 @@ enable_ufw() {
     print_info "Make sure you have SSH access configured before proceeding."
     echo
     
-    read -p "Proceed? [y/N]: " choice
-    
+    if confirm_action "Proceed?" "n"; then
+        choice="y"
+    else
+        choice="n"
+    fi
+
     if [[ "$choice" =~ ^[Yy]$ ]]; then
         if with_spinner "Enabling UFW" ufw --force enable; then
             print_success "UFW enabled successfully"
@@ -211,17 +224,15 @@ enable_ufw() {
     fi
     
     press_any_key
-    ufw_menu
 }
 
 disable_ufw() {
     clear
-    print_submenu_header_unified "Disable UFW Firewall"
+    print_secondary_menu_header "Disable UFW Firewall"
     
     if [[ "$ufw_active" != "true" ]]; then
         print_warning "UFW is not active"
         press_any_key
-        ufw_menu
         return
     fi
     
@@ -229,8 +240,12 @@ disable_ufw() {
     print_info "This will make your system more vulnerable to attacks."
     echo
     
-    read -p "Are you sure? [y/N]: " choice
-    
+    if confirm_action "Are you sure?" "n"; then
+        choice="y"
+    else
+        choice="n"
+    fi
+
     if [[ "$choice" =~ ^[Yy]$ ]]; then
         if with_spinner "Disabling UFW" ufw disable; then
             print_success "UFW disabled successfully"
@@ -242,18 +257,17 @@ disable_ufw() {
     fi
     
     press_any_key
-    ufw_menu
 }
 
 reset_ufw() {
     clear
-    print_submenu_header_unified "Reset UFW Rules"
+    print_secondary_menu_header "Reset UFW Rules"
     
     print_warning "WARNING: This will remove ALL UFW rules and reset to default."
     print_info "This action cannot be undone."
     echo
     
-    read -p "Type 'RESET' to confirm: " confirmation
+    read -r -p "Type 'RESET' to confirm: " confirmation
     
     if [[ "$confirmation" == "RESET" ]]; then
         if with_spinner "Resetting UFW rules" ufw --force reset; then
@@ -266,17 +280,15 @@ reset_ufw() {
     fi
     
     press_any_key
-    ufw_menu
 }
 
 view_ufw_status() {
     clear
-    print_submenu_header_unified "UFW Status"
+    print_secondary_menu_header "UFW Status"
     
     if [[ "$ufw_active" != "true" ]]; then
         print_error "UFW is not active - no firewall protection"
         press_any_key
-        ufw_menu
         return
     fi
     
@@ -295,17 +307,15 @@ view_ufw_status() {
     fi
     
     press_any_key
-    ufw_menu
 }
 
 fix_ufw_rules() {
     clear
-    print_submenu_header_unified "Fix UFW Rules"
+    print_secondary_menu_header "Fix UFW Rules"
     
     if [[ "$ufw_active" != "true" ]]; then
         print_warning "UFW is not active - no rules to fix"
         press_any_key
-        ufw_menu
         return
     fi
     
@@ -330,7 +340,11 @@ fix_ufw_rules() {
             echo "  $rule"
         done
         echo
-        read -p "Remove orphaned rules? [y/N]: " fix_choice
+        if confirm_action "Remove orphaned rules?" "n"; then
+            fix_choice="y"
+        else
+            fix_choice="n"
+        fi
         if [[ "$fix_choice" =~ ^[Yy]$ ]]; then
             # Remove orphaned rules (this is a simplified approach)
             print_info "Removing orphaned rules..."
@@ -340,5 +354,4 @@ fix_ufw_rules() {
     fi
     
     press_any_key
-    ufw_menu
 } 
