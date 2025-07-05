@@ -5289,6 +5289,7 @@ show_watcher_secret() {
 
 # --- Tunnel Management ---
 manage_tunnels() {
+    push_menu "manage_tunnels"
     # Help function for tunnel list
     tunnel_list_help() {
         clear
@@ -5311,15 +5312,13 @@ manage_tunnels() {
         print_server_info_banner
         print_info "--- Available Backhaul Tunnels ---"
         echo
-        
         mapfile -t services < <(systemctl list-unit-files --type=service 'backhaul-*.service' --no-legend | awk '{print $1}' | grep -v 'backhaul-watcher-')
-
         if [[ ${#services[@]} -eq 0 ]]; then
             print_warning "No Backhaul tunnels found. Use 'Configure a New Tunnel' first."
             press_any_key
+            return_to_previous_menu
             return
         fi
-
         local i=1
         for service in "${services[@]}"; do
             local status
@@ -5331,17 +5330,14 @@ manage_tunnels() {
             print_service_status "$service" "$status"
             ((i++))
         done
-        
         echo
         print_info "----------------------------------------------------------------"
         echo " ?. Help"
         echo " 0. Back"
         echo
-        
         menu_loop 0 $((i-1)) "?" "tunnel_list_help" "Select tunnel to manage [0-$((i-1)), ? for help]"
-        
         case $choice in
-            0) return ;;
+            0) return_to_previous_menu; return ;;
             *)
                 local selected_service="${services[$((choice-1))]}"
                 local suffix=$(echo "$selected_service" | sed 's/backhaul-\(.*\)\.service/\1/')
@@ -5716,6 +5712,7 @@ test_connection() {
 
 # --- Watcher Submenu ---
 manage_watcher_submenu() {
+    push_menu "manage_watcher_submenu"
     local service="$1"
     local suffix="$2"
     local config_file="$3"
@@ -5742,7 +5739,7 @@ manage_watcher_submenu() {
             6) test_watcher "$service" "$suffix" "$config_file" ;;
             7) show_watcher_secret "$config_file" ;;
             \?) watcher_submenu_help ;;
-            0) return ;;
+            0) return_to_previous_menu; return ;;
             *) print_warning "Invalid option."; press_any_key ;;
         esac
     done
@@ -6216,98 +6213,61 @@ stop_tunnel_impl() {
 
 # --- Installation Wizard ---
 installation_wizard() {
-    clear
-    print_server_info_banner
-    print_primary_menu_header "EasyBackhaul Installation Wizard (v13.0-beta)" "Core by Musixal  |  Installer by @N4Xon"
-    echo
-    print_info "Welcome to EasyBackhaul! This wizard will help you install the Backhaul binary."
-    echo
-    print_info "Please choose your preferred installation method:"
-    echo
-    echo " 1. Automatic GitHub Download (Recommended)"
-    echo "    - Downloads latest version from GitHub"
-    echo "    - Includes connection testing and fallback options"
-    echo
-    echo " 2. Local File Installation"
-    echo "    - Use a binary file you've downloaded manually"
-    echo "    - Supports .tar.gz, .zip, or direct binary files"
-    echo
-    echo " 3. Alternative Download Source"
-    echo "    - Download from your own server or alternative URL"
-    echo "    - Useful when GitHub is not accessible"
-    echo
-    echo " 4. Network Diagnostics"
-    echo "    - Test connectivity to various sources"
-    echo "    - Help diagnose network issues"
-    echo
-    echo " 5. Skip Installation (Advanced)"
-    echo "    - Continue without installing binary"
-    echo "    - You can install manually later"
-    echo
-    print_menu_footer
+    push_menu "installation_wizard"
     while true; do
-        read -p "Select an option [0-5, ? for help]: " install_choice
-        case $install_choice in
+        clear
+        print_server_info_banner
+        print_primary_menu_header "EasyBackhaul Installation Wizard (v13.0-beta)" "Core by Musixal  |  Installer by @N4Xon"
+        echo
+        print_info "Welcome to EasyBackhaul! This wizard will help you install the Backhaul binary."
+        echo
+        print_info "Please choose your preferred installation method:"
+        echo
+        echo " 1. Automatic GitHub Download (Recommended)"
+        echo "    - Downloads latest version from GitHub"
+        echo "    - Includes connection testing and fallback options"
+        echo
+        echo " 2. Local File Installation"
+        echo "    - Use a binary file you've downloaded manually"
+        echo "    - Supports .tar.gz, .zip, or direct binary files"
+        echo
+        echo " 3. Alternative Download Source"
+        echo "    - Download from your own server or alternative URL"
+        echo "    - Useful when GitHub is not accessible"
+        echo
+        echo " 4. Network Diagnostics"
+        echo "    - Test connectivity to various sources"
+        echo "    - Help diagnose network issues"
+        echo
+        echo " 5. Skip Installation (Advanced)"
+        echo "    - Continue without installing binary"
+        echo "    - You can install manually later"
+        echo
+        print_menu_footer
+        read -p "Select an option [0-5, ? for help]: " choice
+        case $choice in
             1)
-                print_info "Starting automatic GitHub download..."
-                if download_backhaul; then
-                    return 0
-                else
-                    print_warning "Installation failed or was cancelled."
-                    press_any_key
-                    return 1
-                fi
+                run_github_download
                 ;;
             2)
-                print_info "Starting local file installation..."
-                local os=$(uname -s | tr '[:upper:]' '[:lower:]')
-                local arch=$(uname -m)
-                case $arch in
-                    x86_64) arch="amd64" ;;
-                    aarch64) arch="arm64" ;;
-                    *) print_error "Unsupported architecture: $arch"; press_any_key; return 1 ;;
-                esac
-                if download_from_local_file "$os" "$arch"; then
-                    return 0
-                else
-                    print_warning "Local installation failed or was cancelled."
-                    press_any_key
-                    return 1
-                fi
+                run_local_file_installation
                 ;;
             3)
-                print_info "Starting alternative source download..."
-                local os=$(uname -s | tr '[:upper:]' '[:lower:]')
-                local arch=$(uname -m)
-                case $arch in
-                    x86_64) arch="amd64" ;;
-                    aarch64) arch="arm64" ;;
-                    *) print_error "Unsupported architecture: $arch"; press_any_key; return 1 ;;
-                esac
-                if download_from_alternative_source "$os" "$arch"; then
-                    return 0
-                else
-                    print_warning "Alternative installation failed or was cancelled."
-                    press_any_key
-                    return 1
-                fi
+                run_alternative_download
                 ;;
             4)
                 run_network_diagnostics_menu
-                installation_wizard
-                return 0
                 ;;
             5)
                 print_warning "Skipping binary installation."
                 print_info "You can install the binary manually later using option 3 in the main menu."
                 print_info "Make sure to place it at: $BIN_PATH"
                 press_any_key
+                return_to_previous_menu
                 return 0
                 ;;
             \?)
                 show_installation_help
-                installation_wizard
-                return 0
                 ;;
             0)
                 print_info "Exiting EasyBackhaul installer."
