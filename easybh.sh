@@ -90,19 +90,24 @@ press_any_key() { read -n 1 -s -r -p "Press any key to continue..."; echo; }
 # --- Enhanced Logging System ---
 # Initialize logging system
 init_logging() {
+    echo "DEBUG: Creating log directory..."
     mkdir -p "$LOG_DIR"
     chmod 755 "$LOG_DIR"
     
+    echo "DEBUG: Creating log files..."
     # Create log files if they don't exist
     touch "$HEALTH_LOG_FILE" "$PERFORMANCE_LOG_FILE"
     chmod 644 "$HEALTH_LOG_FILE" "$PERFORMANCE_LOG_FILE"
     
+    echo "DEBUG: Setting up log rotation..."
     # Set up log rotation if logrotate is available
     if command -v logrotate &>/dev/null; then
         setup_log_rotation
     fi
     
+    echo "DEBUG: Checking netcat compatibility..."
     check_nc_compatibility
+    echo "DEBUG: Netcat compatibility check completed"
 }
 
 # Setup log rotation
@@ -1265,13 +1270,16 @@ secure_log_message() {
 
 # --- Netcat Compatibility Check ---
 check_nc_compatibility() {
+    echo "DEBUG: Starting netcat compatibility test..."
     # Test for OpenBSD netcat compatibility with timeout to prevent hanging
     local nc_test_result=""
     
     # Use timeout command if available to prevent hanging
     if command -v timeout >/dev/null 2>&1; then
+        echo "DEBUG: Using timeout command for netcat test..."
         nc_test_result=$(timeout 3 bash -c 'echo | nc -l -p 0 -w 1 2>&1' 2>/dev/null || echo "timeout")
     else
+        echo "DEBUG: Using background process method for netcat test..."
         # Fallback: use a background process with kill
         local nc_pid
         nc_test_result=$(bash -c 'echo | nc -l -p 0 -w 1 2>&1' &)
@@ -1293,6 +1301,8 @@ check_nc_compatibility() {
             nc_test_result=$(bash -c 'echo | nc -l -p 0 -w 1 2>&1' 2>&1)
         fi
     fi
+    
+    echo "DEBUG: Netcat test result: $nc_test_result"
     
     # Check the result
     if [[ "$nc_test_result" == "timeout" ]] || echo "$nc_test_result" | grep -qi 'usage\|invalid\|unknown option'; then
@@ -6428,10 +6438,13 @@ main_menu() {
 get_server_info
 check_root
 check_dependencies
+echo "DEBUG: Dependencies checked, creating directories..."
 mkdir -p "$CONFIG_DIR" "$BACKUP_DIR"
+echo "DEBUG: Directories created, initializing logging..."
 
 # Initialize enhanced logging system
 init_logging
+echo "DEBUG: Logging initialized, checking binary..."
 
 # Check if binary exists, if not run installation wizard
 if [ ! -f "$BIN_PATH" ]; then
