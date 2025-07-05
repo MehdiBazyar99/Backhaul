@@ -6247,13 +6247,13 @@ installation_wizard() {
         read -p "Select an option [0-5, ? for help]: " choice
         case $choice in
             1)
-                run_github_download
+                download_from_github "latest" "$(uname -s | tr '[:upper:]' '[:lower:]')" "$(uname -m)"
                 ;;
             2)
-                run_local_file_installation
+                download_from_local_file "$(uname -s | tr '[:upper:]' '[:lower:]')" "$(uname -m)"
                 ;;
             3)
-                run_alternative_download
+                download_from_alternative_source "$(uname -s | tr '[:upper:]' '[:lower:]')" "$(uname -m)"
                 ;;
             4)
                 run_network_diagnostics_menu
