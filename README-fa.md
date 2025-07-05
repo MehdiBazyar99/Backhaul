@@ -19,7 +19,7 @@
 اجرای مستقیم اسکریپت از گیت‌هاب با یک دستور:
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/NaxonM/EasyBackhaul/beta/easybackhaul.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/NaxonM/EasyBackhaul/beta/easybh.sh)
 ```
 
 **از سورس:**  

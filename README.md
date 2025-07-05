@@ -19,7 +19,7 @@ Developed by [@N4Xon (NaxonM)](https://github.com/NaxonM/EasyBackhaul), EasyBack
 Run the script directly from GitHub with a single command:
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/NaxonM/EasyBackhaul/beta/easybackhaul.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/NaxonM/EasyBackhaul/beta/easybh.sh)
 ```
 
 **From Source:**  
