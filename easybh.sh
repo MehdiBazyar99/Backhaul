@@ -2969,443 +2969,540 @@ configure_tunnel() {
     
     clear
     print_server_info_banner_minimal
-    print_info "--- Tunnel Configuration Wizard ---"
-    
-    print_info "This wizard will help you create a new Backhaul tunnel configuration."
-    print_info "You can cancel at any time by entering '0' or press '?' for help."
+    print_info "=========================================="
+    print_info "      VPN Tunnel Configuration Wizard"
+    print_info "=========================================="
+    print_info "This wizard helps you set up a VPN tunnel between:"
+    print_info "  • Iran Server: Relay/exit point (users connect here)"
+    print_info "  • Foreign Server: VPN panel hosting (tunnel destination)"
+    print_info "Users connect to Iran server → Traffic forwarded to foreign server VPN panel"
     echo
     
-    # Get tunnel name with intelligent generation
-    echo
-    print_info "--- Tunnel Name ---"
-    print_info "Enter a descriptive name for your tunnel, or press Enter for auto-generation."
-    echo
+    # --- Step 1: Setup Type ---
+    print_info "Choose your setup preference:"
+    print_info "1. Quick Setup (recommended) - Uses sensible defaults for most settings"
+    print_info "2. Advanced Setup - Configure all settings manually"
+    print_info "0. Back to Main Menu"
     
-    # Generate default tunnel name based on context
-    local default_name=""
-    if [[ "$setup_type" == "server" ]]; then
-        default_name="server-$(date +%Y%m%d)-$(tr -dc 'a-z0-9' < /dev/urandom | head -c 4)"
+    local setup_type_choice
+    while true; do
+        read -p "Select setup type [1-2, 0] (default: 1): " setup_type_choice
+        setup_type_choice=${setup_type_choice:-1}
+        case $setup_type_choice in
+            1|2) break ;;
+            0) return ;;
+            *) print_warning "Invalid selection." ;;
+        esac
+    done
+
+    # --- Step 2: Automatic Role Detection ---
+    local mode_choice
+    local default_mode
+    
+    # Get server country if not already set
+    if [[ -z "$SERVER_COUNTRY" ]]; then
+        print_info "Detecting server location..."
+        get_server_info
+    fi
+    
+    if [[ "$SERVER_COUNTRY" == "IR" ]]; then
+        default_mode="1"
+        print_info "Detected server location: Iran (defaulting to Server mode)"
     else
-        default_name="client-$(date +%Y%m%d)-$(tr -dc 'a-z0-9' < /dev/urandom | head -c 4)"
+        default_mode="2"
+        print_info "Detected server location: $SERVER_COUNTRY (defaulting to Client mode)"
     fi
     
     while true; do
-        read -p "Enter tunnel name (default: $default_name): " tunnel_name
-        if [[ "$tunnel_name" == "0" ]]; then
-            print_info "Configuration cancelled."
-            return
-        elif [[ "$tunnel_name" == "?" ]]; then
-            print_info "--- Tunnel Name Help ---"
-            echo "The tunnel name is used to identify this tunnel."
-            echo "Use descriptive names like 'my-vpn' or 'web-server'."
-            echo "Avoid spaces and special characters."
-            echo "This name will be used for the service and config files."
-            echo "Press Enter to use auto-generated name: $default_name"
-            press_any_key
-        elif [[ -z "$tunnel_name" ]]; then
-            # Use default name
-            tunnel_name="$default_name"
-            print_success "Using auto-generated name: $tunnel_name"
-            break
-        elif [[ -n "$tunnel_name" ]]; then
-            # Validate and improve user-provided name
-            if [[ "$tunnel_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-                # Add improvements to user-provided name
-                local improved_name="$tunnel_name"
-                
-                # Add transport suffix if not present
-                if [[ ! "$improved_name" =~ -${transport}$ ]]; then
-                    improved_name="${improved_name}-${transport}"
-                fi
-                
-                # Add timestamp suffix for uniqueness
-                improved_name="${improved_name}-$(date +%m%d)"
-                
-                # Check if name already exists
-                local counter=1
-                local final_name="$improved_name"
-                while [[ -f "$CONFIG_DIR/config-${final_name}.toml" ]]; do
-                    final_name="${improved_name}-${counter}"
-                    ((counter++))
-                done
-                
-                if [[ "$final_name" != "$tunnel_name" ]]; then
-                    print_info "Improved tunnel name: $final_name"
-                    print_info "(Added transport suffix and timestamp for uniqueness)"
-                    tunnel_name="$final_name"
-                fi
-                
-                break
-            else
-                print_warning "Invalid tunnel name. Use only letters, numbers, hyphens, and underscores."
-                press_any_key
-            fi
-        fi
-    done
-    
-    # Get setup type
-    echo
-    print_info "--- Tunnel Type ---"
-    echo " 1. Server (accepts connections from clients)"
-    echo " 2. Client (connects to a server)"
-    echo " 0. Cancel"
-    echo
-    while true; do
-        read -p "Select tunnel type [1-2, 0 to cancel]: " setup_type
-        case $setup_type in
+        echo
+        print_info "1. Server (Listens for connections)"
+        print_info "2. Client (Connects to a server)"
+        print_info "0. Back to Main Menu"
+        read -p "Select mode [1-2, 0] (default: $default_mode): " mode_choice
+        mode_choice=${mode_choice:-$default_mode}
+        case $mode_choice in
             1) setup_type="server"; break ;;
             2) setup_type="client"; break ;;
-            0)
-                print_info "Configuration cancelled."
-                return
-                ;;
-            *)
-                print_warning "Invalid option. Please enter 1-2 or 0 to cancel."
-                press_any_key
-                ;;
+            0) return ;;
+            *) print_warning "Invalid selection." ;;
         esac
     done
 
-    # Get transport protocol
-    echo
-    print_info "--- Transport Protocol ---"
-    echo " 1. TCP (most reliable, recommended)"
-    echo " 2. UDP (faster, less reliable)"
-    echo " 3. WebSocket (for web environments)"
-    echo " 4. WebSocket Secure (WSS, encrypted)"
-    echo " 5. TCP Multiplexed (tcpmux, multiple connections)"
-    echo " 6. WebSocket Multiplexed (wsmux, multiple connections)"
-    echo " 7. WebSocket Secure Multiplexed (wssmux, encrypted + multiple connections)"
-    echo " 0. Cancel"
-    echo
-    while true; do
-        read -p "Select transport protocol [1-7, 0 to cancel]: " transport_choice
-        case $transport_choice in
-            1) transport="tcp"; break ;;
-            2) transport="udp"; break ;;
-            3) transport="ws"; break ;;
-            4) transport="wss"; break ;;
-            5) transport="tcpmux"; break ;;
-            6) transport="wsmux"; break ;;
-            7) transport="wssmux"; break ;;
-            0)
-                print_info "Configuration cancelled."
-                return
-                ;;
-            *)
-                print_warning "Invalid option. Please enter 1-7 or 0 to cancel."
-                press_any_key
-                ;;
-        esac
-    done
-
-    # Handle TLS certificates for secure protocols
-    if [[ "$transport" == "wss" || "$transport" == "wssmux" ]]; then
-        echo
-        print_info "--- TLS Certificate Configuration ---"
-        print_info "Secure protocols (WSS/WSSMUX) require TLS certificates."
-        echo
-        echo " 1. Use existing certificate"
-        echo " 2. Generate new certificate"
-        echo " 3. Skip for now (tunnel will not work without certificate)"
-        echo " 0. Cancel"
-        echo
+    # --- Step 3: Transport Protocol ---
+    print_info "Select transport protocol:"
+    if [[ $setup_type_choice -eq 1 ]]; then
+        # Quick setup - simplified options
+        print_info "1. TCP (recommended) - Standard, reliable, works everywhere"
+        print_info "2. WebSocket (WS) - Good for bypassing firewalls"
+        print_info "3. Secure WebSocket (WSS) - Encrypted, most secure"
+        print_info "4. Show all options"
+        
+        local transport_choice
         while true; do
-            read -p "Select certificate option [1-3, 0 to cancel]: " cert_choice
-            case $cert_choice in
-                1)
-                    # Use existing certificate
-                    local cert_dir="/etc/backhaul/certs"
-                    if [[ -d "$cert_dir" ]]; then
-                        local certs=($(find "$cert_dir" -name "*.crt" 2>/dev/null))
-                        if [[ ${#certs[@]} -gt 0 ]]; then
-                            echo
-                            print_info "Available certificates:"
-                            local i=1
-                            for cert in "${certs[@]}"; do
-                                echo " $i. $(basename "$cert")"
-                                ((i++))
-                            done
-                            echo " 0. Cancel"
-                            echo
-                            while true; do
-                                read -p "Select certificate [1-$((i-1)), 0 to cancel]: " cert_select
-                                if [[ "$cert_select" == "0" ]]; then
-                                    break
-                                elif [[ "$cert_select" =~ ^[1-9][0-9]*$ ]] && [[ $cert_select -lt $i ]]; then
-                                    tls_cert_path="${certs[$((cert_select-1))]}"
-                                    tls_key_path="${tls_cert_path%.crt}.key"
-                                    if [[ -f "$tls_key_path" ]]; then
-                                        print_success "Selected certificate: $(basename "$tls_cert_path")"
-                                        break
-                                    else
-                                        print_error "Certificate key file not found: $tls_key_path"
-                                        tls_cert_path=""
-                                        tls_key_path=""
-                                    fi
-                                else
-                                    print_warning "Invalid selection. Please enter 1-$((i-1)) or 0."
-                                fi
-                            done
-                        else
-                            print_warning "No certificates found in $cert_dir"
-                        fi
+            read -p "Select transport [1-4] (default: 1): " transport_choice
+            transport_choice=${transport_choice:-1}
+            case $transport_choice in
+                1) transport="tcp"; break ;;
+                2) transport="ws"; break ;;
+                3) transport="wss"; break ;;
+                4) 
+                    # Show all options
+                    print_info "All transport options:"
+                    print_info "1. tcp - Standard TCP (recommended)"
+                    print_info "2. tcpmux - Multiplexed TCP"
+                    print_info "3. udp - UDP"
+                    print_info "4. ws - WebSocket"
+                    print_info "5. wsmux - Multiplexed WebSocket"
+                    print_info "6. wss - Secure WebSocket"
+                    print_info "7. wssmux - Multiplexed Secure WebSocket"
+                    read -p "Select transport [1-7] (default: 1): " transport_choice
+                    transport_choice=${transport_choice:-1}
+                    local transport_options=("tcp" "tcpmux" "udp" "ws" "wsmux" "wss" "wssmux")
+                    if [[ "$transport_choice" =~ ^[1-7]$ ]]; then
+                        transport="${transport_options[$((transport_choice-1))]}"
+                        break
                     else
-                        print_warning "Certificate directory not found: $cert_dir"
+                        print_warning "Invalid selection."
                     fi
-                    break
                     ;;
-                2)
-                    # Generate new certificate
-                    print_info "Generating new TLS certificate..."
-                    generate_self_signed_cert
-                    # The function will set the paths or we can extract them
-                    local cert_dir="/etc/backhaul/certs"
-                    local latest_cert=$(find "$cert_dir" -name "*.crt" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
-                    if [[ -n "$latest_cert" ]]; then
-                        tls_cert_path="$latest_cert"
-                        tls_key_path="${tls_cert_path%.crt}.key"
-                        print_success "Generated certificate: $(basename "$tls_cert_path")"
-                    fi
-                    break
-                    ;;
-                3)
-                    print_warning "TLS certificate required for $transport protocol."
-                    print_info "You can add certificates later by editing the config file."
-                    break
-                    ;;
-                0)
-                    print_info "Configuration cancelled."
-                    return
-                    ;;
-                *)
-                    print_warning "Invalid option. Please enter 1-3 or 0 to cancel."
-                    press_any_key
-                    ;;
+                *) print_warning "Invalid selection." ;;
             esac
         done
-    fi
-
-    # Get server details
-    if [[ "$setup_type" == "client" ]]; then
-        echo
-        print_info "--- Server Configuration ---"
-        while true; do
-            read -p "Enter server IP address (e.g., 192.168.1.100): " server_ip
-            if [[ "$server_ip" == "0" ]]; then
-                print_info "Configuration cancelled."
-                return
-            elif [[ "$server_ip" == "?" ]]; then
-                print_info "--- Server IP Help ---"
-                echo "Enter the IP address of your Backhaul server."
-                echo "This is the server that will accept your connection."
-                echo "Examples: 192.168.1.100, 10.0.0.5, or a public IP"
-                press_any_key
-            elif [[ -n "$server_ip" ]]; then
-                # Basic IP validation
-                if [[ "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                    break
-                else
-                    print_warning "Please enter a valid IP address (e.g., 192.168.1.100)."
-                    press_any_key
-                fi
-            else
-                print_warning "Please enter a server IP address."
-                press_any_key
-            fi
+    else
+        # Advanced setup - show all options
+        print_info "Available transports:"
+        local transport_options=("tcp" "tcpmux" "udp" "ws" "wsmux" "wss" "wssmux")
+        local transport_descriptions=(
+            "Standard TCP - Fast and reliable"
+            "Multiplexed TCP - Multiple connections over single TCP"
+            "UDP - For UDP-specific applications"
+            "WebSocket - Good for bypassing firewalls"
+            "Multiplexed WebSocket - Multiple connections over WS"
+            "Secure WebSocket - Encrypted with TLS"
+            "Multiplexed Secure WebSocket - Multiple connections over WSS"
+        )
+        
+        local i=1
+        for t in "${transport_options[@]}"; do
+            echo "  $i) $t - ${transport_descriptions[$((i-1))]}"
+            ((i++))
         done
         
         while true; do
-            read -p "Enter server port (e.g., 8080): " server_port
-            if [[ "$server_port" == "0" ]]; then
-                print_info "Configuration cancelled."
-                return
-            elif [[ "$server_port" == "?" ]]; then
-                print_info "--- Server Port Help ---"
-                echo "Enter the port number your server is listening on."
-                echo "This should match the port configured on your server."
-                echo "Common ports: 8080, 8443, 4567"
-                press_any_key
-            elif [[ -n "$server_port" ]] && [[ "$server_port" =~ ^[0-9]+$ ]] && [[ $server_port -ge 1 ]] && [[ $server_port -le 65535 ]]; then
+            read -p "Select transport protocol [1-${#transport_options[@]}]: " transport_choice
+            if [[ "$transport_choice" =~ ^[1-7]$ ]]; then
+                transport="${transport_options[$((transport_choice-1))]}"
                 break
             else
-                print_warning "Please enter a valid port number (1-65535)."
-                press_any_key
+                print_warning "Invalid selection. Enter a number 1-${#transport_options[@]}."
             fi
         done
     fi
 
-    # Get local port
-    echo
-    print_info "--- Local Port Configuration ---"
+    # --- Step 4: Basic Configuration ---
+    print_info "--- Basic Configuration ---"
+    local tunnel_port server_ip token
+    
+    if [[ "$setup_type" == "server" ]]; then
+        local default_tunnel_port=443
+        while true; do
+            read -p "Enter the main tunnel port to listen on [${default_tunnel_port}]: " tunnel_port
+            tunnel_port=${tunnel_port:-$default_tunnel_port}
+            if ! validate_port "$tunnel_port"; then
+                print_warning "Invalid port number."
+            elif ! check_port_availability "$tunnel_port"; then
+                read -p "Port $tunnel_port is in use. Auto-select a free port? (y/n): " autoport
+                if [[ "${autoport,,}" == "y" ]]; then
+                    for p in $(seq 20000 1 65000); do
+                        if check_port_availability "$p"; then
+                            tunnel_port="$p"
+                            print_success "Selected free port: $tunnel_port"
+                            break
+                        fi
+                    done
+                    break
+                else
+                    continue
+                fi
+            else
+                break
+            fi
+        done
+        
+        local_port="$tunnel_port"
+        server_ip=""
+        server_port=""
+        
+    else # client
+        print_info "--- Foreign Server Configuration ---"
+        print_info "This foreign server will connect to Iran server to provide VPN panel access."
+        print_info "Users will connect to Iran server, which forwards traffic to this foreign server."
+        
+        while true; do
+            read -p "Enter the public IP address of the Iran server: " server_ip
+            validate_ip "$server_ip" && break || print_warning "Invalid IP address format."
+        done
+        
+        # Optional: Offer to ping the server IP
+        read -p "Do you want to ping the Iran server IP to check connectivity? (y/n) [y]: " do_ping
+        do_ping=${do_ping:-y}
+        if [[ "${do_ping,,}" == "y" ]]; then
+            print_info "Pinging $server_ip..."
+            if ping -c 2 -W 2 "$server_ip" >/dev/null 2>&1; then
+                print_success "Ping successful! Iran server is reachable."
+            else
+                print_warning "Ping failed. The Iran server may be offline or unreachable."
+            fi
+        fi
+        
+        while true; do
+            local default_tunnel_port=443
+            read -p "Enter the tunnel port set on the Iran server [${default_tunnel_port}]: " tunnel_port
+            tunnel_port=${tunnel_port:-$default_tunnel_port}
+            if ! validate_port "$tunnel_port"; then
+                print_warning "Invalid port number."
+            elif ! check_port_availability "$tunnel_port"; then
+                read -p "Port $tunnel_port is in use. Auto-select a free port? (y/n): " autoport
+                if [[ "${autoport,,}" == "y" ]]; then
+                    for p in $(seq 20000 1 65000); do
+                        if check_port_availability "$p"; then
+                            tunnel_port="$p"
+                            print_success "Selected free port: $tunnel_port"
+                            break
+                        fi
+                    done
+                    break
+                else
+                    continue
+                fi
+            else
+                break
+            fi
+        done
+        
+        server_port="$tunnel_port"
+        local_port="1080"  # Default local port for client
+    fi
+
+    # Token prompt (same for both server and client)
+    local default_token="vpn-tunnel-naxon"
     while true; do
-        read -p "Enter local port to forward (e.g., 80, 443, 8080): " local_port
-        if [[ "$local_port" == "0" ]]; then
-            print_info "Configuration cancelled."
-            return
-        elif [[ "$local_port" == "?" ]]; then
-            print_info "--- Local Port Help ---"
-            echo "Enter the port number of the service you want to expose."
-            echo "This is the port your local service is running on."
-            echo "Examples: 80 (HTTP), 443 (HTTPS), 22 (SSH), 8080 (web app)"
-            press_any_key
-        elif [[ -n "$local_port" ]] && [[ "$local_port" =~ ^[0-9]+$ ]] && [[ $local_port -ge 1 ]] && [[ $local_port -le 65535 ]]; then
+        read -p "Enter a secure authentication token [default: $default_token, must match on both sides]: " token
+        # Use default token if input is empty
+        token=${token:-$default_token}
+        if [[ -n "$token" ]]; then
+            auth_token="$token"
             break
         else
-            print_warning "Please enter a valid port number (1-65535)."
-            press_any_key
+            print_warning "Token cannot be empty."
         fi
     done
 
-    # Get authentication token
-    echo
-    print_info "--- Authentication ---"
-        while true; do
-        read -p "Enter authentication token (optional, press Enter to skip): " auth_token
-        if [[ "$auth_token" == "0" ]]; then
-            print_info "Configuration cancelled."
-            return
-        elif [[ "$auth_token" == "?" ]]; then
-            print_info "--- Authentication Token Help ---"
-            echo "A token provides security for your tunnel connection."
-            echo "Both client and server must use the same token."
-            echo "Leave empty for no authentication (less secure)."
-            echo "Use a strong, random string for better security."
-            press_any_key
-        else
-            break
-        fi
-    done
+    # --- Step 5: Advanced Configuration (Conditional) ---
+    local log_level="info" nodelay="true" keepalive_period=75
+    local heartbeat=40 connection_pool=8 retry_interval=3 dial_timeout=10
+    local tls_cert="" tls_key="" edge_ip=""
+    local mux_version=1 mux_framesize=32768 mux_recievebuffer=4194304 mux_streambuffer=65536
+    local mux_con=8 accept_udp="false" channel_size=2048 aggressive_pool="false"
+    local sniffer="false" sniffer_log="/root/backhaul.json" web_port=0
     
-    # Create configuration
-    echo
-    print_info "--- Creating Configuration ---"
+    if [[ $setup_type_choice -eq 2 ]]; then
+        # Advanced setup - ask for all settings
+        print_info "--- Advanced & Transport-Specific Configuration ---"
+        while true; do
+            read -p "Log Level (debug, info, warn, error) [info]: " log_level
+            log_level=${log_level:-info}
+            break
+        done
+        while true; do
+            read -p "Enable sniffer (traffic logging)? [false]: " sniffer
+            sniffer=${sniffer:-false}
+            break
+        done
+        if [[ "$sniffer" == "true" ]]; then
+            while true; do
+                read -p "Sniffer log file path [/root/backhaul.json]: " sniffer_log
+                sniffer_log=${sniffer_log:-/root/backhaul.json}
+                break
+            done
+        fi
+        while true; do
+            read -p "Web interface port (0 to disable) [0]: " web_port
+            web_port=${web_port:-0}
+            break
+        done
+
+        if [[ "$transport" != "udp" ]]; then
+            while true; do
+                read -p "Enable TCP_NODELAY for lower latency? [true]: " nodelay
+                nodelay=${nodelay:-true}
+                break
+            done
+            while true; do
+                read -p "Keep-alive period in seconds [75]: " keepalive_period
+                keepalive_period=${keepalive_period:-75}
+                break
+            done
+        fi
+        
+        if [[ "$setup_type" == "server" ]]; then
+            while true; do
+                read -p "Heartbeat interval in seconds [40]: " heartbeat
+                heartbeat=${heartbeat:-40}
+                break
+            done
+            while true; do
+                read -p "Channel size [2048]: " channel_size
+                channel_size=${channel_size:-2048}
+                break
+            done
+            if [[ "$transport" == "tcp" ]]; then
+                while true; do
+                    read -p "Accept UDP traffic over TCP? [false]: " accept_udp
+                    accept_udp=${accept_udp:-false}
+                    break
+                done
+            fi
+        else # client
+            while true; do
+                read -p "Connection pool size [8]: " connection_pool
+                connection_pool=${connection_pool:-8}
+                break
+            done
+            while true; do
+                read -p "Enable aggressive pool management? [false]: " aggressive_pool
+                aggressive_pool=${aggressive_pool:-false}
+                break
+            done
+            while true; do
+                read -p "Connection retry interval in seconds [3]: " retry_interval
+                retry_interval=${retry_interval:-3}
+                break
+            done
+            while true; do
+                read -p "Connection dial timeout in seconds [10]: " dial_timeout
+                dial_timeout=${dial_timeout:-10}
+                break
+            done
+        fi
+
+        if [[ "$transport" == *"mux"* ]]; then
+            print_info "--- Multiplexing (MUX) Parameters ---"
+            while true; do 
+                read -p "Multiplexing concurrency [8]: " mux_con
+                mux_con=${mux_con:-8}
+                if [[ "$mux_con" =~ ^[0-9]+$ ]]; then
+                    break
+                else
+                    print_error "Must be a positive number."
+                fi
+            done
+            while true; do 
+                read -p "SMUX protocol version (1 or 2) [1]: " mux_version
+                mux_version=${mux_version:-1}
+                if [[ "$mux_version" =~ ^[12]$ ]]; then
+                    break
+                else
+                    print_error "Must be 1 or 2."
+                fi
+            done
+            while true; do 
+                read -p "Mux frame size (bytes) [32768]: " mux_framesize
+                mux_framesize=${mux_framesize:-32768}
+                if [[ "$mux_framesize" =~ ^[0-9]+$ ]]; then
+                    break
+                else
+                    print_error "Must be a positive number."
+                fi
+            done
+            while true; do 
+                read -p "Mux receive buffer (bytes) [4194304]: " mux_recievebuffer
+                mux_recievebuffer=${mux_recievebuffer:-4194304}
+                if [[ "$mux_recievebuffer" =~ ^[0-9]+$ ]]; then
+                    break
+                else
+                    print_error "Must be a positive number."
+                fi
+            done
+            while true; do 
+                read -p "Mux stream buffer (bytes) [65536]: " mux_streambuffer
+                mux_streambuffer=${mux_streambuffer:-65536}
+                if [[ "$mux_streambuffer" =~ ^[0-9]+$ ]]; then
+                    break
+                else
+                    print_error "Must be a positive number."
+                fi
+            done
+
+            if [[ "$transport" == "ws"* && "$setup_type" == "client" ]]; then
+                print_info "--- WebSocket Parameters ---"
+                while true; do
+                    read -p "Edge IP for CDN connection (optional, press Enter to skip): " edge_ip
+                    if [[ -z "$edge_ip" ]]; then
+                        break
+                    fi
+                    break
+                done
+            fi
+        fi
+    fi
+
+    # --- Step 6: TLS Certificate Setup for WSS ---
+    if [[ "$transport" == "wss"* && "$setup_type" == "server" ]]; then
+        print_info "--- Secure WebSocket (WSS) Certificate Setup ---"
+        print_warning "This requires a valid TLS certificate and key."
+        local CERT_DIR="/etc/backhaul/certs"
+        mkdir -p "$CERT_DIR"
+        local newest_cert newest_key
+        newest_cert=$(ls -1t "$CERT_DIR"/*.crt 2>/dev/null | head -n1)
+        if [[ -n "$newest_cert" ]]; then
+            newest_key="${newest_cert%.crt}.key"
+            if [ -f "$newest_cert" ] && [ -f "$newest_key" ]; then
+                print_info "Found existing certificate: $newest_cert"
+                print_info "Associated key: $newest_key"
+                read -p "Use this certificate? (Y/n/generate new/manual): " cert_choice
+                case "${cert_choice,,}" in
+                    ""|y|yes)
+                        tls_cert="$newest_cert"
+                        tls_key="$newest_key"
+                        ;;
+                    g|generate)
+                        generate_self_signed_cert
+                        newest_cert=$(ls -1t "$CERT_DIR"/*.crt 2>/dev/null | head -n1)
+                        newest_key="${newest_cert%.crt}.key"
+                        tls_cert="$newest_cert"
+                        tls_key="$newest_key"
+                        ;;
+                    m|manual)
+                        read -p "Enter certificate file path: " tls_cert
+                        read -p "Enter key file path: " tls_key
+                        ;;
+                    n|no)
+                        print_info "Skipping certificate setup. You'll need to add tls_cert and tls_key manually."
+                        ;;
+                esac
+            fi
+        else
+            print_info "No existing certificates found."
+            read -p "Generate new self-signed certificate? (Y/n/manual): " cert_choice
+            case "${cert_choice,,}" in
+                ""|y|yes)
+                    generate_self_signed_cert
+                    newest_cert=$(ls -1t "$CERT_DIR"/*.crt 2>/dev/null | head -n1)
+                    newest_key="${newest_cert%.crt}.key"
+                    tls_cert="$newest_cert"
+                    tls_key="$newest_key"
+                    ;;
+                m|manual)
+                    read -p "Enter certificate file path: " tls_cert
+                    read -p "Enter key file path: " tls_key
+                    ;;
+                n|no)
+                    print_info "Skipping certificate setup. You'll need to add tls_cert and tls_key manually."
+                    ;;
+            esac
+        fi
+    fi
+
+    # --- Step 7: Generate Configuration ---
+    print_info "--- Generating Configuration ---"
+    
+    # Create config directory if it doesn't exist
+    mkdir -p "$CONFIG_DIR"
+    
+    # Generate tunnel name
+    local tunnel_name
+    if [[ "$setup_type" == "server" ]]; then
+        tunnel_name="iran-server-$(date +%m%d)"
+    else
+        tunnel_name="foreign-client-$(date +%m%d)"
+    fi
+    
+    # Check for duplicates
+    local counter=1
+    local final_name="$tunnel_name"
+    while [[ -f "$CONFIG_DIR/config-${final_name}.toml" ]]; do
+        final_name="${tunnel_name}-${counter}"
+        ((counter++))
+    done
+    tunnel_name="$final_name"
+    
+    # Generate service name suffix
     local service_name_suffix="$tunnel_name"
     local config_file="$CONFIG_DIR/config-${service_name_suffix}.toml"
     
-    # Build configuration content
+    # Start building configuration content
     local config_content=""
+    
+    # Add role section
     if [[ "$setup_type" == "server" ]]; then
         config_content+="[server]\n"
         config_content+="bind_addr = \"0.0.0.0:${local_port}\"\n"
-        if [[ -n "$auth_token" ]]; then
-            config_content+="token = \"${auth_token}\"\n"
-        fi
     else
         config_content+="[client]\n"
         config_content+="remote_addr = \"${server_ip}:${server_port}\"\n"
-        config_content+="local_addr = \"127.0.0.1:${local_port}\"\n"
-        if [[ -n "$auth_token" ]]; then
-            config_content+="token = \"${auth_token}\"\n"
-        fi
+        config_content+="bind_addr = \"127.0.0.1:${local_port}\"\n"
     fi
     
+    # Add transport
     config_content+="transport = \"${transport}\"\n"
     
-    # Add TLS configuration for secure protocols
-    if [[ "$transport" == "wss" || "$transport" == "wssmux" ]]; then
-        if [[ -n "$tls_cert_path" && -n "$tls_key_path" ]]; then
-            config_content+="tls_cert = \"${tls_cert_path}\"\n"
-            config_content+="tls_key = \"${tls_key_path}\"\n"
+    # Add authentication token
+    if [[ -n "$auth_token" ]]; then
+        config_content+="token = \"${auth_token}\"\n"
+    fi
+    
+    # Add TLS certificates for secure protocols
+    if [[ "$transport" == "wss"* ]]; then
+        if [[ -n "$tls_cert" && -n "$tls_key" ]]; then
+            config_content+="tls_cert = \"${tls_cert}\"\n"
+            config_content+="tls_key = \"${tls_key}\"\n"
         else
-            print_warning "TLS certificates not configured for $transport protocol."
-            print_info "You will need to add tls_cert and tls_key to the config file manually."
+            print_warning "TLS certificates not configured. You will need to add tls_cert and tls_key manually."
         fi
     fi
     
-    # Add protocol-specific default values based on backhaul core readme
-    case "$transport" in
-        "tcp")
-            config_content+="keepalive_period = 75\n"
-            config_content+="nodelay = false\n"
-            config_content+="channel_size = 2048\n"
-            config_content+="heartbeat = 40\n"
-            ;;
-        "tcpmux")
-            config_content+="keepalive_period = 75\n"
-            config_content+="nodelay = true\n"
-            config_content+="channel_size = 2048\n"
-            config_content+="heartbeat = 40\n"
-            config_content+="mux_con = 8\n"
-            config_content+="mux_version = 1\n"
-            config_content+="mux_framesize = 32768\n"
-            config_content+="mux_recievebuffer = 4194304\n"
-            config_content+="mux_streambuffer = 65536\n"
-            ;;
-        "ws")
-            config_content+="channel_size = 2048\n"
-            config_content+="keepalive_period = 75\n"
-            config_content+="heartbeat = 40\n"
-            config_content+="nodelay = true\n"
-            ;;
-        "wss")
-            config_content+="channel_size = 2048\n"
-            config_content+="keepalive_period = 75\n"
-            config_content+="nodelay = true\n"
-            ;;
-        "wsmux")
-            config_content+="keepalive_period = 75\n"
-            config_content+="nodelay = true\n"
-            config_content+="channel_size = 2048\n"
-            config_content+="heartbeat = 40\n"
-            config_content+="mux_con = 8\n"
-            config_content+="mux_version = 1\n"
-            config_content+="mux_framesize = 32768\n"
-            config_content+="mux_recievebuffer = 4194304\n"
-            config_content+="mux_streambuffer = 65536\n"
-            ;;
-        "wssmux")
-            config_content+="keepalive_period = 75\n"
-            config_content+="nodelay = true\n"
-            config_content+="channel_size = 2048\n"
-            config_content+="heartbeat = 40\n"
-            config_content+="mux_con = 8\n"
-            config_content+="mux_version = 1\n"
-            config_content+="mux_framesize = 32768\n"
-            config_content+="mux_recievebuffer = 4194304\n"
-            config_content+="mux_streambuffer = 65536\n"
-            ;;
-    esac
+    # Add basic settings
+    config_content+="log_level = \"${log_level}\"\n"
+    config_content+="heartbeat = ${heartbeat}\n"
+    config_content+="channel_size = ${channel_size}\n"
     
-    # Add client-specific defaults
-    if [[ "$setup_type" == "client" ]]; then
-        config_content+="connection_pool = 8\n"
-        config_content+="aggressive_pool = false\n"
-        config_content+="dial_timeout = 10\n"
-        config_content+="retry_interval = 3\n"
+    # Add transport-specific settings
+    if [[ "$transport" != "udp" ]]; then
+        config_content+="keepalive_period = ${keepalive_period}\n"
+        config_content+="nodelay = ${nodelay}\n"
     fi
     
-    # Ask if user wants advanced configuration
-    echo
-    print_info "--- Configuration Mode ---"
-    echo " 1. Use Default Values (recommended for most users)"
-    echo " 2. Advanced Configuration (customize all parameters)"
-    echo " 0. Cancel"
-    echo
-    while true; do
-        read -p "Select configuration mode [1-2, 0 to cancel]: " config_mode
-        case $config_mode in
-            1) 
-                print_info "Using default values for optimal performance."
-                break
-                ;;
-            2) 
-                print_info "Advanced configuration mode selected."
-                config_content=$(configure_advanced_settings "$config_content" "$transport" "$setup_type")
-                break
-                ;;
-            0)
-                print_info "Configuration cancelled."
-                return
-                ;;
-            *)
-                print_warning "Invalid option. Please enter 1-2 or 0 to cancel."
-                press_any_key
-                ;;
-        esac
-    done
+    # Add role-specific settings
+    if [[ "$setup_type" == "server" ]]; then
+        if [[ "$transport" == "tcp" ]]; then
+            config_content+="accept_udp = ${accept_udp}\n"
+        fi
+    else
+        config_content+="connection_pool = ${connection_pool}\n"
+        config_content+="aggressive_pool = ${aggressive_pool}\n"
+        config_content+="retry_interval = ${retry_interval}\n"
+        config_content+="dial_timeout = ${dial_timeout}\n"
+    fi
     
-    config_content+="log_level = \"info\"\n"
+    # Add multiplexing settings
+    if [[ "$transport" == *"mux"* ]]; then
+        config_content+="mux_con = ${mux_con}\n"
+        config_content+="mux_version = ${mux_version}\n"
+        config_content+="mux_framesize = ${mux_framesize}\n"
+        config_content+="mux_recievebuffer = ${mux_recievebuffer}\n"
+        config_content+="mux_streambuffer = ${mux_streambuffer}\n"
+    fi
+    
+    # Add optional features
+    if [[ "$sniffer" == "true" ]]; then
+        config_content+="sniffer = true\n"
+        config_content+="sniffer_log = \"${sniffer_log}\"\n"
+    fi
+    
+    if [[ $web_port -gt 0 ]]; then
+        config_content+="web_port = ${web_port}\n"
+    fi
     
     # Write configuration file
     echo -e "$config_content" > "$config_file"
@@ -3423,14 +3520,36 @@ configure_tunnel() {
     echo
     print_info "Configuration summary:"
     echo "  - Name: $tunnel_name"
-    echo "  - Type: $setup_type"
+    echo "  - Role: $setup_type"
     echo "  - Transport: $transport"
     if [[ "$setup_type" == "client" ]]; then
         echo "  - Server: $server_ip:$server_port"
     fi
     echo "  - Local port: $local_port"
+    if [[ -n "$auth_token" ]]; then
+        echo "  - Authentication: enabled"
+        echo "  - Token: $auth_token"
+    else
+        echo "  - Authentication: disabled (security risk)"
+    fi
+    if [[ -n "$tls_cert" ]]; then
+        echo "  - TLS: enabled ($(basename "$tls_cert"))"
+    fi
     echo "  - Config file: $config_file"
     echo "  - Service: backhaul-$service_name_suffix.service"
+    
+    # Show next steps
+    echo
+    print_info "Next steps:"
+    if [[ "$setup_type" == "server" ]]; then
+        echo "  1. Start the service: systemctl start backhaul-$service_name_suffix"
+        echo "  2. Share the authentication token with your client"
+        echo "  3. Configure your client with this server's IP and port"
+    else
+        echo "  1. Ensure your server is running and accessible"
+        echo "  2. Start the service: systemctl start backhaul-$service_name_suffix"
+        echo "  3. Test the connection"
+    fi
 }
 
 update_config_file() {
@@ -3588,7 +3707,7 @@ configure_advanced_settings() {
     echo
     
     # Remove existing advanced settings from config_content
-    config_content=$(echo "$config_content" | grep -v -E "^(keepalive_period|nodelay|channel_size|heartbeat|mux_|connection_pool|aggressive_pool|dial_timeout|retry_interval) =")
+    config_content=$(echo "$config_content" | grep -v -E "^(keepalive_period|nodelay|channel_size|heartbeat|mux_|connection_pool|aggressive_pool|dial_timeout|retry_interval|accept_udp|sniffer_log) =")
     
     # Basic settings for all protocols
     echo
@@ -3644,6 +3763,25 @@ configure_advanced_settings() {
                     config_content+="nodelay = true\n"
                 else
                     config_content+="nodelay = false\n"
+                fi
+                break
+            else
+                print_warning "Please enter y or n."
+            fi
+        done
+    fi
+    
+    # Accept UDP for TCP protocol
+    if [[ "$transport" == "tcp" ]]; then
+        local accept_udp
+        while true; do
+            read -p "Accept UDP connections (y/n) [n]: " accept_udp
+            accept_udp=${accept_udp:-n}
+            if [[ "$accept_udp" =~ ^[YyNn]$ ]]; then
+                if [[ "$accept_udp" =~ ^[Yy]$ ]]; then
+                    config_content+="accept_udp = true\n"
+                else
+                    config_content+="accept_udp = false\n"
                 fi
                 break
             else
@@ -3797,7 +3935,14 @@ configure_advanced_settings() {
         if [[ "$sniffer" =~ ^[YyNn]$ ]]; then
             if [[ "$sniffer" =~ ^[Yy]$ ]]; then
                 config_content+="sniffer = true\n"
-                config_content+="sniffer_log = \"/var/log/backhaul-${tunnel_name}.json\"\n"
+                
+                # Custom sniffer log path
+                local sniffer_log_path
+                read -p "Sniffer log file path [/var/log/backhaul-${tunnel_name}.json]: " sniffer_log_path
+                sniffer_log_path=${sniffer_log_path:-"/var/log/backhaul-${tunnel_name}.json"}
+                config_content+="sniffer_log = \"$sniffer_log_path\"\n"
+                
+                print_info "Sniffer enabled with log file: $sniffer_log_path"
             else
                 config_content+="sniffer = false\n"
             fi
@@ -3831,6 +3976,9 @@ configure_advanced_settings() {
     if [[ "$transport" =~ ^(tcp|tcpmux|ws|wss|wsmux|wssmux)$ ]]; then
         echo "  - TCP_NODELAY: $([[ "$nodelay" =~ ^[Yy]$ ]] && echo "enabled" || echo "disabled")"
     fi
+    if [[ "$transport" == "tcp" ]]; then
+        echo "  - Accept UDP: $([[ "$accept_udp" =~ ^[Yy]$ ]] && echo "enabled" || echo "disabled")"
+    fi
     if [[ "$setup_type" == "client" ]]; then
         echo "  - Connection pool: $connection_pool"
         echo "  - Aggressive pool: $([[ "$aggressive_pool" =~ ^[Yy]$ ]] && echo "enabled" || echo "disabled")"
@@ -3845,6 +3993,9 @@ configure_advanced_settings() {
         echo "  - Mux stream buffer: $mux_streambuffer bytes"
     fi
     echo "  - Sniffer: $([[ "$sniffer" =~ ^[Yy]$ ]] && echo "enabled" || echo "disabled")"
+    if [[ "$sniffer" =~ ^[Yy]$ ]]; then
+        echo "  - Sniffer log: $sniffer_log_path"
+    fi
     if [[ $web_port -gt 0 ]]; then
         echo "  - Web interface: port $web_port"
     else
@@ -3854,6 +4005,12 @@ configure_advanced_settings() {
     press_any_key
     echo "$config_content"
 }
+
+# --- Helper Functions ---
+
+# Note: All helper functions (validate_port, validate_ip, generate_self_signed_cert, etc.) 
+# are already implemented in helpers.sh and backhaul_core.sh modules.
+# These modules are concatenated together by build.sh, so we can use them directly.
 
 
 # --- MODULE: modules/validation.sh ---
