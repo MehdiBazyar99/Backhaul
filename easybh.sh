@@ -1265,9 +1265,38 @@ secure_log_message() {
 
 # --- Netcat Compatibility Check ---
 check_nc_compatibility() {
-    # Test for OpenBSD netcat compatibility
-    if echo | nc -l -p 0 -w 1 2>&1 | grep -qi 'usage\|invalid\|unknown option'; then
-        print_warning "Your version of netcat (nc) does not support '-l -p'. Restart watcher and some features may not work."
+    # Test for OpenBSD netcat compatibility with timeout to prevent hanging
+    local nc_test_result=""
+    
+    # Use timeout command if available to prevent hanging
+    if command -v timeout >/dev/null 2>&1; then
+        nc_test_result=$(timeout 3 bash -c 'echo | nc -l -p 0 -w 1 2>&1' 2>/dev/null || echo "timeout")
+    else
+        # Fallback: use a background process with kill
+        local nc_pid
+        nc_test_result=$(bash -c 'echo | nc -l -p 0 -w 1 2>&1' &)
+        nc_pid=$!
+        
+        # Wait up to 3 seconds
+        local count=0
+        while kill -0 "$nc_pid" 2>/dev/null && [[ $count -lt 3 ]]; do
+            sleep 1
+            ((count++))
+        done
+        
+        # Kill if still running
+        if kill -0 "$nc_pid" 2>/dev/null; then
+            kill -9 "$nc_pid" 2>/dev/null
+            nc_test_result="timeout"
+        else
+            wait "$nc_pid" 2>/dev/null
+            nc_test_result=$(bash -c 'echo | nc -l -p 0 -w 1 2>&1' 2>&1)
+        fi
+    fi
+    
+    # Check the result
+    if [[ "$nc_test_result" == "timeout" ]] || echo "$nc_test_result" | grep -qi 'usage\|invalid\|unknown option'; then
+        print_warning "Your version of netcat (nc) does not support '-l -p' or test timed out. Restart watcher and some features may not work."
         print_info "To fix this, install netcat-openbsd:"
         print_info "  Ubuntu/Debian: sudo apt install netcat-openbsd"
         print_info "  CentOS/RHEL: sudo yum install nc"
@@ -6406,11 +6435,13 @@ init_logging
 
 # Check if binary exists, if not run installation wizard
 if [ ! -f "$BIN_PATH" ]; then
-    print_warning "Backhaul binary not found. Starting installation wizard..."
+    echo
+    print_warning "⚠ Backhaul binary not found at: $BIN_PATH"
     echo
     print_info "The Backhaul binary is required to create and manage tunnels."
     print_info "Please complete the installation to continue."
     echo
+    print_info "Press any key to start the installation wizard..."
     press_any_key
     
     # Run installation wizard
@@ -6418,10 +6449,12 @@ if [ ! -f "$BIN_PATH" ]; then
     
     # Check if installation was successful
     if [ ! -f "$BIN_PATH" ]; then
-        print_warning "Binary installation was not completed."
+        echo
+        print_warning "⚠ Binary installation was not completed."
         print_info "You can still use the script to manage existing tunnels or install later."
         echo
         print_info "To install the binary later, use option 3 in the main menu."
+        print_info "Press any key to continue to the main menu..."
         press_any_key
     fi
 fi

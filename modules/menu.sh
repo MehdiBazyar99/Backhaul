@@ -656,11 +656,13 @@ init_logging
 
 # Check if binary exists, if not run installation wizard
 if [ ! -f "$BIN_PATH" ]; then
-    print_warning "Backhaul binary not found. Starting installation wizard..."
+    echo
+    print_warning "⚠ Backhaul binary not found at: $BIN_PATH"
     echo
     print_info "The Backhaul binary is required to create and manage tunnels."
     print_info "Please complete the installation to continue."
     echo
+    print_info "Press any key to start the installation wizard..."
     press_any_key
     
     # Run installation wizard
@@ -668,10 +670,12 @@ if [ ! -f "$BIN_PATH" ]; then
     
     # Check if installation was successful
     if [ ! -f "$BIN_PATH" ]; then
-        print_warning "Binary installation was not completed."
+        echo
+        print_warning "⚠ Binary installation was not completed."
         print_info "You can still use the script to manage existing tunnels or install later."
         echo
         print_info "To install the binary later, use option 3 in the main menu."
+        print_info "Press any key to continue to the main menu..."
         press_any_key
     fi
 fi
