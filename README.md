@@ -60,20 +60,20 @@ Developed by [@N4Xon (NaxonM)](https://github.com/NaxonM/EasyBackhaul), EasyBack
 
 ## 🛠️ Installation & Quick Start
 
-**Recommended:**  
+**Quick Install (Recommended):**  
+Run the script directly from GitHub with a single command:
+
+```bash
+sudo bash <(curl -Ls https://raw.githubusercontent.com/NaxonM/EasyBackhaul/beta/easybackhaul.sh)
+```
+
+**From Source:**  
 Clone the repo and build the script from source for the latest features.
 
 ```bash
-git clone https://github.com/yourusername/EasyBackhaul.git
+git clone https://github.com/NaxonM/EasyBackhaul.git
 cd EasyBackhaul
 ./build.sh
-sudo bash EasyBackhaul.sh
-```
-
-**Or:**  
-Download the latest [easybackhaul.sh](./easybackhaul.sh) and run:
-
-```bash
 sudo bash easybackhaul.sh
 ```
 

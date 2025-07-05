@@ -60,20 +60,20 @@
 
 ## 🛠️ نصب و شروع سریع
 
-**پیشنهادی:**  
+**نصب سریع (پیشنهادی):**  
+اجرای مستقیم اسکریپت از گیت‌هاب با یک دستور:
+
+```bash
+sudo bash <(curl -Ls https://raw.githubusercontent.com/NaxonM/EasyBackhaul/beta/easybackhaul.sh)
+```
+
+**از سورس:**  
 مخزن را کلون و اسکریپت را از سورس بسازید:
 
 ```bash
-git clone https://github.com/yourusername/EasyBackhaul.git
+git clone https://github.com/NaxonM/EasyBackhaul.git
 cd EasyBackhaul
 ./build.sh
-sudo bash EasyBackhaul.sh
-```
-
-**یا:**  
-آخرین نسخه [easybackhaul.sh](./easybackhaul.sh) را دانلود و اجرا کنید:
-
-```bash
 sudo bash easybackhaul.sh
 ```
 
