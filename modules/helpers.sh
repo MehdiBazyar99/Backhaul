@@ -80,13 +80,6 @@ log_warn() { log_message "WARN" "$1"; }
 log_error() { log_message "ERROR" "$1"; }
 log_success() { log_message "SUCCESS" "$1"; }
 
-# --- Configuration Validation ---
-# Legacy validate_config function - now handled by validation.sh module
-# This function is kept for backward compatibility
-validate_config() {
-    validate_config_detailed "$1"
-}
-
 # --- Health Monitoring ---
 # Check tunnel health
 check_tunnel_health() {
@@ -203,31 +196,30 @@ with_performance_tracking() {
 # --- Advanced Error Recovery ---
 # Retry mechanism with exponential backoff
 retry_operation() {
-    local max_attempts="$1"
-    local operation="$2"
-    shift 2
+    local operation="$1"
+    local max_retries="${2:-3}"
+    local base_delay="${3:-2}"
+    local operation_func="$4"
+    shift 4
     
-    local attempt=1
-    local delay=1
+    local retry_count=0
+    local delay=$base_delay
     
-    while [[ $attempt -le $max_attempts ]]; do
-        log_info "Attempting $operation (attempt $attempt/$max_attempts)"
-        
-        if "$@"; then
-            log_success "$operation completed successfully"
+    while [[ $retry_count -lt $max_retries ]]; do
+        if $operation_func "$@"; then
             return 0
         fi
         
-        if [[ $attempt -lt $max_attempts ]]; then
-            log_warn "$operation failed, retrying in ${delay}s..."
-            sleep "$delay"
+        ((retry_count++))
+        
+        if [[ $retry_count -lt $max_retries ]]; then
+            log_warn "Operation failed, retrying in $delay seconds (attempt $((retry_count + 1))/$max_retries)"
+            sleep $delay
             delay=$((delay * 2))  # Exponential backoff
         fi
-        
-        ((attempt++))
     done
     
-    log_error "$operation failed after $max_attempts attempts"
+    log_error "Operation failed after $max_retries attempts"
     return 1
 }
 
@@ -277,26 +269,26 @@ graceful_restart() {
 # --- Resource Management ---
 # Check system resources
 check_system_resources() {
-    local memory_usage
-    memory_usage=$(free | awk '/^Mem:/ {printf "%.1f", $3/$2 * 100.0}')
-    local cpu_usage
-    cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
-    local disk_usage
-    disk_usage=$(df / | awk 'NR==2 {print $5}' | cut -d'%' -f1)
+    local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
+    local mem_usage=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}')
+    local disk_usage=$(df / | tail -1 | awk '{print $5}' | cut -d'%' -f1)
     
-    log_info "System resources - Memory: ${memory_usage}%, CPU: ${cpu_usage}%, Disk: ${disk_usage}%"
+    echo "System Resources:"
+    echo "  CPU: ${cpu_usage}%"
+    echo "  Memory: ${mem_usage}%"
+    echo "  Disk: ${disk_usage}%"
     
-    # Check for resource issues
-    if [[ $(echo "$memory_usage > 80" | bc -l 2>/dev/null) -eq 1 ]]; then
-        log_warn "High memory usage detected: ${memory_usage}%"
+    # Warn if resources are high
+    if [[ $(echo "$cpu_usage > 80" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
+        print_warning "High CPU usage detected"
     fi
     
-    if [[ $(echo "$cpu_usage > 80" | bc -l 2>/dev/null) -eq 1 ]]; then
-        log_warn "High CPU usage detected: ${cpu_usage}%"
+    if [[ $(echo "$mem_usage > 85" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
+        print_warning "High memory usage detected"
     fi
     
-    if [[ $disk_usage -gt 80 ]]; then
-        log_warn "High disk usage detected: ${disk_usage}%"
+    if [[ $disk_usage -gt 90 ]]; then
+        print_warning "High disk usage detected"
     fi
 }
 
@@ -345,8 +337,9 @@ handle_error() {
     local return_code="${2:-1}"
     local operation="${3:-unknown}"
     local tunnel_name="${4:-}"
+    local retry_count="${5:-0}"
     
-    log_error "Error in $operation: $error_msg"
+    log_error "Error in $operation: $error_msg (attempt $((retry_count + 1)))"
     print_error "$error_msg"
     
     # Check for resource exhaustion
@@ -356,24 +349,41 @@ handle_error() {
         cleanup_temp_files
     fi
     
-    # Attempt recovery if enabled
-    if [[ "$ERROR_RECOVERY_ENABLED" == "true" ]]; then
-        attempt_error_recovery "$operation" "$error_msg" "$tunnel_name"
+    # Check for network connectivity issues
+    if [[ "$error_msg" =~ (connection|network|timeout|unreachable) ]]; then
+        log_warn "Network-related error detected"
+        test_network_connectivity
+    fi
+    
+    # Attempt recovery if enabled and retry count is within limits
+    if [[ "$ERROR_RECOVERY_ENABLED" == "true" && $retry_count -lt 3 ]]; then
+        local recovery_result
+        recovery_result=$(attempt_error_recovery "$operation" "$error_msg" "$tunnel_name" "$retry_count")
+        if [[ $? -eq 0 ]]; then
+            log_success "Error recovery successful, retrying operation"
+            return 0
+        fi
+    fi
+    
+    # Log final failure
+    if [[ $retry_count -ge 3 ]]; then
+        log_error "Operation failed after $retry_count retry attempts"
     fi
     
     return "$return_code"
 }
 
-# Enhanced error recovery attempts
+# Enhanced error recovery attempts with retry logic
 attempt_error_recovery() {
     local operation="$1"
     local error_msg="$2"
     local tunnel_name="$3"
+    local retry_count="${4:-0}"
     
-    log_info "Attempting error recovery for operation: $operation"
+    log_info "Attempting error recovery for operation: $operation (attempt $((retry_count + 1)))"
     
     case "$operation" in
-        "tunnel_start")
+        "tunnel_start"|"tunnel_restart")
             log_info "Attempting tunnel recovery..."
             cleanup_zombie_processes
             
@@ -382,8 +392,14 @@ attempt_error_recovery() {
                 local service_name="backhaul-$tunnel_name"
                 if systemctl list-unit-files | grep -q "$service_name"; then
                     log_info "Attempting to restart service: $service_name"
-                    systemctl restart "$service_name" 2>/dev/null
+                    
+                    # Stop service first
+                    systemctl stop "$service_name" 2>/dev/null
                     sleep 2
+                    
+                    # Start service
+                    systemctl start "$service_name" 2>/dev/null
+                    sleep 3
                     
                     # Check if restart was successful
                     if systemctl is-active --quiet "$service_name" 2>/dev/null; then
@@ -391,23 +407,73 @@ attempt_error_recovery() {
                         return 0
                     else
                         log_error "Tunnel recovery failed"
+                        
+                        # Try alternative recovery methods
+                        attempt_alternative_tunnel_recovery "$tunnel_name"
                     fi
                 fi
             fi
             ;;
-        "config_validation")
+        "config_validation"|"config_error")
             log_info "Attempting config recovery..."
             if [[ -n "$tunnel_name" ]]; then
-                restore_config_backup "$tunnel_name"
+                if restore_config_backup "$tunnel_name"; then
+                    log_success "Configuration recovery successful"
+                    return 0
+                fi
             fi
             ;;
-        "systemd_service")
+        "systemd_service"|"service_error")
             log_info "Attempting systemd service recovery..."
             systemctl daemon-reload 2>/dev/null
+            sleep 1
+            
+            # Try to reset failed services
+            systemctl reset-failed 2>/dev/null
+            
+            if [[ -n "$tunnel_name" ]]; then
+                local service_name="backhaul-$tunnel_name"
+                systemctl reset-failed "$service_name" 2>/dev/null
+            fi
             ;;
-        "ufw_rules")
+        "ufw_rules"|"firewall_error")
             log_info "Attempting UFW rules recovery..."
             ufw reload 2>/dev/null
+            sleep 2
+            
+            # Check UFW status
+            if ufw status | grep -q "Status: active"; then
+                log_success "UFW recovery successful"
+                return 0
+            fi
+            ;;
+        "network_error"|"connectivity_error")
+            log_info "Attempting network recovery..."
+            
+            # Check network interfaces
+            if ! ip link show | grep -q "UP"; then
+                log_warn "No network interfaces are up"
+                return 1
+            fi
+            
+            # Test basic connectivity
+            if ping -c 1 8.8.8.8 >/dev/null 2>&1; then
+                log_success "Network connectivity restored"
+                return 0
+            fi
+            ;;
+        "permission_error"|"access_denied")
+            log_info "Attempting permission recovery..."
+            
+            # Check if running as root
+            if [[ $(id -u) -ne 0 ]]; then
+                log_error "Permission error: script must be run as root"
+                return 1
+            fi
+            
+            # Fix common permission issues
+            chmod 755 "$CONFIG_DIR" 2>/dev/null
+            chmod 600 "$CONFIG_DIR"/*.conf 2>/dev/null
             ;;
         *)
             log_info "No specific recovery for operation: $operation"
@@ -417,19 +483,33 @@ attempt_error_recovery() {
     return 1
 }
 
-# Restore configuration backup
-restore_config_backup() {
+# Alternative tunnel recovery methods
+attempt_alternative_tunnel_recovery() {
     local tunnel_name="$1"
-    local backup_file="$BACKUP_DIR/$tunnel_name.conf.backup"
+    local tunnel_dir="$TUNNEL_DIR/$tunnel_name"
     
-    if [[ -f "$backup_file" ]]; then
-        cp "$backup_file" "$CONFIG_DIR/$tunnel_name.conf"
-        log_info "Configuration restored from backup"
-        return 0
-    else
-        log_warn "No backup found for configuration"
-        return 1
+    log_info "Attempting alternative recovery methods for tunnel: $tunnel_name"
+    
+    # Method 1: Kill any existing processes
+    pkill -f "backhaul.*$tunnel_name" 2>/dev/null
+    sleep 2
+    
+    # Method 2: Clean up PID files
+    rm -f "$tunnel_dir"/*.pid 2>/dev/null
+    
+    # Method 3: Try manual start
+    if [[ -f "$tunnel_dir/tunnel.sh" ]]; then
+        log_info "Attempting manual tunnel start"
+        nohup "$tunnel_dir/tunnel.sh" > "$tunnel_dir/tunnel.log" 2>&1 &
+        sleep 3
+        
+        if is_tunnel_running "$tunnel_name"; then
+            log_success "Manual tunnel recovery successful"
+            return 0
+        fi
     fi
+    
+    return 1
 }
 
 # --- Unified Success Handling ---
@@ -649,11 +729,6 @@ print_menu_header() {
         print_info "  $subtitle"
         print_info "----------------------------------------------------------------"
     fi
-}
-
-# --- Unified Menu Footer Function ---
-print_menu_footer_old() {
-    print_info "----------------------------------------------------------------"
 }
 
 # --- Generate a Random Secret for Restart Watcher ---
@@ -1167,11 +1242,13 @@ audit_security() {
     fi
     
     if [ ${#issues[@]} -eq 0 ]; then
-        echo "✓ Security audit passed"
+        print_success "Security audit passed"
         return 0
     else
-        echo "⚠ Security issues found:"
-        printf '%s\n' "${issues[@]}"
+        print_warning "Security issues found:"
+        for issue in "${issues[@]}"; do
+            echo "  • $issue"
+        done
         return 1
     fi
 }
@@ -1302,5 +1379,588 @@ backup_config() {
     else
         print_warning "Failed to backup $config_file to $backup_path. Please check permissions."
         return 1
+    fi
+}
+
+# --- Tunnel Utility Functions ---
+is_tunnel_running() {
+    local tunnel_name="$1"
+    local tunnel_dir="$TUNNEL_DIR/$tunnel_name"
+    local pid_file="$tunnel_dir/tunnel.pid"
+    
+    if [[ ! -f "$pid_file" ]]; then
+        return 1
+    fi
+    
+    local pid=$(cat "$pid_file" 2>/dev/null)
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        return 0
+    fi
+    
+    return 1
+}
+
+update_tunnel_status() {
+    local tunnel_name="$1"
+    local status="$2"
+    local tunnel_dir="$TUNNEL_DIR/$tunnel_name"
+    local status_file="$tunnel_dir/status"
+    
+    echo "$status" > "$status_file" 2>/dev/null
+    chmod 600 "$status_file" 2>/dev/null
+}
+
+cleanup_watcher_files() {
+    local tunnel_name="$1"
+    local watcher_script="/tmp/backhaul-watcher-${tunnel_name}.sh"
+    local watcher_pid_file="/tmp/backhaul-watcher-${tunnel_name}.pid"
+    local watcher_log="/tmp/backhaul-watcher-${tunnel_name}.log"
+    
+    if [[ -f "$watcher_pid_file" ]]; then
+        local watcher_pid=$(cat "$watcher_pid_file")
+        if [[ -n "$watcher_pid" ]]; then
+            kill "$watcher_pid" 2>/dev/null
+        fi
+        rm -f "$watcher_pid_file"
+    fi
+    
+    rm -f "$watcher_script" "$watcher_log"
+    pkill -f "backhaul-watcher-${tunnel_name}" 2>/dev/null
+}
+
+# --- Unified Input Validation Functions ---
+validate_input_with_prompt() {
+    local prompt="$1"
+    local validation_func="$2"
+    local sanitize_length="$3"
+    local error_msg="$4"
+    local additional_check="$5"
+    
+    while true; do
+        read -p "$prompt" input_value
+        input_value=$(sanitize_input "$input_value" "$sanitize_length")
+        
+        if [ -z "$input_value" ]; then
+            print_error "Input cannot be empty"
+            continue
+        fi
+        
+        if ! $validation_func "$input_value"; then
+            print_error "$error_msg"
+            continue
+        fi
+        
+        if [[ -n "$additional_check" ]]; then
+            if ! eval "$additional_check"; then
+                continue
+            fi
+        fi
+        
+        echo "$input_value"
+        break
+    done
+}
+
+validate_tunnel_name() {
+    local prompt="Enter tunnel name: "
+    local error_msg="Tunnel name can only contain letters, numbers, hyphens, and underscores"
+    local additional_check=""
+    
+    if [[ -n "$1" ]]; then
+        additional_check="[ -d \"\$TUNNEL_DIR/\$input_value\" ] && print_error \"Tunnel '\$input_value' already exists\" && return 1"
+    fi
+    
+    validate_input_with_prompt "$prompt" "validate_tunnel_name_format" 50 "$error_msg" "$additional_check"
+}
+
+validate_tunnel_name_format() {
+    local name="$1"
+    [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]]
+}
+
+validate_ip_with_prompt() {
+    local prompt="Enter server IP address: "
+    local error_msg="Invalid IP address format"
+    validate_input_with_prompt "$prompt" "validate_ip" 15 "$error_msg"
+}
+
+validate_port_with_prompt() {
+    local prompt="$1"
+    local error_msg="Invalid port number (must be 1-65535)"
+    local additional_check=""
+    
+    if [[ -n "$2" ]]; then
+        additional_check="is_port_in_use \"\$input_value\" && print_error \"Port \$input_value is already in use\" && return 1"
+    fi
+    
+    validate_input_with_prompt "$prompt" "validate_port" 5 "$error_msg" "$additional_check"
+}
+
+# --- Unified Configuration Validation Functions ---
+validate_tunnel_parameters() {
+    local server_ip="$1"
+    local server_port="$2"
+    local local_port="$3"
+    local tunnel_name="$4"
+    
+    local errors=0
+    
+    if ! validate_ip "$server_ip"; then
+        print_error "Invalid server IP address: $server_ip"
+        ((errors++))
+    fi
+    
+    if ! validate_port "$server_port"; then
+        print_error "Invalid server port: $server_port"
+        ((errors++))
+    fi
+    
+    if ! validate_port "$local_port"; then
+        print_error "Invalid local port: $local_port"
+        ((errors++))
+    fi
+    
+    if [[ -n "$tunnel_name" ]] && ! validate_tunnel_name_format "$tunnel_name"; then
+        print_error "Invalid tunnel name format: $tunnel_name"
+        ((errors++))
+    fi
+    
+    return $errors
+}
+
+# --- Unified Menu Functions ---
+print_main_menu_header() {
+    local title="$1"
+    local subtitle="$2"
+    clear
+    print_server_info_banner
+    print_info "      $title"
+    print_info "================================================================"
+    if [[ -n "$subtitle" ]]; then
+        print_info "  $subtitle"
+        print_info "----------------------------------------------------------------"
+    fi
+    print_info "Tip: Press '?' for help about available options."
+    echo
+}
+
+print_submenu_header_unified() {
+    local title="$1"
+    local service="$2"
+    local status="$3"
+    
+    clear
+    print_server_info_banner_minimal
+    print_info "--- $title ---"
+    if [[ -n "$service" ]]; then
+        print_info "Service: $service"
+    fi
+    if [[ -n "$status" ]]; then
+        print_info "Status: $status"
+    fi
+    print_info "Tip: Press '?' for help about available options."
+    echo
+}
+
+print_menu_footer_unified() {
+    local show_help="${1:-true}"
+    local show_back="${2:-true}"
+    local show_exit="${3:-false}"
+    
+    if [[ "$show_help" == "true" ]]; then
+        echo " ?. Help"
+    fi
+    if [[ "$show_back" == "true" ]]; then
+        echo " 0. Back"
+    fi
+    if [[ "$show_exit" == "true" ]]; then
+        echo " x. Exit"
+    fi
+}
+
+print_menu_options() {
+    local options=("$@")
+    local start_num="${1:-1}"
+    local end_num="${2:-${#options[@]}}"
+    
+    for ((i=start_num; i<=end_num; i++)); do
+        local idx=$((i-1))
+        if [[ $idx -lt ${#options[@]} ]]; then
+            echo " $i. ${options[$idx]}"
+        fi
+    done
+}
+
+# --- Unified Menu Option Display ---
+print_menu_option() {
+    local number="$1"
+    local description="$2"
+    local padding=""
+    
+    # Add padding for single digits
+    if [[ $number -lt 10 ]]; then
+        padding=" "
+    fi
+    
+    echo "$padding$number. $description"
+}
+
+print_menu_option_with_status() {
+    local number="$1"
+    local description="$2"
+    local status="$3"
+    local status_color="$4"
+    
+    local padding=""
+    if [[ $number -lt 10 ]]; then
+        padding=" "
+    fi
+    
+    if [[ -n "$status" ]]; then
+        echo -e "$padding$number. $description [$status_color$status\e[0m]"
+    else
+        echo "$padding$number. $description"
+    fi
+}
+
+# === SYSTEM OPERATIONS ===
+# Enhanced system resource management
+check_system_resources() {
+    local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
+    local mem_usage=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}')
+    local disk_usage=$(df / | tail -1 | awk '{print $5}' | cut -d'%' -f1)
+    
+    echo "System Resources:"
+    echo "  CPU: ${cpu_usage}%"
+    echo "  Memory: ${mem_usage}%"
+    echo "  Disk: ${disk_usage}%"
+    
+    # Warn if resources are high
+    if [[ $(echo "$cpu_usage > 80" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
+        print_warning "High CPU usage detected"
+    fi
+    
+    if [[ $(echo "$mem_usage > 85" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
+        print_warning "High memory usage detected"
+    fi
+    
+    if [[ $disk_usage -gt 90 ]]; then
+        print_warning "High disk usage detected"
+    fi
+}
+
+# === NETWORK OPERATIONS ===
+# Enhanced network connectivity testing
+test_network_connectivity() {
+    local test_hosts=("8.8.8.8" "1.1.1.1" "google.com")
+    local success_count=0
+    
+    print_info "Testing network connectivity..."
+    
+    for host in "${test_hosts[@]}"; do
+        if ping -c 1 -W 3 "$host" >/dev/null 2>&1; then
+            ((success_count++))
+        fi
+    done
+    
+    if [[ $success_count -gt 0 ]]; then
+        print_success "Network connectivity: OK ($success_count/${#test_hosts[@]} hosts reachable)"
+        return 0
+    else
+        print_error "Network connectivity: FAILED (no hosts reachable)"
+        return 1
+    fi
+}
+
+# === SECURITY OPERATIONS ===
+# Enhanced security validation
+validate_security_settings() {
+    local issues=0
+    
+    print_info "Validating security settings..."
+    
+    # Check file permissions
+    if [[ -d "$CONFIG_DIR" ]]; then
+        local perms=$(stat -c %a "$CONFIG_DIR" 2>/dev/null)
+        if [[ "$perms" != "700" ]]; then
+            print_warning "Config directory has insecure permissions: $perms"
+            ((issues++))
+        fi
+    fi
+    
+    # Check for world-writable files
+    local world_writable=$(find "$CONFIG_DIR" -perm -002 -type f 2>/dev/null | wc -l)
+    if [[ $world_writable -gt 0 ]]; then
+        print_warning "Found $world_writable world-writable files in config directory"
+        ((issues++))
+    fi
+    
+    # Check for running processes as root
+    local root_processes=$(ps aux | grep -E "backhaul.*root" | grep -v grep | wc -l)
+    if [[ $root_processes -gt 0 ]]; then
+        print_warning "Found $root_processes Backhaul processes running as root"
+        ((issues++))
+    fi
+    
+    if [[ $issues -eq 0 ]]; then
+        print_success "Security validation passed"
+        return 0
+    else
+        print_warning "Security validation found $issues issue(s)"
+        return 1
+    fi
+}
+
+# === PERFORMANCE MONITORING ===
+# Enhanced performance tracking with detailed metrics
+track_performance_enhanced() {
+    local operation="$1"
+    local start_time=$(date +%s.%N)
+    local start_memory=$(free | grep Mem | awk '{print $3}')
+    local start_cpu=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
+    
+    # Execute the operation
+    "$@"
+    local result=$?
+    
+    local end_time=$(date +%s.%N)
+    local end_memory=$(free | grep Mem | awk '{print $3}')
+    local end_cpu=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
+    
+    # Calculate metrics
+    local duration=$(echo "$end_time - $start_time" | bc -l 2>/dev/null || echo "0")
+    local memory_delta=$((end_memory - start_memory))
+    local cpu_delta=$(echo "$end_cpu - $start_cpu" | bc -l 2>/dev/null || echo "0")
+    
+    # Log performance data
+    local performance_data="{\"operation\":\"$operation\",\"duration\":$duration,\"memory_delta\":$memory_delta,\"cpu_delta\":$cpu_delta,\"success\":$([[ $result -eq 0 ]] && echo "true" || echo "false"),\"timestamp\":\"$(date -Iseconds)\"}"
+    echo "$performance_data" >> "$PERFORMANCE_LOG_FILE" 2>/dev/null
+    
+    # Alert on performance issues
+    if [[ $(echo "$duration > 30" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
+        log_warn "Performance alert: $operation took ${duration}s"
+    fi
+    
+    if [[ $memory_delta -gt 100000 ]]; then
+        log_warn "Performance alert: $operation used ${memory_delta}KB of memory"
+    fi
+    
+    return $result
+}
+
+# Performance bottleneck detection
+detect_performance_bottlenecks() {
+    local bottlenecks=()
+    
+    print_info "Analyzing performance bottlenecks..."
+    
+    # Check CPU usage
+    local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
+    if [[ $(echo "$cpu_usage > 90" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
+        bottlenecks+=("High CPU usage: ${cpu_usage}%")
+    fi
+    
+    # Check memory usage
+    local mem_usage=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}')
+    if [[ $(echo "$mem_usage > 95" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
+        bottlenecks+=("High memory usage: ${mem_usage}%")
+    fi
+    
+    # Check disk I/O
+    local disk_io=$(iostat -x 1 1 2>/dev/null | tail -1 | awk '{print $NF}')
+    if [[ -n "$disk_io" && $(echo "$disk_io > 80" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
+        bottlenecks+=("High disk I/O: ${disk_io}%")
+    fi
+    
+    # Check network latency
+    local latency=$(ping -c 3 8.8.8.8 2>/dev/null | tail -1 | awk -F'/' '{print $5}')
+    if [[ -n "$latency" && $(echo "$latency > 100" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
+        bottlenecks+=("High network latency: ${latency}ms")
+    fi
+    
+    # Report findings
+    if [[ ${#bottlenecks[@]} -eq 0 ]]; then
+        print_success "No performance bottlenecks detected"
+        return 0
+    else
+        print_warning "Performance bottlenecks detected:"
+        for bottleneck in "${bottlenecks[@]}"; do
+            echo "  • $bottleneck"
+        done
+        return 1
+    fi
+}
+
+# === ENHANCED LOGGING ===
+# Structured logging with JSON format
+log_structured() {
+    local level="$1"
+    local message="$2"
+    local operation="${3:-}"
+    local tunnel_name="${4:-}"
+    local extra_data="${5:-}"
+    
+    local timestamp=$(date -Iseconds)
+    local structured_log="{\"timestamp\":\"$timestamp\",\"level\":\"$level\",\"message\":\"$message\""
+    
+    if [[ -n "$operation" ]]; then
+        structured_log+=",\"operation\":\"$operation\""
+    fi
+    
+    if [[ -n "$tunnel_name" ]]; then
+        structured_log+=",\"tunnel\":\"$tunnel_name\""
+    fi
+    
+    if [[ -n "$extra_data" ]]; then
+        structured_log+=",\"data\":\"$extra_data\""
+    fi
+    
+    structured_log+="}"
+    
+    echo "$structured_log" >> "$LOG_FILE" 2>/dev/null
+    
+    # Also log to standard format for compatibility
+    log_message "$level" "$message"
+}
+
+# Enhanced log rotation with compression
+setup_enhanced_log_rotation() {
+    local max_size_mb="${1:-10}"
+    local max_files="${2:-5}"
+    
+    print_info "Setting up enhanced log rotation..."
+    
+    # Create log rotation script
+    cat > /tmp/log_rotate.sh << EOF
+#!/bin/bash
+LOG_FILE="$LOG_FILE"
+MAX_SIZE=\$((1024 * 1024 * $max_size_mb))
+MAX_FILES=$max_files
+
+if [[ -f "\$LOG_FILE" ]]; then
+    local size=\$(stat -c %s "\$LOG_FILE" 2>/dev/null || echo "0")
+    if [[ \$size -gt \$MAX_SIZE ]]; then
+        # Rotate logs
+        for ((i=\$MAX_FILES; i>1; i--)); do
+            if [[ -f "\$LOG_FILE.\$((i-1)).gz" ]]; then
+                mv "\$LOG_FILE.\$((i-1)).gz" "\$LOG_FILE.\$i.gz"
+            fi
+        done
+        
+        if [[ -f "\$LOG_FILE" ]]; then
+            mv "\$LOG_FILE" "\$LOG_FILE.1"
+            gzip "\$LOG_FILE.1" 2>/dev/null
+        fi
+        
+        # Create new log file
+        touch "\$LOG_FILE"
+        chmod 600 "\$LOG_FILE"
+    fi
+fi
+EOF
+    
+    chmod +x /tmp/log_rotate.sh
+    
+    # Add to crontab if not already present
+    if ! crontab -l 2>/dev/null | grep -q "log_rotate.sh"; then
+        (crontab -l 2>/dev/null; echo "*/15 * * * * /tmp/log_rotate.sh") | crontab -
+    fi
+    
+    print_success "Enhanced log rotation configured"
+}
+
+# Log analysis and reporting
+analyze_logs() {
+    local days="${1:-7}"
+    local analysis_file="/tmp/log_analysis_$(date +%Y%m%d_%H%M%S).txt"
+    
+    print_info "Analyzing logs for the past $days days..."
+    
+    # Create analysis report
+    cat > "$analysis_file" << EOF
+=== EasyBackhaul Log Analysis Report ===
+Generated: $(date)
+Period: Past $days days
+Log File: $LOG_FILE
+
+EOF
+    
+    # Count log levels
+    echo "=== Log Level Summary ===" >> "$analysis_file"
+    find "$LOG_DIR" -name "*.log*" -mtime -$days -exec cat {} \; 2>/dev/null | \
+        grep -E "^(ERROR|WARN|INFO|DEBUG)" | \
+        awk '{print $1}' | sort | uniq -c | \
+        while read count level; do
+            echo "$level: $count entries" >> "$analysis_file"
+        done
+    
+    # Top error messages
+    echo -e "\n=== Top Error Messages ===" >> "$analysis_file"
+    find "$LOG_DIR" -name "*.log*" -mtime -$days -exec cat {} \; 2>/dev/null | \
+        grep "^ERROR" | cut -d' ' -f4- | sort | uniq -c | sort -nr | head -10 | \
+        while read count message; do
+            echo "$count: $message" >> "$analysis_file"
+        done
+    
+    # Tunnel-specific issues
+    echo -e "\n=== Tunnel-Specific Issues ===" >> "$analysis_file"
+    find "$LOG_DIR" -name "*.log*" -mtime -$days -exec cat {} \; 2>/dev/null | \
+        grep -E "(ERROR|WARN).*tunnel" | cut -d' ' -f4- | sort | uniq -c | sort -nr | head -5 | \
+        while read count message; do
+            echo "$count: $message" >> "$analysis_file"
+        done
+    
+    # Performance issues
+    echo -e "\n=== Performance Issues ===" >> "$analysis_file"
+    find "$LOG_DIR" -name "*.log*" -mtime -$days -exec cat {} \; 2>/dev/null | \
+        grep -E "(performance|slow|timeout)" | cut -d' ' -f4- | sort | uniq -c | sort -nr | head -5 | \
+        while read count message; do
+            echo "$count: $message" >> "$analysis_file"
+        done
+    
+    print_success "Log analysis complete: $analysis_file"
+    echo "Report saved to: $analysis_file"
+}
+
+# --- Unified Status Display Functions ---
+print_status_with_icon() {
+    local status="$1"
+    local message="$2"
+    
+    case "$status" in
+        "running"|"active"|"success"|"ok")
+            print_success "$message"
+            ;;
+        "stopped"|"inactive"|"error"|"failed")
+            print_error "$message"
+            ;;
+        "warning"|"partial")
+            print_warning "$message"
+            ;;
+        *)
+            print_info "$message"
+            ;;
+    esac
+}
+
+print_service_status() {
+    local service_name="$1"
+    local status="$2"
+    
+    if [[ "$status" == "running" || "$status" == "active" ]]; then
+        echo -e " $service_name (\e[32m✓ Running\e[0m)"
+    else
+        echo -e " $service_name (\e[31m✗ Stopped\e[0m)"
+    fi
+}
+
+print_tunnel_status() {
+    local tunnel_name="$1"
+    local status="$2"
+    
+    if [[ "$status" == "running" || "$status" == "active" ]]; then
+        print_success "Status: Running"
+    else
+        print_error "Status: Stopped"
     fi
 } 

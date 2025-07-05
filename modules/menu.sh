@@ -101,8 +101,7 @@ installation_wizard() {
                 exit 0
                 ;;
             *)
-                print_warning "❌ Invalid option. Please enter 0-5 or ? for help."
-                press_any_key
+                print_warning "Invalid option. Please enter 0-5 or ? for help."; press_any_key
                 ;;
         esac
     done
@@ -222,8 +221,11 @@ show_system_health_monitor() {
                     local op="${BASH_REMATCH[1]}"
                     local duration="${BASH_REMATCH[2]}"
                     local success="${BASH_REMATCH[3]}"
-                    local status_icon=$([[ "$success" == "true" ]] && echo "✓" || echo "✗")
-                    echo "  $status_icon $op: ${duration}s"
+                    if [[ "$success" == "true" ]]; then
+                        print_success "$op: ${duration}s"
+                    else
+                        print_error "$op: ${duration}s"
+                    fi
                 fi
             done
         else
@@ -367,7 +369,7 @@ show_system_health_monitor() {
                                 fi
                                 break
                             else
-                                print_warning "❌ Invalid option. Please enter 0-$((i-1))."
+                                print_warning "Invalid option. Please enter 0-$((i-1))."
                                 press_any_key
                             fi
                         done
@@ -393,9 +395,7 @@ show_system_health_monitor() {
                 ;;
 
             *)
-                print_warning "❌ Invalid option. Please enter 0-4."
-                press_any_key
-                ;;
+                print_warning "Invalid option. Please enter 0-4."; press_any_key ;;
         esac
     done
 }
@@ -403,10 +403,10 @@ show_system_health_monitor() {
 # --- Main Menu Logic & Entrypoint ---
 main_menu() {
     clear
-    print_server_info_banner
-    # Show binary status
-    if [[ -f "$BIN_PATH" ]]; then
-        # Check if binary is executable
+    print_main_menu_header "EasyBackhaul Management Menu" "Core by Musixal  |  Installer by @N4Xon"
+    
+    # Check binary status
+    if [ -f "$BIN_PATH" ]; then
         if [[ ! -x "$BIN_PATH" ]]; then
             print_warning "⚠ Binary Status: Found but not executable"
         else
@@ -438,135 +438,155 @@ main_menu() {
         print_error "✗ Binary Status: Not installed"
     fi
     echo
-    while true; do
+    
+    echo " 1. Configure a New Tunnel"
+    echo " 2. Manage Existing Tunnels"
+    echo " 3. Update/Re-install Backhaul Binary"
+    echo " 4. Generate Self-Signed TLS Certificate"
+    echo " 5. Select Backhaul Binary Directory (current: $BIN_PATH)"
+    echo " 6. System Health & Performance Monitor"
+    echo " 7. Clean Up Zombie/Orphaned Processes"
+    echo " 8. Uninstall EasyBackhaul (Removes binary and ALL configs)"
+    echo
+    print_menu_footer_unified "true" "false" "true"
+    
+    # Help function for main menu
+    main_menu_help() {
+        clear
+        print_server_info_banner_minimal
+        print_info "================= EasyBackhaul Management Help ================="
         echo
-        echo " 1. Configure a New Tunnel"
-        echo " 2. Manage Existing Tunnels"
-        echo " 3. Update/Re-install Backhaul Binary"
-        echo " 4. Generate Self-Signed TLS Certificate"
-        echo " 5. Select Backhaul Binary Directory (current: $BIN_PATH)"
-        echo " 6. System Health & Performance Monitor"
-        echo " 7. Clean Up Zombie/Orphaned Processes"
-        echo " 8. Uninstall EasyBackhaul (Removes binary and ALL configs)"
+        echo "EasyBackhaul is a comprehensive Backhaul tunnel management system."
+        echo "This menu provides access to all management functions."
         echo
-        print_info "----------------------------------------------------------------"
-        echo " ?. Help"
-        echo " 0. Exit"
+        echo "Available options:"
+        echo "  • Configure New Tunnel: Create and configure a new Backhaul tunnel"
+        echo "  • Manage Existing Tunnels: Start, stop, and manage existing tunnels"
+        echo "  • Update/Re-install Binary: Download and install the latest Backhaul binary"
+        echo "  • Generate TLS Certificate: Create self-signed certificates for secure connections"
+        echo "  • Select Binary Directory: Change where the Backhaul binary is located"
+        echo "  • System Health Monitor: Monitor system resources and tunnel performance"
+        echo "  • Clean Up Processes: Remove zombie and orphaned processes"
+        echo "  • Uninstall: Completely remove EasyBackhaul and all configurations"
         echo
-        read -p "Please select an option [0-8, ? for help]: " choice
-        case $choice in
-            1) configure_new_tunnel; press_any_key; main_menu ;;
-            2) manage_tunnels; main_menu ;;
-            3) download_backhaul; press_any_key; main_menu ;;
-            4) generate_self_signed_cert; press_any_key; main_menu ;;
-            5)
-               read -e -p "Enter the full path for the Backhaul binary (e.g., /usr/local/bin/backhaul): " new_bin_path
-               if [[ -n "$new_bin_path" ]]; then
-                   BIN_PATH="$new_bin_path"
-                   print_success "Backhaul binary path set to: $BIN_PATH (for this session)"
-               else
-                   print_warning "⚠ No path entered. Keeping current: $BIN_PATH"
-               fi
-               press_any_key
-               main_menu
-               ;;
-            6)
-               show_system_health_monitor; press_any_key; main_menu ;;
-            7)
-               clear
-               print_server_info_banner_minimal
-               print_info "--- Clean Up Zombie/Orphaned Processes ---"
-               echo
-               print_info "This will clean up any zombie processes and orphaned watcher processes."
-               echo
-               cleanup_zombie_processes
-               press_any_key
-               main_menu
-               ;;
-            8)
-               read -p "This will REMOVE the binary and ALL configs/services. This is irreversible. Are you sure? [y/N]: " confirm
-               if [[ "${confirm,,}" == "y" ]]; then
-                    echo
-                    print_warning "Summary of what will be deleted:"
-                    echo "  - Backhaul binary: $BIN_PATH"
-                    echo "  - All configs: $CONFIG_DIR"
-                    echo "  - All backups: $BACKUP_DIR"
-                    echo "  - All systemd services: $SERVICE_DIR/backhaul-*.service"
-                    echo "  - All watcher scripts, logs, and PID files in /tmp/"
-                    echo "  - All UFW rules and metadata: $UFW_METADATA_FILE"
-                    echo "  - All cron jobs managed by EasyBackhaul"
-                    echo
-                    read -p "Type DELETE to confirm: " really_delete
-                    if [[ "$really_delete" != "DELETE" ]]; then
-                        print_warning "❌ Uninstall cancelled. Nothing was deleted."
-                        press_any_key
-                        main_menu
-                        return
-                    fi
-                    print_warning "Stopping and disabling all backhaul services..."
-                    systemctl stop backhaul-*.service &>/dev/null
-                    systemctl disable backhaul-*.service &>/dev/null
-                    print_warning "Cleaning up all watcher processes and files..."
-                    for pid_file in /tmp/backhaul-watcher-*.pid; do
-                        if [[ -f "$pid_file" ]]; then
-                            local watcher_pid=$(cat "$pid_file")
-                            if [[ -n "$watcher_pid" ]]; then
-                                print_info "Stopping watcher process (PID: $watcher_pid)..."
-                                kill "$watcher_pid" 2>/dev/null
-                                local count=0
-                                while kill -0 "$watcher_pid" 2>/dev/null && [[ $count -lt 5 ]]; do
-                                    sleep 1
-                                    ((count++))
-                                done
-                                if kill -0 "$watcher_pid" 2>/dev/null; then
-                                    print_warning "Process not responding to SIGTERM, forcing termination..."
-                                    kill -9 "$watcher_pid" 2>/dev/null
-                                    sleep 1
-                                fi
-                                if kill -0 "$watcher_pid" 2>/dev/null; then
-                                    print_error "Failed to terminate watcher process (PID: $watcher_pid)"
-                                else
-                                    print_success "Watcher process terminated successfully"
-                                fi
+        print_info "Note: The binary status shows if Backhaul is installed and working."
+        echo "================================================================"
+        press_any_key
+    }
+    
+    menu_loop 0 8 "?" "main_menu_help" "Please select an option [0-8, ? for help]"
+    
+    case $choice in
+        1) configure_new_tunnel; press_any_key; main_menu ;;
+        2) manage_tunnels; main_menu ;;
+        3) download_backhaul; press_any_key; main_menu ;;
+        4) generate_self_signed_cert; press_any_key; main_menu ;;
+        5)
+           read -e -p "Enter the full path for the Backhaul binary (e.g., /usr/local/bin/backhaul): " new_bin_path
+           if [[ -n "$new_bin_path" ]]; then
+               BIN_PATH="$new_bin_path"
+               print_success "Backhaul binary path set to: $BIN_PATH (for this session)"
+           else
+               print_warning "⚠ No path entered. Keeping current: $BIN_PATH"
+           fi
+           press_any_key
+           main_menu
+           ;;
+        6)
+           show_system_health_monitor; press_any_key; main_menu ;;
+        7)
+           clear
+           print_server_info_banner_minimal
+           print_info "--- Clean Up Zombie/Orphaned Processes ---"
+           echo
+           print_info "This will clean up any zombie processes and orphaned watcher processes."
+           echo
+           cleanup_zombie_processes
+           press_any_key
+           main_menu
+           ;;
+        8)
+           read -p "This will REMOVE the binary and ALL configs/services. This is irreversible. Are you sure? [y/N]: " confirm
+           if [[ "${confirm,,}" == "y" ]]; then
+                echo
+                print_warning "Summary of what will be deleted:"
+                echo "  - Backhaul binary: $BIN_PATH"
+                echo "  - All configs: $CONFIG_DIR"
+                echo "  - All backups: $BACKUP_DIR"
+                echo "  - All systemd services: $SERVICE_DIR/backhaul-*.service"
+                echo "  - All watcher scripts, logs, and PID files in /tmp/"
+                echo "  - All UFW rules and metadata: $UFW_METADATA_FILE"
+                echo "  - All cron jobs managed by EasyBackhaul"
+                echo
+                read -p "Type DELETE to confirm: " really_delete
+                if [[ "$really_delete" != "DELETE" ]]; then
+                    print_warning "Uninstall cancelled. Nothing was deleted."
+                    press_any_key
+                    main_menu
+                    return
+                fi
+                print_warning "Stopping and disabling all backhaul services..."
+                systemctl stop backhaul-*.service &>/dev/null
+                systemctl disable backhaul-*.service &>/dev/null
+                print_warning "Cleaning up all watcher processes and files..."
+                for pid_file in /tmp/backhaul-watcher-*.pid; do
+                    if [[ -f "$pid_file" ]]; then
+                        local watcher_pid=$(cat "$pid_file")
+                        if [[ -n "$watcher_pid" ]]; then
+                            print_info "Stopping watcher process (PID: $watcher_pid)..."
+                            kill "$watcher_pid" 2>/dev/null
+                            local count=0
+                            while kill -0 "$watcher_pid" 2>/dev/null && [[ $count -lt 5 ]]; do
+                                sleep 1
+                                ((count++))
+                            done
+                            if kill -0 "$watcher_pid" 2>/dev/null; then
+                                print_warning "Process not responding to SIGTERM, forcing termination..."
+                                kill -9 "$watcher_pid" 2>/dev/null
+                                sleep 1
                             fi
-                            rm -f "$pid_file"
+                            if kill -0 "$watcher_pid" 2>/dev/null; then
+                                print_error "Failed to terminate watcher process (PID: $watcher_pid)"
+                            else
+                                print_success "Watcher process terminated successfully"
+                            fi
                         fi
-                    done
-                    pkill -f "backhaul-watcher" 2>/dev/null
-                    rm -f /tmp/backhaul-watcher-*.sh
-                    rm -f /tmp/backhaul-watcher-*.log
-                    rm -f /tmp/restart_ack_*
-                    print_info "Removed all watcher scripts, logs, and temporary files"
-                    print_warning "Removing all related files..."
-                    rm -f "$BIN_PATH"
-                    rm -rf "$CONFIG_DIR"
-                    rm -rf "$BACKUP_DIR"
-                    rm -f "$SERVICE_DIR"/backhaul-*.service
-                    rm -f "$UFW_METADATA_FILE"
-                    (crontab -l 2>/dev/null | grep -v "$CRON_COMMENT_TAG") | crontab -
-                    systemctl daemon-reload
-                    local CERT_DIR="/etc/backhaul/certs"
-                    if [ -d "$CERT_DIR" ] && compgen -G "$CERT_DIR/*.crt" > /dev/null; then
-                        read -p "Do you also want to delete all TLS certificates in $CERT_DIR? (y/n): " delcerts
-                        if [[ "${delcerts,,}" == "y" ]]; then
-                            rm -rf "$CERT_DIR"
-                            print_success "All certificates in $CERT_DIR have been deleted."
-                        else
-                            print_info "Certificates in $CERT_DIR have been preserved."
-                        fi
+                        rm -f "$pid_file"
                     fi
-                    cleanup_zombie_processes
-                    print_success "EasyBackhaul has been completely uninstalled (including all watchers and related files)."
-                    exit 0
-               fi
-               press_any_key
-               main_menu
-               ;;
-            \?) show_help; press_any_key; main_menu ;;
-            0) exit 0 ;;
-            *) print_warning "❌ Invalid option. Please enter 0-8 or ? for help."; press_any_key; main_menu ;;
-        esac
-    done
+                done
+                pkill -f "backhaul-watcher" 2>/dev/null
+                rm -f /tmp/backhaul-watcher-*.sh
+                rm -f /tmp/backhaul-watcher-*.log
+                rm -f /tmp/restart_ack_*
+                print_info "Removed all watcher scripts, logs, and temporary files"
+                print_warning "Removing all related files..."
+                rm -f "$BIN_PATH"
+                rm -rf "$CONFIG_DIR"
+                rm -rf "$BACKUP_DIR"
+                rm -f "$SERVICE_DIR"/backhaul-*.service
+                rm -f "$UFW_METADATA_FILE"
+                (crontab -l 2>/dev/null | grep -v "$CRON_COMMENT_TAG") | crontab -
+                systemctl daemon-reload
+                local CERT_DIR="/etc/backhaul/certs"
+                if [ -d "$CERT_DIR" ] && compgen -G "$CERT_DIR/*.crt" > /dev/null; then
+                    read -p "Do you also want to delete all TLS certificates in $CERT_DIR? (y/n): " delcerts
+                    if [[ "${delcerts,,}" == "y" ]]; then
+                        rm -rf "$CERT_DIR"
+                        print_success "All certificates in $CERT_DIR have been deleted."
+                    else
+                        print_info "Certificates in $CERT_DIR have been preserved."
+                    fi
+                fi
+                cleanup_zombie_processes
+                print_success "EasyBackhaul has been completely uninstalled (including all watchers and related files)."
+                exit 0
+           fi
+           press_any_key
+           main_menu
+           ;;
+        0) exit 0 ;;
+        *) print_warning "Invalid option. Please enter 0-8 or ? for help."; press_any_key ;;
+    esac
 }
 
 # --- Script Entrypoint ---

@@ -21,8 +21,8 @@ manage_cron_menu() {
         echo "  • Every 24 hours: Daily restart, minimal overhead"
         echo "  • Custom: Set your own interval in minutes"
         echo
-        echo "Note: Only one cron job can be active per service at a time."
-        echo "Setting a new job will replace any existing job."
+        print_info "Note: Only one cron job can be active per service at a time."
+        print_info "Setting a new job will replace any existing job."
         echo "================================================================"
         press_any_key
     }

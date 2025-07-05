@@ -297,7 +297,7 @@ update_config_file() {
     local protocol="$5"
     
     # Input validation
-    if ! validate_ip "$server_ip" || ! validate_port "$server_port" || ! validate_port "$local_port"; then
+    if ! validate_tunnel_parameters "$server_ip" "$server_port" "$local_port" "$tunnel_name"; then
         log_message "ERROR" "Invalid configuration parameters for tunnel $tunnel_name"
         return 1
     fi
@@ -417,35 +417,6 @@ restore_configuration() {
             print_warning "❌ Invalid selection"
         fi
     done
-}
-
-validate_configuration() {
-    local config_file="$1"
-    
-    if [ ! -f "$config_file" ]; then
-        return 1
-    fi
-    
-    # Check file permissions
-    local perms=$(stat -c %a "$config_file" 2>/dev/null)
-    if [ "$perms" != "600" ]; then
-        echo "⚠ Config file has insecure permissions: $perms"
-        return 1
-    fi
-    
-    # Validate syntax
-    while IFS='=' read -r tunnel_name tunnel_config; do
-        if [ -n "$tunnel_name" ] && [ -n "$tunnel_config" ]; then
-            IFS=':' read -r server_ip server_port local_port protocol <<< "$tunnel_config"
-            
-            if ! validate_ip "$server_ip" || ! validate_port "$server_port" || ! validate_port "$local_port"; then
-                echo "❌ Invalid configuration for tunnel $tunnel_name"
-                return 1
-            fi
-        fi
-    done < "$config_file"
-    
-    return 0
 }
 
 # Export configuration

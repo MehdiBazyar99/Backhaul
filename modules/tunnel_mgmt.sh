@@ -28,7 +28,7 @@ manage_tunnels() {
 
     while true; do
         clear
-        print_server_info_banner_minimal
+        print_server_info_banner
         print_info "--- Available Backhaul Tunnels ---"
         echo
         
@@ -44,12 +44,11 @@ manage_tunnels() {
         for service in "${services[@]}"; do
             local status
             if systemctl is-active --quiet "$service"; then
-                status="Running"
-                echo -e " $i. $service (\e[32m✓ $status\e[0m)"
+                status="running"
             else
-                status="Stopped"
-                echo -e " $i. $service (\e[31m✗ $status\e[0m)"
+                status="stopped"
             fi
+            print_service_status "$service" "$status"
             ((i++))
         done
         
@@ -98,7 +97,7 @@ manage_specific_tunnel() {
         echo "13. Delete Tunnel: Permanently remove this tunnel and all its data."
         echo " 0. Back to Tunnel List: Return to the previous menu."
         echo
-        echo "Tips:"
+        print_info "Tips:"
         echo "- Use Ctrl+C to exit log views and return to this menu."
         echo "- Use 'q' to exit configuration view."
         echo "- For more details, see the main help from the main menu."
@@ -110,20 +109,16 @@ manage_specific_tunnel() {
         # Show tunnel status
         local status
         if systemctl is-active --quiet "$service"; then
-            status="Running"
+            status="running"
         else
-            status="Stopped"
+            status="stopped"
         fi
         
         clear
         print_server_info_banner_minimal
         print_info "--- Managing Tunnel: $suffix ---"
         print_info "Service: $service"
-        if systemctl is-active --quiet "$service"; then
-            print_success "Status: $status"
-        else
-            print_error "Status: $status"
-        fi
+        print_tunnel_status "$suffix" "$status"
         
         # Show tunnel info
         if [ -f "$config_file" ]; then
@@ -290,7 +285,7 @@ manage_specific_tunnel() {
                 ;;
             8) test_connection "$config_file"; press_any_key;;
             9) manage_watcher_submenu "$service" "$suffix" "$config_file" ;;
-            10) validate_tunnel_config "$config_file" ;;
+            10) validate_tunnel_config "$config_file"; press_any_key ;;
             11)
                 clear
                 print_info "--- Tunnel Information: $suffix ---"
@@ -387,343 +382,6 @@ manage_specific_tunnel() {
                 print_warning "Invalid option. Please enter 0-13 or ? for help."
                 press_any_key
                 ;;
-        esac
-    done
-}
-
-manage_single_tunnel() {
-    local service=$1
-    local suffix
-    suffix=$(echo "$service" | sed 's/backhaul-\(.*\)\.service/\1/')
-    local config_file="$CONFIG_DIR/config-${suffix}.toml"
-    local service_file="$SERVICE_DIR/$service"
-    local certs_to_delete=""
-    if [[ "$suffix" == server-wss* || "$suffix" == server-wssmux* ]]; then
-        # Try to find certs referenced in config
-        if [ -f "$config_file" ]; then
-            local cert_path key_path
-            cert_path=$(grep '^tls_cert' "$config_file" | cut -d'"' -f2)
-            key_path=$(grep '^tls_key' "$config_file" | cut -d'"' -f2)
-            if [ -n "$cert_path" ] && [ -f "$cert_path" ]; then
-                certs_to_delete+="$cert_path\n"
-            fi
-            if [ -n "$key_path" ] && [ -f "$key_path" ]; then
-                certs_to_delete+="$key_path\n"
-            fi
-        fi
-    fi
-
-    while true; do
-        clear
-        print_server_info_banner
-        local status
-        status=$(systemctl is-active "$service")
-        local status_text
-        if [[ "$status" == "active" ]]; then
-             status_text="\e[32mActive\e[0m"
-        else
-             status_text="\e[31mInactive\e[0m"
-        fi
-        print_info "--- Managing: $service (Status: $status_text) ---"
-        print_info "Tip: Press '?' for help about tunnel features."
-
-        # Show service status
-        local service_status
-        if systemctl is-active --quiet "$service"; then
-            service_status="\e[32mRunning\e[0m"
-        else
-            service_status="\e[31mStopped\e[0m"
-        fi
-        print_info "Service Status: $service_status"
-        # Show watcher status
-        local watcher_pid_file="/tmp/backhaul-watcher-${suffix}.pid"
-        if [[ -f "$watcher_pid_file" ]]; then
-            print_info "Watcher: \e[32mEnabled\e[0m (PID: $(cat $watcher_pid_file))"
-        else
-            print_info "Watcher: \e[31mDisabled\e[0m"
-        fi
-
-        echo " 1. Start"
-        echo " 2. Stop"
-        echo " 3. Restart"
-        echo " 4. View Service Status (summary + last logs)"
-        echo " 5. View Full Logs (scroll/search/live)"
-        echo " 6. View Configuration"
-        echo " 7. Edit Configuration (nano)"
-        echo " 8. Change Log Level"
-        echo " 9. Test Connection"
-        echo "10. Hot Reload Config"
-        echo "11. Manage Cron Auto-Restart"
-        echo "12. Manage Coordinated Restart Watcher"
-        echo "13. Health Check & Performance"
-        echo "14. Validate Configuration"
-        echo "15. Graceful Restart"
-        echo "16. Delete Service"
-        echo " ?. Help"
-        echo " 0. Back to Service List"
-
-        local choice
-        read -p "Enter choice [0-16, ? for help]: " choice
-        
-        case $choice in
-            1) with_spinner "Starting service" systemctl start "$service"; print_success "Service started successfully. You can now connect to this tunnel."; press_any_key;;
-            2) with_spinner "Stopping service" systemctl stop "$service"; print_success "Service stopped. Connections will be refused until restarted."; press_any_key;;
-            3) with_spinner "Restarting service" systemctl restart "$service"; print_success "Service restarted. Check logs if you encounter issues."; press_any_key;;
-            \?) 
-                print_info "================= Tunnel Management Help ================="
-                echo
-                echo "Tunnel Management Options:"
-                echo " 1. Start - Start the tunnel service"
-                echo " 2. Stop - Stop the tunnel service"
-                echo " 3. Restart - Restart the tunnel service"
-                echo " 4. View Service Status - Show service status and recent logs"
-                echo " 5. View Full Logs - Interactive log viewing with search/follow"
-                echo " 6. View Configuration - Display current tunnel configuration"
-                echo " 7. Edit Configuration - Edit config file with nano editor"
-                echo " 8. Change Log Level - Modify logging verbosity"
-                echo " 9. Test Connection - Test tunnel connectivity"
-                echo "10. Hot Reload Config - Reload config without restart"
-                echo "11. Manage Cron Auto-Restart - Set up automatic restarts"
-                echo "12. Manage Coordinated Restart Watcher - Advanced restart coordination"
-                echo "13. Health Check & Performance - Monitor tunnel health"
-                echo "14. Validate Configuration - Check config for errors"
-                echo "15. Graceful Restart - Coordinated restart with remote side"
-                echo "16. Delete Service - Remove the tunnel, config, and related files."
-                echo
-                echo "- For more details, see the main help from the main menu."
-                echo "================================================================"
-                press_any_key
-                ;;
-            4)
-                systemctl status "$service" --no-pager
-                echo
-                print_info "Tip: For full logs, including scrolling/searching, use option 5 in this menu."
-                press_any_key
-                ;;
-            5)
-                print_info "Choose log viewing mode:"
-                echo " 1) Live follow (Ctrl+C to exit log view and return to menu)"
-                echo " 2) Interactive (scroll/search, press q to quit, F to follow live, Ctrl+C to exit log view and return to menu)"
-                read -p "Select [1-2, default 2]: " log_mode
-                log_mode=${log_mode:-2}
-                if [[ "$log_mode" == "1" ]]; then
-                    print_warning "You are about to enter live log view. Press Ctrl+C to exit log view and return to the menu."
-                    sleep 2
-                    # Save current SIGINT trap
-                    old_trap=$(trap -p SIGINT)
-                    # Ignore SIGINT in parent
-                    trap '' SIGINT
-                    # Run log viewer in subshell with default SIGINT
-                    (
-                        trap - SIGINT
-                        journalctl -u "$service" -f --no-pager
-                    )
-                    # Restore old SIGINT trap
-                    eval "$old_trap"
-                else
-                    print_info "Interactive log view: Use arrow keys to scroll, / to search, F to follow live, q to quit. Press Ctrl+C to exit log view and return to the menu."
-                    sleep 2
-                    old_trap=$(trap -p SIGINT)
-                    trap '' SIGINT
-                    (
-                        trap - SIGINT
-                        journalctl -u "$service" --no-pager | less +F
-                    )
-                    eval "$old_trap"
-                fi
-                ;;
-            6)
-                print_info "Viewing configuration. Press 'q' to exit and return to the menu."
-                sleep 1
-                less "$config_file"
-                ;;
-            7) 
-                if [ ! -f "$config_file" ]; then print_error "Config file not found for this tunnel. Please check your configuration and try again."; press_any_key; continue; fi
-                backup_config "$config_file"
-                nano "$config_file"
-                if confirm_action "Restart service to apply changes?" "y"; then 
-                    systemctl restart "$service"
-                    print_success "Service restarted."
-                fi
-                ;;
-            8)
-                # Change log level submenu
-                print_info "--- Change Log Level ---"
-                echo "Log levels control the verbosity of logs:"
-                echo "  debug: Most detailed, for troubleshooting."
-                echo "  info:  Normal operation messages (default)."
-                echo "  warn:  Only warnings and errors."
-                echo "  error: Only errors."
-                echo
-                current_level=$(grep -E '^\s*log_level\s*=\s*"' "$config_file" | head -n1 | cut -d'"' -f2)
-                print_info "Current log level: ${current_level:-info}"
-                echo "Select new log level:"
-                select new_level in debug info warn error cancel; do
-                    case $new_level in
-                        debug|info|warn|error)
-                                # Update log_level in config file using unified function
-                                update_config_value "$config_file" "log_level" "$new_level"
-                            print_success "Log level updated to $new_level."
-                                if confirm_action "Restart service to apply new log level?" "y"; then
-                                systemctl restart "$service"
-                                print_success "Service restarted."
-                            fi
-                            break
-                            ;;
-                        cancel)
-                            print_info "Log level change cancelled."
-                            break
-                            ;;
-                        *)
-                            print_warning "Invalid selection."
-                            ;;
-                    esac
-                done
-                ;;
-            9) test_connection "$config_file"; press_any_key;;
-            10) hot_reload_service "$service"; press_any_key;;
-            11) manage_cron_menu "$service";;
-            12)
-                manage_watcher_submenu "$service" "$suffix" "$config_file" ;;
-            13)
-                show_health_and_performance "$suffix" "$service" ;;
-            14)
-                validate_tunnel_config "$config_file" ;;
-            15)
-                graceful_restart_with_ui "$suffix" ;;
-            16)
-                print_warning "You are about to delete the following:"
-                echo "  - Service: $service_file"
-                echo "  - Config: $config_file"
-                
-                # Check for watcher files
-                local watcher_script="/tmp/backhaul-watcher-${suffix}.sh"
-                local watcher_pid_file="/tmp/backhaul-watcher-${suffix}.pid"
-                local watcher_log="/tmp/backhaul-watcher-${suffix}.log"
-                
-                if [[ -f "$watcher_script" ]]; then
-                    echo "  - Watcher script: $watcher_script"
-                fi
-                if [[ -f "$watcher_pid_file" ]]; then
-                    echo "  - Watcher process file: $watcher_pid_file"
-                fi
-                if [[ -f "$watcher_log" ]]; then
-                    echo "  - Watcher logs: $watcher_log"
-                fi
-                
-                if [ -n "$certs_to_delete" ]; then
-                    echo -e "  - TLS Cert/Key(s):\n$certs_to_delete"
-                fi
-                if grep -q "^$suffix:" "$UFW_METADATA_FILE" 2>/dev/null; then
-                    echo "  - UFW rule: $(grep "^$suffix:" "$UFW_METADATA_FILE" | cut -d':' -f2)"
-                fi
-                if crontab -l 2>/dev/null | grep -q "$service"; then
-                    echo "  - Cron job for $service"
-                fi
-                read -p "Are you sure you want to PERMANENTLY delete all of the above? (y/n): " confirm_delete
-                if [[ "${confirm_delete,,}" == "y" ]]; then
-                    print_warning "Stopping and disabling service..."
-                    with_spinner "Stopping service" systemctl stop "$service" &>/dev/null
-                    with_spinner "Disabling service" systemctl disable "$service" &>/dev/null
-                    
-                    # Clean up watcher if it exists with robust process termination
-                    if [[ -f "$watcher_pid_file" ]]; then
-                        local watcher_pid=$(cat "$watcher_pid_file")
-                        if [[ -n "$watcher_pid" ]]; then
-                            print_info "Stopping watcher process (PID: $watcher_pid)..."
-                            
-                            # Try graceful termination first
-                            kill "$watcher_pid" 2>/dev/null
-                            
-                            # Wait up to 5 seconds for graceful shutdown
-                            local count=0
-                            while kill -0 "$watcher_pid" 2>/dev/null && [[ $count -lt 5 ]]; do
-                                sleep 1
-                                ((count++))
-                            done
-                            
-                            # If still running, force kill
-                            if kill -0 "$watcher_pid" 2>/dev/null; then
-                                print_warning "Process not responding to SIGTERM, forcing termination..."
-                                kill -9 "$watcher_pid" 2>/dev/null
-                                sleep 1
-                            fi
-                            
-                            # Verify process is dead
-                            if kill -0 "$watcher_pid" 2>/dev/null; then
-                                print_error "Failed to terminate watcher process (PID: $watcher_pid)"
-                            else
-                                print_success "Watcher process terminated successfully"
-                            fi
-                        fi
-                        rm -f "$watcher_pid_file"
-                    fi
-                    
-                    # Kill any remaining child processes of the watcher
-                    pkill -f "backhaul-watcher-${suffix}" 2>/dev/null
-                    
-                    if [[ -f "$watcher_script" ]]; then
-                        rm -f "$watcher_script"
-                        print_info "Removed watcher script"
-                    fi
-                    if [[ -f "$watcher_log" ]]; then
-                        rm -f "$watcher_log"
-                        print_info "Removed watcher logs"
-                    fi
-                    
-                    # Remove any temporary ACK files
-                    rm -f "/tmp/restart_ack_${service}"
-                    
-                    print_warning "Removing files..."
-                    rm -f "$config_file" "$service_file"
-                    if [ -n "$certs_to_delete" ]; then
-                        echo -e "$certs_to_delete" | xargs rm -f
-                    fi
-                    manage_ufw_delete "$suffix"
-                    remove_cron_job "$service"
-                    systemctl daemon-reload
-                    # Run zombie cleanup
-                    cleanup_zombie_processes
-                    
-                    print_success "Service $service and all associated files (including watcher) have been deleted. You may now create a new tunnel or exit.";
-                    press_any_key
-                    return
-                fi
-                ;;
-            0) return ;;
-            \?)
-                clear
-                print_info "================= Tunnel Management Help ================="
-                echo "This menu lets you manage a specific Backhaul tunnel/service."
-                echo
-                echo " 1. Start: Start the selected tunnel service."
-                echo " 2. Stop: Stop the tunnel service."
-                echo " 3. Restart: Restart the tunnel service."
-                echo " 4. View Service Status: Show summary and last logs."
-                echo " 5. View Full Logs: Scroll/search or follow logs live."
-                echo " 6. View Configuration: View the TOML config (press q to exit)."
-                echo " 7. Edit Configuration: Edit config in nano, then optionally restart."
-                echo " 8. Change Log Level: Adjust log verbosity (debug/info/warn/error)."
-                echo " 9. Test Connection: Test if the tunnel is reachable."
-                echo "10. Hot Reload Config: Reload config without restart (if supported)."
-                echo "11. Manage Cron Auto-Restart: Set up or remove auto-restart jobs."
-                echo "12. Manage Coordinated Restart Watcher: All watcher options (enable/disable, config, status, logs, test) in a dedicated submenu."
-                echo "    - The watcher coordinates restarts between client and server on error."
-                echo "    - You must set the same secret and compatible ports on both sides."
-                echo "    - Use the watcher submenu for config, status, logs, and testing."
-                echo "13. Health Check & Performance: Monitor tunnel health, resource usage, and performance metrics."
-                echo "14. Validate Configuration: Check config file syntax and validate settings."
-                echo "15. Graceful Restart: Restart with health checks and error recovery."
-                echo "16. Delete Service: Remove the tunnel, config, and related files."
-                echo " 0. Back to Service List: Return to the previous menu."
-                echo
-                echo "Tips:"
-                echo "- Use Ctrl+C to exit log views and return to this menu."
-                echo "- Use 'q' to exit configuration view."
-                echo "- For more details, see the main help from the main menu."
-                press_any_key
-                ;;
-            *) print_warning "Invalid option."; press_any_key;;
         esac
     done
 }
@@ -1536,12 +1194,14 @@ watcher_submenu_help() {
 # --- Technical Enhancement Functions ---
 
 # Show health and performance metrics for a tunnel
-show_health_and_performance() {
+show_tunnel_health_and_performance() {
     local tunnel_name="$1"
     local service="$2"
     
     clear
+    print_server_info_banner_minimal
     print_info "=== Health Check & Performance Metrics ==="
+    print_info "Tunnel: $tunnel_name"
     echo
     
     # Initialize logging if not already done
@@ -1554,16 +1214,16 @@ show_health_and_performance() {
     
     case "$health_status" in
         "running")
-            print_success "✓ Tunnel is running"
+            print_success "Tunnel is running"
             ;;
         "dead")
-            print_error "✗ Tunnel process is dead"
+            print_error "Tunnel process is dead"
             ;;
         "not_started")
-            print_warning "⚠ Tunnel is not started"
+            print_warning "Tunnel is not started"
             ;;
         *)
-            print_warning "? Tunnel status unknown"
+            print_warning "Tunnel status unknown"
             ;;
     esac
     
@@ -1585,15 +1245,19 @@ show_health_and_performance() {
                     local op="${BASH_REMATCH[1]}"
                     local duration="${BASH_REMATCH[2]}"
                     local success="${BASH_REMATCH[3]}"
-                    local status_icon=$([[ "$success" == "true" ]] && echo "✓" || echo "✗")
-                    echo "  $status_icon $op: ${duration}s"
+                    if [[ "$success" == "true" ]]; then
+                        print_success "$op: ${duration}s"
+                    else
+                        print_error "$op: ${duration}s"
+                    fi
                 fi
             done
         else
-            echo "No performance data available"
+            print_warning "No performance data available in log file"
         fi
     else
-        echo "No performance data available"
+        print_warning "Performance log file not found: $PERFORMANCE_LOG_FILE"
+        print_info "Performance tracking will be available after the first operation"
     fi
     
     # Show health history
@@ -1620,10 +1284,11 @@ show_health_and_performance() {
                 fi
             done
         else
-            echo "No health history available"
+            print_warning "No health history available in log file"
         fi
     else
-        echo "No health history available"
+        print_warning "Health log file not found: $HEALTH_LOG_FILE"
+        print_info "Health tracking will be available after the first health check"
     fi
     
     # Optimize process priority
@@ -1631,26 +1296,12 @@ show_health_and_performance() {
     print_info "--- Process Optimization ---"
     optimize_process_priority "$tunnel_name"
     
-    press_any_key
+    echo
+    print_info "Press any key to return to tunnel management..."
+    read -n 1 -s
 }
 
-# Validate tunnel configuration
-validate_tunnel_config() {
-    local config_file="$1"
-    
-    if [[ ! -f "$config_file" ]]; then
-        print_error "Configuration file not found: $config_file"
-        press_any_key
-        return 1
-    fi
-    
-    # Initialize logging if not already done
-    init_logging
-    
-    # Run comprehensive validation using the validation module
-    validate_config_detailed "$config_file"
-    return $?
-}
+# Validate tunnel configuration - using comprehensive validation from validation.sh
 
 # Graceful restart with health checks and error recovery
 graceful_restart_with_ui() {
@@ -1720,7 +1371,7 @@ create_tunnel() {
     
     # Rate limiting check
     if ! rate_limit_check "create_tunnel" 5; then
-        echo "⚠ Rate limit exceeded. Please wait before creating another tunnel."
+        print_warning "Rate limit exceeded. Please wait before creating another tunnel."
         return 1
     fi
     
@@ -1728,69 +1379,10 @@ create_tunnel() {
     echo "💡 Tip: Use descriptive names like 'office-vpn' or 'home-connection'"
     
     # Input validation with sanitization
-    while true; do
-        read -p "Enter tunnel name: " tunnel_name
-        tunnel_name=$(sanitize_input "$tunnel_name" 50)
-        
-        if [ -z "$tunnel_name" ]; then
-            echo "❌ Tunnel name cannot be empty"
-            continue
-        fi
-        
-        if [[ ! "$tunnel_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-            echo "❌ Tunnel name can only contain letters, numbers, hyphens, and underscores"
-            continue
-        fi
-        
-        if [ -d "$TUNNEL_DIR/$tunnel_name" ]; then
-            echo "❌ Tunnel '$tunnel_name' already exists"
-            continue
-        fi
-        
-        break
-    done
-    
-    while true; do
-        read -p "Enter server IP address: " server_ip
-        server_ip=$(sanitize_input "$server_ip" 15)
-        
-        if ! validate_ip "$server_ip"; then
-            echo "❌ Invalid IP address format"
-            continue
-        fi
-        
-        break
-    done
-    
-    while true; do
-        read -p "Enter server port (1-65535): " server_port
-        server_port=$(sanitize_input "$server_port" 5)
-        
-        if ! validate_port "$server_port"; then
-            echo "❌ Invalid port number (must be 1-65535)"
-            continue
-        fi
-        
-        break
-    done
-    
-    while true; do
-        read -p "Enter local port (1-65535): " local_port
-        local_port=$(sanitize_input "$local_port" 5)
-        
-        if ! validate_port "$local_port"; then
-            echo "❌ Invalid port number (must be 1-65535)"
-            continue
-        fi
-        
-        # Check if port is already in use
-        if is_port_in_use "$local_port"; then
-            echo "❌ Port $local_port is already in use"
-            continue
-        fi
-        
-        break
-    done
+    tunnel_name=$(validate_tunnel_name "check_exists")
+    server_ip=$(validate_ip_with_prompt)
+    server_port=$(validate_port_with_prompt "Enter server port (1-65535): ")
+    local_port=$(validate_port_with_prompt "Enter local port (1-65535): " "check_usage")
     
     echo "Select protocol:"
     echo "1) TCP"
@@ -1860,7 +1452,7 @@ if ! rate_limit_check "tunnel_connect" 10; then
 fi
 
 # Input validation
-if ! validate_ip "\$SERVER_IP" || ! validate_port "\$SERVER_PORT" || ! validate_port "\$LOCAL_PORT"; then
+if ! validate_tunnel_parameters "\$SERVER_IP" "\$SERVER_PORT" "\$LOCAL_PORT" "\$TUNNEL_NAME"; then
     log_message "ERROR" "Invalid configuration for tunnel $tunnel_name"
     exit 1
 fi
@@ -1879,8 +1471,7 @@ EOF
     
     # Update main config
     update_config_file "$tunnel_name" "$server_ip" "$server_port" "$local_port" "$protocol"
-    
-    echo "✅ Tunnel '$tunnel_name' created successfully"
+    print_success "Tunnel '$tunnel_name' created successfully"
     echo "📁 Location: $tunnel_dir"
     echo "🔒 Permissions hardened for security"
     
@@ -1891,74 +1482,11 @@ EOF
     cleanup_temp_files
 }
 
-delete_tunnel() {
-    local tunnel_name="$1"
-    
-    if [ -z "$tunnel_name" ]; then
-        echo "❌ Tunnel name is required"
-        return 1
-    fi
-    
-    # Input sanitization
-    tunnel_name=$(sanitize_input "$tunnel_name" 50)
-    
-    local tunnel_dir="$TUNNEL_DIR/$tunnel_name"
-    
-    if [ ! -d "$tunnel_dir" ]; then
-        echo "❌ Tunnel '$tunnel_name' not found"
-        return 1
-    fi
-    
-    # Confirm deletion with security warning
-    echo "⚠ SECURITY WARNING: This will permanently delete tunnel '$tunnel_name'"
-    echo "   - All configuration files will be securely erased"
-    echo "   - UFW rules will be removed"
-    echo "   - Any running processes will be terminated"
-    echo ""
-    read -p "Type 'DELETE' to confirm: " confirmation
-    
-    if [ "$confirmation" != "DELETE" ]; then
-        echo "❌ Deletion cancelled"
-        return 1
-    fi
-    
-    # Performance monitoring wrapper
-    monitor_performance "delete_tunnel_impl" "$tunnel_name"
-}
-
-delete_tunnel_impl() {
-    local tunnel_name="$1"
-    local tunnel_dir="$TUNNEL_DIR/$tunnel_name"
-    
-    # Stop tunnel if running
-    stop_tunnel "$tunnel_name" 2>/dev/null
-    
-    # Remove UFW rules
-    remove_ufw_rules "$tunnel_name"
-    
-    # Securely delete all files
-    if [ -d "$tunnel_dir" ]; then
-        find "$tunnel_dir" -type f -exec secure_delete {} \;
-        rm -rf "$tunnel_dir"
-    fi
-    
-    # Remove from main config
-    remove_from_config "$tunnel_name"
-    
-    # Clean up watcher files if they exist
-    cleanup_watcher_files "$tunnel_name"
-    
-    echo "✅ Tunnel '$tunnel_name' securely deleted"
-    
-    # Performance optimization
-    cleanup_temp_files
-}
-
 start_tunnel() {
     local tunnel_name="$1"
     
     if [ -z "$tunnel_name" ]; then
-        echo "❌ Tunnel name is required"
+        print_error "Tunnel name is required"
         return 1
     fi
     
@@ -1967,7 +1495,7 @@ start_tunnel() {
     
     # Rate limiting check
     if ! rate_limit_check "start_tunnel" 10; then
-        echo "⚠ Rate limit exceeded. Please wait before starting another tunnel."
+        print_warning "Rate limit exceeded. Please wait before starting another tunnel."
         return 1
     fi
     
@@ -1976,26 +1504,26 @@ start_tunnel() {
     local tunnel_script="$tunnel_dir/tunnel.sh"
     
     if [ ! -d "$tunnel_dir" ]; then
-        echo "❌ Tunnel '$tunnel_name' not found"
+        print_error "Tunnel '$tunnel_name' not found"
         return 1
     fi
     
     if [ ! -f "$config_file" ]; then
-        echo "❌ Configuration file not found"
+        print_error "Configuration file not found"
         return 1
     fi
     
     # Load configuration with validation
     source "$config_file"
     
-    if ! validate_ip "$SERVER_IP" || ! validate_port "$SERVER_PORT" || ! validate_port "$LOCAL_PORT"; then
-        echo "❌ Invalid configuration detected"
+    if ! validate_tunnel_parameters "$SERVER_IP" "$SERVER_PORT" "$LOCAL_PORT" "$tunnel_name"; then
+        print_error "Invalid configuration detected"
         return 1
     fi
     
     # Check if already running
     if is_tunnel_running "$tunnel_name"; then
-        echo "⚠ Tunnel '$tunnel_name' is already running"
+        print_warning "Tunnel '$tunnel_name' is already running"
         return 0
     fi
     
@@ -2010,7 +1538,7 @@ start_tunnel_impl() {
     
     # Security: Verify script permissions
     if [ "$(stat -c %a "$tunnel_script" 2>/dev/null)" != "700" ]; then
-        echo "❌ Security: Tunnel script has insecure permissions"
+        print_error "Security: Tunnel script has insecure permissions"
         chmod 700 "$tunnel_script"
     fi
     
@@ -2027,8 +1555,7 @@ start_tunnel_impl() {
     
     # Secure logging
     secure_log_message "INFO" "Started tunnel $tunnel_name (PID: $pid)"
-    
-    echo "✅ Tunnel '$tunnel_name' started successfully"
+    print_success "Tunnel '$tunnel_name' started successfully"
     echo "📊 PID: $pid"
     echo "📝 Logs: $tunnel_dir/tunnel.log"
     
@@ -2040,7 +1567,7 @@ stop_tunnel() {
     local tunnel_name="$1"
     
     if [ -z "$tunnel_name" ]; then
-        echo "❌ Tunnel name is required"
+        print_error "Tunnel name is required"
         return 1
     fi
     
@@ -2051,12 +1578,12 @@ stop_tunnel() {
     local pid_file="$tunnel_dir/tunnel.pid"
     
     if [ ! -d "$tunnel_dir" ]; then
-        echo "❌ Tunnel '$tunnel_name' not found"
+        print_error "Tunnel '$tunnel_name' not found"
         return 1
     fi
     
     if [ ! -f "$pid_file" ]; then
-        echo "⚠ Tunnel '$tunnel_name' is not running"
+        print_warning "Tunnel '$tunnel_name' is not running"
         return 0
     fi
     
@@ -2085,20 +1612,13 @@ stop_tunnel_impl() {
         # Force kill if still running
         if kill -0 "$pid" 2>/dev/null; then
             kill -KILL "$pid" 2>/dev/null
-            echo "⚠ Force killed tunnel process"
+            print_warning "Force killed tunnel process"
         fi
     fi
     
     # Securely delete PID file
     secure_delete "$pid_file"
-    
-    # Update status
-    update_tunnel_status "$tunnel_name" "stopped"
-    
-    # Secure logging
-    secure_log_message "INFO" "Stopped tunnel $tunnel_name"
-    
-    echo "✅ Tunnel '$tunnel_name' stopped successfully"
+    print_success "Tunnel '$tunnel_name' stopped successfully"
     
     # Performance optimization
     optimize_memory_usage
