@@ -404,10 +404,6 @@ show_system_health_monitor() {
 main_menu() {
     clear
     print_server_info_banner
-    print_info "      EasyBackhaul Installer & Management Menu (v13.0-beta)"
-    print_info "================================================================"
-    print_info "  Core by Musixal  |  Installer by @N4Xon"
-    print_info "----------------------------------------------------------------"
     
     # Show binary status
     if [[ -f "$BIN_PATH" ]]; then
@@ -429,15 +425,15 @@ main_menu() {
             
             if [[ "$running_services" -gt 0 ]]; then
                 if [[ -n "$version_output" ]]; then
-                    print_success "✓ Binary Status: $version_output (Services: $running_services running)"
+                    print_success "Binary Status: $version_output (Services: $running_services running)"
                 else
-                    print_success "✓ Binary Status: Found and working (Services: $running_services running)"
+                    print_success "Binary Status: Found and working (Services: $running_services running)"
                 fi
             else
                 if [[ -n "$version_output" ]]; then
-                    print_success "✓ Binary Status: $version_output (No services running)"
+                    print_success "Binary Status: $version_output (No services running)"
                 else
-                    print_success "✓ Binary Status: Found and executable (No services running)"
+                    print_success "Binary Status: Found and executable (No services running)"
                 fi
             fi
         fi

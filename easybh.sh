@@ -3104,6 +3104,8 @@ manage_ufw() {
 
     # Help function for UFW menu
     ufw_menu_help() {
+        clear
+        print_server_info_banner_minimal
         print_info "================= UFW Firewall Management Help ================="
         echo
         echo "UFW (Uncomplicated Firewall) is a frontend for iptables."
@@ -3124,7 +3126,9 @@ manage_ufw() {
     }
 
     while true; do
-        print_submenu_header "UFW Firewall Management"
+        clear
+        print_server_info_banner_minimal
+        print_info "--- UFW Firewall Management ---"
         
         # Show UFW status
         local ufw_status
@@ -3143,7 +3147,11 @@ manage_ufw() {
         echo " 4. Disable UFW"
         echo " 5. Reset UFW Rules"
         echo " 6. Security Audit"
-        print_menu_footer
+        echo
+        print_info "----------------------------------------------------------------"
+        echo " ?. Help"
+        echo " 0. Back"
+        echo
         
         menu_loop 0 6 "?" "ufw_menu_help" "Enter choice [0-6, ? for help]"
         
@@ -3467,6 +3475,8 @@ manage_cron_menu() {
     
     # Help function for cron menu
     cron_menu_help() {
+        clear
+        print_server_info_banner_minimal
         print_info "================= Cron Auto-Restart Help ================="
         echo
         echo "Cron jobs automatically restart your tunnel service at regular intervals."
@@ -3486,7 +3496,10 @@ manage_cron_menu() {
     }
     
     while true; do
-        print_submenu_header "Cron Auto-Restart Management" "$service"
+        clear
+        print_server_info_banner_minimal
+        print_info "--- Cron Auto-Restart Management ---"
+        print_info "Service: $service"
         
         local current_job
         current_job=$(crontab -l 2>/dev/null | grep "$service" | grep "$CRON_COMMENT_TAG")
@@ -3574,6 +3587,8 @@ remove_cron_job() {
 manage_tunnels() {
     # Help function for tunnel list
     tunnel_list_help() {
+        clear
+        print_server_info_banner_minimal
         print_info "================= Tunnel Management Help ================="
         echo "This menu lets you manage your Backhaul tunnels."
         echo
@@ -3605,11 +3620,12 @@ manage_tunnels() {
         for service in "${services[@]}"; do
             local status
             if systemctl is-active --quiet "$service"; then
-                status="✓ Running"
+                status="Running"
+                echo -e " $i. $service (\e[32m✓ $status\e[0m)"
             else
-                status="✗ Stopped"
+                status="Stopped"
+                echo -e " $i. $service (\e[31m✗ $status\e[0m)"
             fi
-            echo " $i. $service ($status)"
             ((i++))
         done
         
@@ -3638,6 +3654,8 @@ manage_specific_tunnel() {
     
     # Help function for specific tunnel management
     tunnel_management_help() {
+        clear
+        print_server_info_banner_minimal
         print_info "================= Tunnel Management Help ================="
         echo "This menu lets you manage a specific Backhaul tunnel/service."
         echo
@@ -3668,16 +3686,20 @@ manage_specific_tunnel() {
         # Show tunnel status
         local status
         if systemctl is-active --quiet "$service"; then
-            status="✓ Running"
+            status="Running"
         else
-            status="✗ Stopped"
+            status="Stopped"
         fi
         
         clear
         print_server_info_banner_minimal
         print_info "--- Managing Tunnel: $suffix ---"
         print_info "Service: $service"
-        print_info "Status: $status"
+        if systemctl is-active --quiet "$service"; then
+            print_success "Status: $status"
+        else
+            print_error "Status: $status"
+        fi
         
         # Show tunnel info
         if [ -f "$config_file" ]; then
@@ -6202,10 +6224,6 @@ show_system_health_monitor() {
 main_menu() {
     clear
     print_server_info_banner
-    print_info "      EasyBackhaul Installer & Management Menu (v13.0-beta)"
-    print_info "================================================================"
-    print_info "  Core by Musixal  |  Installer by @N4Xon"
-    print_info "----------------------------------------------------------------"
     
     # Show binary status
     if [[ -f "$BIN_PATH" ]]; then
@@ -6227,15 +6245,15 @@ main_menu() {
             
             if [[ "$running_services" -gt 0 ]]; then
                 if [[ -n "$version_output" ]]; then
-                    print_success "✓ Binary Status: $version_output (Services: $running_services running)"
+                    print_success "Binary Status: $version_output (Services: $running_services running)"
                 else
-                    print_success "✓ Binary Status: Found and working (Services: $running_services running)"
+                    print_success "Binary Status: Found and working (Services: $running_services running)"
                 fi
             else
                 if [[ -n "$version_output" ]]; then
-                    print_success "✓ Binary Status: $version_output (No services running)"
+                    print_success "Binary Status: $version_output (No services running)"
                 else
-                    print_success "✓ Binary Status: Found and executable (No services running)"
+                    print_success "Binary Status: Found and executable (No services running)"
                 fi
             fi
         fi

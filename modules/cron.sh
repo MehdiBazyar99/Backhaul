@@ -7,6 +7,8 @@ manage_cron_menu() {
     
     # Help function for cron menu
     cron_menu_help() {
+        clear
+        print_server_info_banner_minimal
         print_info "================= Cron Auto-Restart Help ================="
         echo
         echo "Cron jobs automatically restart your tunnel service at regular intervals."
@@ -26,7 +28,10 @@ manage_cron_menu() {
     }
     
     while true; do
-        print_submenu_header "Cron Auto-Restart Management" "$service"
+        clear
+        print_server_info_banner_minimal
+        print_info "--- Cron Auto-Restart Management ---"
+        print_info "Service: $service"
         
         local current_job
         current_job=$(crontab -l 2>/dev/null | grep "$service" | grep "$CRON_COMMENT_TAG")

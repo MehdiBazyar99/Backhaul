@@ -11,6 +11,8 @@
 manage_tunnels() {
     # Help function for tunnel list
     tunnel_list_help() {
+        clear
+        print_server_info_banner_minimal
         print_info "================= Tunnel Management Help ================="
         echo "This menu lets you manage your Backhaul tunnels."
         echo
@@ -42,11 +44,12 @@ manage_tunnels() {
         for service in "${services[@]}"; do
             local status
             if systemctl is-active --quiet "$service"; then
-                status="✓ Running"
+                status="Running"
+                echo -e " $i. $service (\e[32m✓ $status\e[0m)"
             else
-                status="✗ Stopped"
+                status="Stopped"
+                echo -e " $i. $service (\e[31m✗ $status\e[0m)"
             fi
-            echo " $i. $service ($status)"
             ((i++))
         done
         
@@ -75,6 +78,8 @@ manage_specific_tunnel() {
     
     # Help function for specific tunnel management
     tunnel_management_help() {
+        clear
+        print_server_info_banner_minimal
         print_info "================= Tunnel Management Help ================="
         echo "This menu lets you manage a specific Backhaul tunnel/service."
         echo
@@ -105,16 +110,20 @@ manage_specific_tunnel() {
         # Show tunnel status
         local status
         if systemctl is-active --quiet "$service"; then
-            status="✓ Running"
+            status="Running"
         else
-            status="✗ Stopped"
+            status="Stopped"
         fi
         
         clear
         print_server_info_banner_minimal
         print_info "--- Managing Tunnel: $suffix ---"
         print_info "Service: $service"
-        print_info "Status: $status"
+        if systemctl is-active --quiet "$service"; then
+            print_success "Status: $status"
+        else
+            print_error "Status: $status"
+        fi
         
         # Show tunnel info
         if [ -f "$config_file" ]; then

@@ -134,6 +134,8 @@ manage_ufw() {
 
     # Help function for UFW menu
     ufw_menu_help() {
+        clear
+        print_server_info_banner_minimal
         print_info "================= UFW Firewall Management Help ================="
         echo
         echo "UFW (Uncomplicated Firewall) is a frontend for iptables."
@@ -154,7 +156,9 @@ manage_ufw() {
     }
 
     while true; do
-        print_submenu_header "UFW Firewall Management"
+        clear
+        print_server_info_banner_minimal
+        print_info "--- UFW Firewall Management ---"
         
         # Show UFW status
         local ufw_status
@@ -173,7 +177,11 @@ manage_ufw() {
         echo " 4. Disable UFW"
         echo " 5. Reset UFW Rules"
         echo " 6. Security Audit"
-        print_menu_footer
+        echo
+        print_info "----------------------------------------------------------------"
+        echo " ?. Help"
+        echo " 0. Back"
+        echo
         
         menu_loop 0 6 "?" "ufw_menu_help" "Enter choice [0-6, ? for help]"
         
