@@ -1,7 +1,7 @@
 #!/bin/bash
 # build.sh - Concatenate all modules into EasyBackhaul.sh for distribution
 
-OUTFILE="easybackhaul.sh"
+OUTFILE="easybh.sh"
 MODULES=(
   "modules/globals.sh"           # Global variables and constants
   "modules/helpers.sh"           # Core utility functions, validation, UI helpers
