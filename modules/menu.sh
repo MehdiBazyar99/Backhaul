@@ -31,10 +31,7 @@ installation_wizard() {
     echo "    - Continue without installing binary"
     echo "    - You can install manually later"
     echo
-    echo " ?. Help & Information"
-    echo " 0. Exit"
-    echo
-    print_info "----------------------------------------------------------------"
+    print_menu_footer
     while true; do
         read -p "Please select an option [0-5, ? for help]: " install_choice
         case $install_choice in
@@ -328,11 +325,10 @@ show_system_health_monitor() {
     echo " 3. View detailed logs"
     echo " 4. Optimize all tunnel processes"
     echo " 0. Back to main menu"
-    echo " ?. Help"
     echo
     print_info "----------------------------------------------------------------"
     while true; do
-        read -p "Select action [0-4, ? for help]: " action_choice
+        read -p "Select action [0-4]: " action_choice
         case $action_choice in
             1)
                 show_system_health_monitor
@@ -357,18 +353,11 @@ show_system_health_monitor() {
                             ((i++))
                         done
                         echo " 0. Back"
-                        echo " ?. Help"
                         echo
                         while true; do
-                            read -p "Select log file to view [0-$((i-1)), ? for help]: " log_choice
+                            read -p "Select log file to view [0-$((i-1))]: " log_choice
                             if [[ "$log_choice" == "0" ]]; then
                                 break
-                            elif [[ "$log_choice" == "?" ]]; then
-                                print_info "--- Log Viewer Help ---"
-                                echo "Select a log file number to view its contents."
-                                echo "Use 0 to return to the health monitor."
-                                echo "Press 'q' to exit the log viewer."
-                                press_any_key
                             elif [[ "$log_choice" =~ ^[1-9][0-9]*$ ]] && [[ $log_choice -lt $i ]]; then
                                 local selected_log
                                 selected_log=$(echo "$log_files" | sed -n "${log_choice}p")
@@ -384,7 +373,7 @@ show_system_health_monitor() {
                                 fi
                                 break
                             else
-                                print_warning "❌ Invalid option. Please enter 0-$((i-1)) or ? for help."
+                                print_warning "❌ Invalid option. Please enter 0-$((i-1))."
                                 press_any_key
                             fi
                         done
@@ -408,35 +397,9 @@ show_system_health_monitor() {
             0)
                 return
                 ;;
-            \?)
-                clear
-                print_info "================= System Health Monitor Help ================="
-                echo "This monitor shows the health and performance of your EasyBackhaul system."
-                echo
-                echo "Sections:"
-                echo "- System Resources: CPU, memory, and disk usage"
-                echo "- Tunnel Health: Status of all configured tunnels"
-                echo "- Performance Metrics: Recent operation timings"
-                echo "- System Services: Status of Backhaul services"
-                echo "- Watcher Status: Automatic restart watchers"
-                echo "- Disk Usage: Available disk space"
-                echo "- Log Files: Size of log files"
-                echo
-                echo "Actions:"
-                echo "1. Refresh: Update all status information"
-                echo "2. Clean up: Remove zombie/orphaned processes"
-                echo "3. View logs: Browse detailed log files"
-                echo "4. Optimize: Improve tunnel performance"
-                echo "0. Back: Return to main menu"
-                echo
-                echo "Status Icons:"
-                echo "✓ = Healthy/Running"
-                echo "✗ = Dead/Stopped"
-                echo "⚠ = Warning/Unknown"
-                press_any_key
-                ;;
+
             *)
-                print_warning "❌ Invalid option. Please enter 0-4 or ? for help."
+                print_warning "❌ Invalid option. Please enter 0-4."
                 press_any_key
                 ;;
         esac
@@ -496,9 +459,7 @@ main_menu() {
         echo " 6. System Health & Performance Monitor"
         echo " 7. Clean Up Zombie/Orphaned Processes"
         echo " 8. Uninstall EasyBackhaul (Removes binary and ALL configs)"
-        echo " ?. Help & Documentation"
-        echo " 0. Exit"
-        print_info "----------------------------------------------------------------"
+        print_menu_footer
         read -p "Please select an option [0-8, ? for help]: " choice
         case $choice in
             1) configure_new_tunnel; press_any_key ;;

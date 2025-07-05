@@ -126,7 +126,7 @@ remove_ufw_rules() {
 manage_ufw() {
     # Check if UFW is available
     if ! command -v ufw >/dev/null 2>&1; then
-        print_error "❌ UFW is not installed on this system."
+        print_error "UFW is not installed on this system."
         print_info "To install UFW: sudo apt-get install ufw (Ubuntu/Debian) or sudo yum install ufw (CentOS/RHEL)"
         press_any_key
         return
@@ -167,12 +167,12 @@ manage_ufw() {
         
         echo
         print_info "Select an option:"
-        echo " 1. View all UFW rules: Show all firewall rules"
-        echo " 2. View EasyBackhaul rules: Show only rules created by EasyBackhaul"
-        echo " 3. Enable UFW: Turn on the firewall (requires SSH access)"
-        echo " 4. Disable UFW: Turn off the firewall (security risk)"
-        echo " 5. Reset UFW rules: Remove all rules and reset to default"
-        echo " 6. Security audit: Check for security issues in rules"
+        echo " 1. View All UFW Rules"
+        echo " 2. View EasyBackhaul Rules"
+        echo " 3. Enable UFW"
+        echo " 4. Disable UFW"
+        echo " 5. Reset UFW Rules"
+        echo " 6. Security Audit"
         print_menu_footer
         
         menu_loop 0 6 "?" "ufw_menu_help" "Enter choice [0-6, ? for help]"
@@ -199,27 +199,27 @@ manage_ufw() {
                 if confirm_action "Proceed with enabling UFW?" "n"; then
                     with_spinner "Enabling UFW" ufw --force enable
                     if [ $? -eq 0 ]; then
-                        print_success "✅ UFW enabled successfully."
-                    else
-                        print_error "❌ Failed to enable UFW."
-                    fi
+                                    print_success "UFW enabled successfully."
+        else
+            print_error "Failed to enable UFW."
+        fi
                 fi
                 press_any_key
                 ;;
             4)
-                print_warning "⚠ Disabling UFW removes firewall protection."
+                print_warning "Disabling UFW removes firewall protection."
                 if confirm_action "Are you sure you want to disable UFW?" "n"; then
                     with_spinner "Disabling UFW" ufw disable
                     if [ $? -eq 0 ]; then
-                        print_success "✅ UFW disabled successfully."
-                    else
-                        print_error "❌ Failed to disable UFW."
-                    fi
+                                    print_success "UFW disabled successfully."
+        else
+            print_error "Failed to disable UFW."
+        fi
                 fi
                 press_any_key
                 ;;
             5)
-                print_warning "⚠ This will remove ALL UFW rules and reset to default."
+                print_warning "This will remove ALL UFW rules and reset to default."
                 print_info "This action cannot be undone."
                 echo
                 print_info "Type 'RESET' to confirm: "
@@ -227,12 +227,12 @@ manage_ufw() {
                 if [[ "$fix_choice" == "RESET" ]]; then
                     with_spinner "Resetting UFW rules" ufw --force reset
                     if [ $? -eq 0 ]; then
-                        print_success "✅ UFW rules reset successfully."
+                        print_success "UFW rules reset successfully."
                         # Remove EasyBackhaul metadata file
                         rm -f "$UFW_METADATA_FILE"
                         print_info "EasyBackhaul UFW metadata cleared."
                     else
-                        print_error "❌ Failed to reset UFW rules."
+                        print_error "Failed to reset UFW rules."
                     fi
                 else
                     print_info "Reset cancelled."
@@ -246,21 +246,21 @@ manage_ufw() {
                 
                 # Check if UFW is active
                 if ! ufw status | grep -q "Status: active"; then
-                    print_warning "⚠ UFW is not active - no firewall protection"
+                    print_warning "UFW is not active - no firewall protection"
                 else
-                    print_success "✅ UFW is active"
+                    print_success "UFW is active"
                 fi
                 
                 # Check for SSH rule
                 if ufw status | grep -q "22/tcp"; then
-                    print_success "✅ SSH (port 22) rule found"
+                    print_success "SSH (port 22) rule found"
                 else
-                    print_warning "⚠ No SSH rule found - may block SSH access"
+                    print_warning "No SSH rule found - may block SSH access"
                 fi
                 
                 # Check for overly permissive rules
                 if ufw status | grep -q "ALLOW.*anywhere"; then
-                    print_warning "⚠ Found overly permissive rule (ALLOW anywhere)"
+                    print_warning "Found overly permissive rule (ALLOW anywhere)"
                 fi
                 
                 # Check EasyBackhaul rules

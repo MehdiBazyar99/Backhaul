@@ -510,12 +510,14 @@ install_downloaded_binary() {
         print_info "  🔒 Permissions: $(ls -l "$BIN_PATH" | awk '{print $1}')"
         print_info "  📊 Size: $(du -h "$BIN_PATH" | cut -f1)"
         echo
-        print_menu_footer
+        print_info "Press any key to continue..."
+        read -n 1 -s
     else
         print_warning "Binary installation completed but verification failed."
         print_info "The binary might be incompatible or corrupted."
         print_info "You can still try to use it, but some features might not work correctly."
         echo
-        print_menu_footer
+        print_info "Press any key to continue..."
+        read -n 1 -s
     fi
 } 

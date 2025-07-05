@@ -4,12 +4,12 @@
 # WARNING: Do not use a global CONFIG_FILE variable. Always pass config file paths explicitly to functions.
 
 # --- Helper Functions ---
-# Standardized print functions with consistent color coding
-print_info() { echo -e "\e[34m$1\e[0m"; }
-print_success() { echo -e "\e[32m$1\e[0m"; }
-print_warning() { echo -e "\e[33m$1\e[0m"; }
-print_error() { echo -e "\e[31m$1\e[0m"; }
-print_error_and_exit() { echo -e "\e[31m$1\e[0m"; exit 1; }
+# Standardized print functions with consistent color coding and icons
+print_info() { echo -e "\e[34mℹ $1\e[0m"; }
+print_success() { echo -e "\e[32m✓ $1\e[0m"; }
+print_warning() { echo -e "\e[33m⚠ $1\e[0m"; }
+print_error() { echo -e "\e[31m✗ $1\e[0m"; }
+print_error_and_exit() { echo -e "\e[31m✗ $1\e[0m"; exit 1; }
 press_any_key() { read -n 1 -s -r -p "Press any key to continue..."; echo; }
 
 # --- Enhanced Logging System ---
@@ -546,6 +546,26 @@ menu_loop() {
                 ;;
         esac
     done
+}
+
+# --- Banner Functions ---
+print_server_info_banner() {
+    echo
+    echo "      EasyBackhaul Installer & Management Menu (v13.0-beta)"
+    echo "================================================================="
+    echo "  Core by Musixal  |  Installer by @N4Xon"
+    echo "-----------------------------------------------------------------"
+    if [[ "$SERVER_IP" != "N/A" ]]; then
+        echo "📍 Server: $SERVER_IP | 🌍 $SERVER_COUNTRY | 🏢 $SERVER_ISP"
+    fi
+    echo
+}
+
+print_server_info_banner_minimal() {
+    if [[ "$SERVER_IP" != "N/A" ]]; then
+        echo "📍 $SERVER_IP | 🌍 $SERVER_COUNTRY"
+    fi
+    echo
 }
 
 # Standardized submenu header

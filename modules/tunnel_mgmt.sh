@@ -28,13 +28,13 @@ manage_tunnels() {
         print_submenu_header "Available Backhaul Tunnels"
         
         mapfile -t services < <(systemctl list-unit-files --type=service 'backhaul-*.service' --no-legend | awk '{print $1}' | grep -v 'backhaul-watcher-')
-        
+
         if [[ ${#services[@]} -eq 0 ]]; then
             print_warning "⚠ No Backhaul tunnels found. Use 'Configure a New Tunnel' first."
             press_any_key
             return
         fi
-        
+
         local i=1
         for service in "${services[@]}"; do
             local status
@@ -138,27 +138,27 @@ manage_specific_tunnel() {
             1) 
                 with_spinner "Starting tunnel" systemctl start "$service"
                 if [ $? -eq 0 ]; then
-                    print_success "✅ Tunnel started successfully. You can now connect to this tunnel."
+                    print_success "Tunnel started successfully. You can now connect to this tunnel."
                 else
-                    print_error "❌ Failed to start tunnel. Check logs for details."
+                    print_error "Failed to start tunnel. Check logs for details."
                 fi
                 press_any_key
                 ;;
             2) 
                 with_spinner "Stopping tunnel" systemctl stop "$service"
                 if [ $? -eq 0 ]; then
-                    print_success "✅ Tunnel stopped. Connections will be refused until restarted."
+                    print_success "Tunnel stopped. Connections will be refused until restarted."
                 else
-                    print_error "❌ Failed to stop tunnel. Check logs for details."
+                    print_error "Failed to stop tunnel. Check logs for details."
                 fi
                 press_any_key
                 ;;
             3) 
                 with_spinner "Restarting tunnel" systemctl restart "$service"
                 if [ $? -eq 0 ]; then
-                    print_success "✅ Tunnel restarted. Check logs if you encounter issues."
+                    print_success "Tunnel restarted. Check logs if you encounter issues."
                 else
-                    print_error "❌ Failed to restart tunnel. Check logs for details."
+                    print_error "Failed to restart tunnel. Check logs for details."
                 fi
                 press_any_key
                 ;;
@@ -178,9 +178,9 @@ manage_specific_tunnel() {
                         0) break ;;
                         1|2) 
                             if [[ "$log_mode" == "1" ]]; then
-                                print_warning "⚠ You are about to enter live log view. Press Ctrl+C to exit log view and return to the menu."
-                            else
-                                print_warning "⚠ You are about to enter interactive log view. Use arrow keys to navigate, / to search, F to follow live, q to quit. Press Ctrl+C to exit log view and return to the menu."
+                                                            print_warning "You are about to enter live log view. Press Ctrl+C to exit log view and return to the menu."
+                        else
+                            print_warning "You are about to enter interactive log view. Use arrow keys to navigate, / to search, F to follow live, q to quit. Press Ctrl+C to exit log view and return to the menu."
                             fi
                             press_any_key
                             
@@ -193,7 +193,7 @@ manage_specific_tunnel() {
                             break
                             ;;
                         *) 
-                            print_warning "❌ Invalid option. Please enter 1, 2, or 0."
+                            print_warning "Invalid option. Please enter 1, 2, or 0."
                             press_any_key
                             ;;
                     esac
@@ -207,8 +207,8 @@ manage_specific_tunnel() {
                 less "$config_file"
                 ;;
             6)
-                if [ ! -f "$config_file" ]; then 
-                    print_error "❌ Config file not found for this tunnel. Please check your configuration and try again."
+                                if [ ! -f "$config_file" ]; then
+                    print_error "Config file not found for this tunnel. Please check your configuration and try again."
                     press_any_key
                     continue
                 fi
@@ -218,10 +218,10 @@ manage_specific_tunnel() {
                 if confirm_action "Restart tunnel to apply changes?" "y"; then
                     with_spinner "Restarting tunnel" systemctl restart "$service"
                     if [ $? -eq 0 ]; then
-                        print_success "✅ Tunnel restarted with new configuration."
-                    else
-                        print_error "❌ Failed to restart tunnel. Check logs for details."
-                    fi
+                                            print_success "Tunnel restarted with new configuration."
+                else
+                    print_error "Failed to restart tunnel. Check logs for details."
+                fi
                 fi
                 press_any_key
                 ;;
@@ -242,13 +242,13 @@ manage_specific_tunnel() {
                     case $new_level in
                         debug|info|warn|error)
                             update_config_value "$config_file" "log_level" "$new_level"
-                            print_success "✅ Log level updated to $new_level."
+                            print_success "Log level updated to $new_level."
                             if confirm_action "Restart tunnel to apply new log level?" "y"; then
                                 with_spinner "Restarting tunnel" systemctl restart "$service"
                                 if [ $? -eq 0 ]; then
-                                    print_success "✅ Tunnel restarted with new log level."
+                                    print_success "Tunnel restarted with new log level."
                                 else
-                                    print_error "❌ Failed to restart tunnel. Check logs for details."
+                                    print_error "Failed to restart tunnel. Check logs for details."
                                 fi
                             fi
                             break
@@ -258,11 +258,11 @@ manage_specific_tunnel() {
                             break
                             ;;
                         *)
-                            print_warning "❌ Invalid selection."
+            print_warning "Invalid selection."
                             ;;
                     esac
                 done
-                press_any_key
+            press_any_key
                 ;;
             8) test_connection "$config_file"; press_any_key;;
             9) manage_watcher_submenu "$service" "$suffix" "$config_file" ;;
@@ -281,7 +281,7 @@ manage_specific_tunnel() {
             13)
                 print_info "--- Delete Tunnel: $suffix ---"
                 echo
-                print_warning "⚠ WARNING: This will permanently delete the tunnel and all its data!"
+                print_warning "WARNING: This will permanently delete the tunnel and all its data!"
                 echo
                 echo "The following will be deleted:"
                 echo "  - Service: $service"
@@ -324,7 +324,7 @@ manage_specific_tunnel() {
                     # Reload systemd
                     systemctl daemon-reload
                     
-                    print_success "✅ Tunnel $suffix has been completely deleted. You may now create a new tunnel or exit."
+                    print_success "Tunnel $suffix has been completely deleted. You may now create a new tunnel or exit."
                     press_any_key
                     return
                 else
@@ -360,7 +360,7 @@ manage_specific_tunnel() {
                 ;;
             0) return ;;
             *)
-                print_warning "❌ Invalid option. Please enter 0-13 or ? for help."
+                print_warning "Invalid option. Please enter 0-13 or ? for help."
                 press_any_key
                 ;;
         esac

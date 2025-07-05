@@ -98,32 +98,24 @@ configure_tunnel() {
     print_info "--- Tunnel Type ---"
     echo " 1. Server (accepts connections from clients)"
     echo " 2. Client (connects to a server)"
-    echo " ?. Help"
     echo " 0. Cancel"
     echo
     while true; do
-        read -p "Select tunnel type [1-2, ? for help, 0 to cancel]: " setup_type
+        read -p "Select tunnel type [1-2, 0 to cancel]: " setup_type
         case $setup_type in
             1) setup_type="server"; break ;;
             2) setup_type="client"; break ;;
-            \?)
-                print_info "--- Tunnel Type Help ---"
-                echo "Server: Accepts connections from clients. Use this if you want to expose services."
-                echo "Client: Connects to a server. Use this if you want to access remote services."
-                echo "Choose based on your network architecture and needs."
-                press_any_key
-                ;;
             0)
                 print_info "Configuration cancelled."
                 return
                 ;;
             *)
-                print_warning "❌ Invalid option. Please enter 1-2, ? for help, or 0 to cancel."
+                print_warning "❌ Invalid option. Please enter 1-2 or 0 to cancel."
                 press_any_key
                 ;;
         esac
     done
-    
+
     # Get transport protocol
     echo
     print_info "--- Transport Protocol ---"
@@ -131,36 +123,26 @@ configure_tunnel() {
     echo " 2. UDP (faster, less reliable)"
     echo " 3. WebSocket (for web environments)"
     echo " 4. WebSocket Secure (WSS, encrypted)"
-    echo " ?. Help"
     echo " 0. Cancel"
     echo
     while true; do
-        read -p "Select transport protocol [1-4, ? for help, 0 to cancel]: " transport_choice
+        read -p "Select transport protocol [1-4, 0 to cancel]: " transport_choice
         case $transport_choice in
             1) transport="tcp"; break ;;
             2) transport="udp"; break ;;
             3) transport="ws"; break ;;
             4) transport="wss"; break ;;
-            \?)
-                print_info "--- Transport Protocol Help ---"
-                echo "TCP: Most reliable, works through most firewalls"
-                echo "UDP: Faster but may be blocked by some firewalls"
-                echo "WebSocket: Good for web environments and proxies"
-                echo "WSS: Encrypted WebSocket, most secure for web environments"
-                echo "Choose TCP unless you have specific requirements."
-                press_any_key
-                ;;
             0)
                 print_info "Configuration cancelled."
                 return
                 ;;
             *)
-                print_warning "❌ Invalid option. Please enter 1-4, ? for help, or 0 to cancel."
+                print_warning "❌ Invalid option. Please enter 1-4 or 0 to cancel."
                 press_any_key
                 ;;
         esac
     done
-    
+
     # Get server details
     if [[ "$setup_type" == "client" ]]; then
         echo
@@ -209,7 +191,7 @@ configure_tunnel() {
             fi
         done
     fi
-    
+
     # Get local port
     echo
     print_info "--- Local Port Configuration ---"
@@ -231,11 +213,11 @@ configure_tunnel() {
             press_any_key
         fi
     done
-    
+
     # Get authentication token
     echo
     print_info "--- Authentication ---"
-    while true; do
+        while true; do
         read -p "Enter authentication token (optional, press Enter to skip): " auth_token
         if [[ "$auth_token" == "0" ]]; then
             print_info "Configuration cancelled."
