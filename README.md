@@ -15,7 +15,7 @@ This script, developed by **[@N4Xon (NaxonM)](https://github.com/NaxonM/EasyBack
 You can install and run EasyBackhaul with a single command. The script requires `root` or `sudo` privileges to run.
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/NaxonM/EasyBackhaul/stable/EasyBackhaul.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/NaxonM/EasyBackhaul/stable/easybackhaul.sh)
 ````
 
 The script will first check for the Backhaul binary. If it's not found, it will automatically download the latest version from the official GitHub repository.
