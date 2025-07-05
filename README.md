@@ -13,6 +13,27 @@ Developed by [@N4Xon (NaxonM)](https://github.com/NaxonM/EasyBackhaul), EasyBack
 
 ---
 
+## 🛠️ Installation & Quick Start
+
+**Quick Install (Recommended):**  
+Run the script directly from GitHub with a single command:
+
+```bash
+sudo bash <(curl -Ls https://raw.githubusercontent.com/NaxonM/EasyBackhaul/beta/easybackhaul.sh)
+```
+
+**From Source:**  
+Clone the repo and build the script from source for the latest features.
+
+```bash
+git clone https://github.com/NaxonM/EasyBackhaul.git
+cd EasyBackhaul
+./build.sh
+sudo bash easybackhaul.sh
+```
+
+---
+
 ## 🚀 Features
 
 ### **Core Management**
@@ -55,27 +76,6 @@ Developed by [@N4Xon (NaxonM)](https://github.com/NaxonM/EasyBackhaul), EasyBack
 - **Health logging**: Dedicated health and performance log files
 - **Audit logging**: Comprehensive audit trail of all operations
 - **Log file viewer**: Interactive log file browsing and searching
-
----
-
-## 🛠️ Installation & Quick Start
-
-**Quick Install (Recommended):**  
-Run the script directly from GitHub with a single command:
-
-```bash
-sudo bash <(curl -Ls https://raw.githubusercontent.com/NaxonM/EasyBackhaul/beta/easybackhaul.sh)
-```
-
-**From Source:**  
-Clone the repo and build the script from source for the latest features.
-
-```bash
-git clone https://github.com/NaxonM/EasyBackhaul.git
-cd EasyBackhaul
-./build.sh
-sudo bash easybackhaul.sh
-```
 
 ---
 
