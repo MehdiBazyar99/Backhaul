@@ -29,7 +29,7 @@ Clone the repo and build the script from source for the latest features.
 git clone https://github.com/NaxonM/EasyBackhaul.git
 cd EasyBackhaul
 ./build.sh
-sudo bash easybackhaul.sh
+sudo bash easybh.sh
 ```
 
 ---
@@ -243,8 +243,8 @@ After installation, you'll see:
 
 ### **Modular Architecture**
 - All logic is modularized in `modules/`
-- Use `./build.sh` to generate the distributable `easybackhaul.sh`
-- **Do not edit `easybackhaul.sh` directly**—edit modules and rebuild
+- Use `./build.sh` to generate the distributable `easybh.sh`
+- **Do not edit `easybh.sh` directly**—edit modules and rebuild
 
 ### **Module Structure**
 ```
@@ -273,7 +273,7 @@ cd EasyBackhaul
 ./build.sh
 
 # The script is now ready to use
-sudo bash easybackhaul.sh
+sudo bash easybh.sh
 ```
 
 ---

@@ -1379,18 +1379,85 @@ SERVER_COUNTRY=""
 SERVER_ISP=""
 
 get_server_info() {
-    local response
-    response=$(curl -s --connect-timeout 5 http://ip-api.com/json)
-    if [ $? -ne 0 ] || [ -z "$response" ]; then
-        print_warning "Could not fetch server info from ip-api.com. Continuing without it."
-        SERVER_IP="N/A"
-        SERVER_COUNTRY="N/A"
-        SERVER_ISP="N/A"
-        return
+    # Set default values first
+    SERVER_IP="N/A"
+    SERVER_COUNTRY="N/A"
+    SERVER_ISP="N/A"
+    
+    # Try multiple IP info services with shorter timeouts
+    local response=""
+    local services=(
+        "http://ip-api.com/json"
+        "https://ipapi.co/json"
+        "https://ipinfo.io/json"
+    )
+    
+    for service in "${services[@]}"; do
+        print_info "Fetching server info from $service..."
+        
+        # Use timeout command to ensure curl doesn't hang indefinitely
+        if command -v timeout >/dev/null 2>&1; then
+            response=$(timeout 10 curl -s --connect-timeout 3 --max-time 8 "$service" 2>/dev/null)
+        else
+            # Fallback without timeout command
+            response=$(curl -s --connect-timeout 3 --max-time 8 "$service" 2>/dev/null)
+        fi
+        
+        if [ $? -eq 0 ] && [ -n "$response" ]; then
+            # Try to parse the response
+            local ip=""
+            local country=""
+            local isp=""
+            
+            # Handle different JSON formats from different services
+            if echo "$response" | jq -e . >/dev/null 2>&1; then
+                # ip-api.com format
+                if echo "$response" | jq -e '.query' >/dev/null 2>&1; then
+                    ip=$(echo "$response" | jq -r '.query // "N/A"')
+                    country=$(echo "$response" | jq -r '.country // "N/A"')
+                    isp=$(echo "$response" | jq -r '.isp // "N/A"')
+                # ipapi.co format
+                elif echo "$response" | jq -e '.ip' >/dev/null 2>&1; then
+                    ip=$(echo "$response" | jq -r '.ip // "N/A"')
+                    country=$(echo "$response" | jq -r '.country_name // "N/A"')
+                    isp=$(echo "$response" | jq -r '.org // "N/A"')
+                # ipinfo.io format
+                elif echo "$response" | jq -e '.ip' >/dev/null 2>&1; then
+                    ip=$(echo "$response" | jq -r '.ip // "N/A"')
+                    country=$(echo "$response" | jq -r '.country // "N/A"')
+                    isp=$(echo "$response" | jq -r '.org // "N/A"')
+                fi
+                
+                if [ "$ip" != "N/A" ] && [ "$ip" != "null" ]; then
+                    SERVER_IP="$ip"
+                    SERVER_COUNTRY="$country"
+                    SERVER_ISP="$isp"
+                    print_success "✓ Server info fetched successfully"
+                    return 0
+                fi
+            fi
+        fi
+        
+        print_warning "Failed to fetch from $service, trying next..."
+    done
+    
+    # If all services fail, try to get IP from local commands
+    print_warning "All external IP services failed. Trying local IP detection..."
+    
+    # Try different methods to get local IP
+    local local_ip=""
+    if command -v curl >/dev/null 2>&1; then
+        local_ip=$(curl -s --connect-timeout 3 --max-time 5 https://icanhazip.com 2>/dev/null | tr -d '\n\r')
+    elif command -v wget >/dev/null 2>&1; then
+        local_ip=$(wget -qO- --timeout=5 https://icanhazip.com 2>/dev/null | tr -d '\n\r')
     fi
-    SERVER_IP=$(echo "$response" | jq -r '.query // "N/A"')
-    SERVER_COUNTRY=$(echo "$response" | jq -r '.country // "N/A"')
-    SERVER_ISP=$(echo "$response" | jq -r '.isp // "N/A"')
+    
+    if [ -n "$local_ip" ] && [[ "$local_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        SERVER_IP="$local_ip"
+        print_success "✓ Local IP detected: $SERVER_IP"
+    else
+        print_warning "Could not fetch server info. Continuing without it."
+    fi
 }
 
 # Note: Banner functions are now defined in helpers.sh to avoid duplication
