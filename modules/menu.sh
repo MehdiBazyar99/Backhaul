@@ -38,8 +38,6 @@ installation_wizard() {
             1)
                 print_info "Starting automatic GitHub download..."
                 if download_backhaul; then
-                    print_success "✓ Installation completed successfully!"
-                    press_any_key
                     return 0
                 else
                     print_warning "⚠ Installation failed or was cancelled."
@@ -57,8 +55,6 @@ installation_wizard() {
                     *) print_error "✗ Unsupported architecture: $arch"; press_any_key; return 1 ;;
                 esac
                 if download_from_local_file "$os" "$arch"; then
-                    print_success "✓ Local installation completed successfully!"
-                    press_any_key
                     return 0
                 else
                     print_warning "⚠ Local installation failed or was cancelled."
@@ -76,8 +72,6 @@ installation_wizard() {
                     *) print_error "✗ Unsupported architecture: $arch"; press_any_key; return 1 ;;
                 esac
                 if download_from_alternative_source "$os" "$arch"; then
-                    print_success "✓ Alternative installation completed successfully!"
-                    press_any_key
                     return 0
                 else
                     print_warning "⚠ Alternative installation failed or was cancelled."
@@ -410,7 +404,10 @@ show_system_health_monitor() {
 main_menu() {
     clear
     print_server_info_banner
-    print_menu_header "EasyBackhaul Installer & Management Menu (v13.0-beta)" "Core by Musixal  |  Installer by @N4Xon"
+    print_info "      EasyBackhaul Installer & Management Menu (v13.0-beta)"
+    print_info "================================================================"
+    print_info "  Core by Musixal  |  Installer by @N4Xon"
+    print_info "----------------------------------------------------------------"
     
     # Show binary status
     if [[ -f "$BIN_PATH" ]]; then
@@ -459,7 +456,11 @@ main_menu() {
         echo " 6. System Health & Performance Monitor"
         echo " 7. Clean Up Zombie/Orphaned Processes"
         echo " 8. Uninstall EasyBackhaul (Removes binary and ALL configs)"
-        print_menu_footer
+        echo
+        print_info "----------------------------------------------------------------"
+        echo " ?. Help"
+        echo " 0. Exit"
+        echo
         read -p "Please select an option [0-8, ? for help]: " choice
         case $choice in
             1) configure_new_tunnel; press_any_key ;;

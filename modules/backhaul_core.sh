@@ -60,7 +60,7 @@ get_server_info() {
                     SERVER_IP="$ip"
                     SERVER_COUNTRY="$country"
                     SERVER_ISP="$isp"
-                    print_success "✓ Server info fetched successfully"
+                    print_success "Server info fetched successfully"
                     return 0
                 fi
             fi
@@ -82,7 +82,7 @@ get_server_info() {
     
     if [ -n "$local_ip" ] && [[ "$local_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         SERVER_IP="$local_ip"
-        print_success "✓ Local IP detected: $SERVER_IP"
+        print_success "Local IP detected: $SERVER_IP"
     else
         print_warning "Could not fetch server info. Continuing without it."
     fi
@@ -208,7 +208,7 @@ download_backhaul() {
             ;;
     esac
     
-    print_success "✓ Detected: $OS/$ARCH"
+    print_success "Detected: $OS/$ARCH"
     echo
 
     # Try to fetch latest version from GitHub

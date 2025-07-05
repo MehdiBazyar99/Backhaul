@@ -25,7 +25,10 @@ manage_tunnels() {
     }
 
     while true; do
-        print_submenu_header "Available Backhaul Tunnels"
+        clear
+        print_server_info_banner_minimal
+        print_info "--- Available Backhaul Tunnels ---"
+        echo
         
         mapfile -t services < <(systemctl list-unit-files --type=service 'backhaul-*.service' --no-legend | awk '{print $1}' | grep -v 'backhaul-watcher-')
 
@@ -47,7 +50,11 @@ manage_tunnels() {
             ((i++))
         done
         
-        print_menu_footer
+        echo
+        print_info "----------------------------------------------------------------"
+        echo " ?. Help"
+        echo " 0. Back"
+        echo
         
         menu_loop 0 $((i-1)) "?" "tunnel_list_help" "Select tunnel to manage [0-$((i-1)), ? for help]"
         
@@ -103,16 +110,20 @@ manage_specific_tunnel() {
             status="✗ Stopped"
         fi
         
-        print_submenu_header "Managing Tunnel: $suffix" "$service" "$status"
+        clear
+        print_server_info_banner_minimal
+        print_info "--- Managing Tunnel: $suffix ---"
+        print_info "Service: $service"
+        print_info "Status: $status"
         
         # Show tunnel info
         if [ -f "$config_file" ]; then
             local cert_path=$(grep '^tls_cert' "$config_file" | cut -d'"' -f2)
             local key_path=$(grep '^tls_key' "$config_file" | cut -d'"' -f2)
             if [[ -n "$cert_path" && -n "$key_path" ]]; then
-                print_info "TLS: ✓ Configured"
+                print_success "TLS: Configured"
             else
-                print_info "TLS: ⚠ Not configured"
+                print_warning "TLS: Not configured"
             fi
         fi
         
@@ -131,7 +142,11 @@ manage_specific_tunnel() {
         echo "11. Show Tunnel Info"
         echo "12. Health Check & Performance"
         echo "13. Delete Tunnel"
-        print_menu_footer
+        echo
+        print_info "----------------------------------------------------------------"
+        echo " ?. Help"
+        echo " 0. Back"
+        echo
         
         menu_loop 0 13 "?" "tunnel_management_help" "Enter choice [0-13, ? for help]"
         case $choice in

@@ -1481,7 +1481,7 @@ get_server_info() {
                     SERVER_IP="$ip"
                     SERVER_COUNTRY="$country"
                     SERVER_ISP="$isp"
-                    print_success "✓ Server info fetched successfully"
+                    print_success "Server info fetched successfully"
                     return 0
                 fi
             fi
@@ -1503,7 +1503,7 @@ get_server_info() {
     
     if [ -n "$local_ip" ] && [[ "$local_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         SERVER_IP="$local_ip"
-        print_success "✓ Local IP detected: $SERVER_IP"
+        print_success "Local IP detected: $SERVER_IP"
     else
         print_warning "Could not fetch server info. Continuing without it."
     fi
@@ -1629,7 +1629,7 @@ download_backhaul() {
             ;;
     esac
     
-    print_success "✓ Detected: $OS/$ARCH"
+    print_success "Detected: $OS/$ARCH"
     echo
 
     # Try to fetch latest version from GitHub
@@ -3588,7 +3588,10 @@ manage_tunnels() {
     }
 
     while true; do
-        print_submenu_header "Available Backhaul Tunnels"
+        clear
+        print_server_info_banner_minimal
+        print_info "--- Available Backhaul Tunnels ---"
+        echo
         
         mapfile -t services < <(systemctl list-unit-files --type=service 'backhaul-*.service' --no-legend | awk '{print $1}' | grep -v 'backhaul-watcher-')
 
@@ -3610,7 +3613,11 @@ manage_tunnels() {
             ((i++))
         done
         
-        print_menu_footer
+        echo
+        print_info "----------------------------------------------------------------"
+        echo " ?. Help"
+        echo " 0. Back"
+        echo
         
         menu_loop 0 $((i-1)) "?" "tunnel_list_help" "Select tunnel to manage [0-$((i-1)), ? for help]"
         
@@ -3666,16 +3673,20 @@ manage_specific_tunnel() {
             status="✗ Stopped"
         fi
         
-        print_submenu_header "Managing Tunnel: $suffix" "$service" "$status"
+        clear
+        print_server_info_banner_minimal
+        print_info "--- Managing Tunnel: $suffix ---"
+        print_info "Service: $service"
+        print_info "Status: $status"
         
         # Show tunnel info
         if [ -f "$config_file" ]; then
             local cert_path=$(grep '^tls_cert' "$config_file" | cut -d'"' -f2)
             local key_path=$(grep '^tls_key' "$config_file" | cut -d'"' -f2)
             if [[ -n "$cert_path" && -n "$key_path" ]]; then
-                print_info "TLS: ✓ Configured"
+                print_success "TLS: Configured"
             else
-                print_info "TLS: ⚠ Not configured"
+                print_warning "TLS: Not configured"
             fi
         fi
         
@@ -3694,7 +3705,11 @@ manage_specific_tunnel() {
         echo "11. Show Tunnel Info"
         echo "12. Health Check & Performance"
         echo "13. Delete Tunnel"
-        print_menu_footer
+        echo
+        print_info "----------------------------------------------------------------"
+        echo " ?. Help"
+        echo " 0. Back"
+        echo
         
         menu_loop 0 13 "?" "tunnel_management_help" "Enter choice [0-13, ? for help]"
         case $choice in
@@ -5821,8 +5836,6 @@ installation_wizard() {
             1)
                 print_info "Starting automatic GitHub download..."
                 if download_backhaul; then
-                    print_success "✓ Installation completed successfully!"
-                    press_any_key
                     return 0
                 else
                     print_warning "⚠ Installation failed or was cancelled."
@@ -5840,8 +5853,6 @@ installation_wizard() {
                     *) print_error "✗ Unsupported architecture: $arch"; press_any_key; return 1 ;;
                 esac
                 if download_from_local_file "$os" "$arch"; then
-                    print_success "✓ Local installation completed successfully!"
-                    press_any_key
                     return 0
                 else
                     print_warning "⚠ Local installation failed or was cancelled."
@@ -5859,8 +5870,6 @@ installation_wizard() {
                     *) print_error "✗ Unsupported architecture: $arch"; press_any_key; return 1 ;;
                 esac
                 if download_from_alternative_source "$os" "$arch"; then
-                    print_success "✓ Alternative installation completed successfully!"
-                    press_any_key
                     return 0
                 else
                     print_warning "⚠ Alternative installation failed or was cancelled."
@@ -6193,7 +6202,10 @@ show_system_health_monitor() {
 main_menu() {
     clear
     print_server_info_banner
-    print_menu_header "EasyBackhaul Installer & Management Menu (v13.0-beta)" "Core by Musixal  |  Installer by @N4Xon"
+    print_info "      EasyBackhaul Installer & Management Menu (v13.0-beta)"
+    print_info "================================================================"
+    print_info "  Core by Musixal  |  Installer by @N4Xon"
+    print_info "----------------------------------------------------------------"
     
     # Show binary status
     if [[ -f "$BIN_PATH" ]]; then
@@ -6242,7 +6254,11 @@ main_menu() {
         echo " 6. System Health & Performance Monitor"
         echo " 7. Clean Up Zombie/Orphaned Processes"
         echo " 8. Uninstall EasyBackhaul (Removes binary and ALL configs)"
-        print_menu_footer
+        echo
+        print_info "----------------------------------------------------------------"
+        echo " ?. Help"
+        echo " 0. Exit"
+        echo
         read -p "Please select an option [0-8, ? for help]: " choice
         case $choice in
             1) configure_new_tunnel; press_any_key ;;
