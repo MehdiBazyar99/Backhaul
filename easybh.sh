@@ -2570,9 +2570,7 @@ download_backhaul() {
     clear
     print_primary_menu_header "Backhaul Binary Installation"
     
-    # Show server info banner
-    get_server_info
-    print_info "📍 Server: $SERVER_IP | 🌍 $SERVER_COUNTRY | 🏢 $SERVER_ISP"
+    # Server info is already shown in the banner, no need to fetch and print again
     echo
     
     print_info "--> Identifying system architecture..."
@@ -4032,7 +4030,32 @@ remove_ufw_rules() {
     fi
 }
 
+# UFW Firewall Management
 ufw_menu() {
+    # Help function for UFW menu
+    ufw_menu_help() {
+        clear
+        print_server_info_banner_minimal
+        print_info "================= UFW Firewall Management Help ================="
+        echo "This menu helps you manage the UFW (Uncomplicated Firewall) on your system."
+        echo
+        echo "Available options:"
+        echo " 1. Enable UFW Firewall: Activate UFW with default rules"
+        echo " 2. Disable UFW Firewall: Deactivate UFW (removes protection)"
+        echo " 3. Reset UFW Rules: Remove all rules and reset to default"
+        echo " 4. View UFW Status: Show current UFW status and rules"
+        echo " 5. Fix UFW Rules: Remove orphaned Backhaul-specific rules"
+        echo " 0. Back to Main Menu: Return to the main menu"
+        echo
+        print_info "Important Notes:"
+        echo "- Enabling UFW may block SSH access if not configured properly"
+        echo "- Always ensure SSH access is allowed before enabling UFW"
+        echo "- Backhaul tunnels will automatically add required UFW rules"
+        echo "- Use 'Fix UFW Rules' to clean up rules for deleted tunnels"
+        echo "================================================================"
+        press_any_key
+    }
+
     clear
     print_server_info_banner
     print_primary_menu_header "UFW Firewall Management"
@@ -6324,8 +6347,8 @@ show_installation_help() {
 # --- System Health & Performance Monitor ---
 show_system_health_monitor() {
     clear
-    print_server_info_banner_minimal
-    print_info "=== System Health & Performance Monitor ==="
+    print_server_info_banner
+    print_secondary_menu_header "System Health & Performance Monitor"
     echo
     
     # Initialize logging if not already done
@@ -6495,7 +6518,7 @@ show_system_health_monitor() {
     echo " 4. Optimize all tunnel processes"
     echo " 0. Back to main menu"
     echo
-    print_info "----------------------------------------------------------------"
+    print_menu_footer
     while true; do
         read -p "Select action [0-4]: " action_choice
         case $action_choice in
@@ -6511,7 +6534,8 @@ show_system_health_monitor() {
             3)
                 if [[ -d "$LOG_DIR" ]]; then
                     clear
-                    print_info "=== Log Files ==="
+                    print_server_info_banner_minimal
+                    print_secondary_menu_header "Log Files"
                     echo
                     local log_files
                     log_files=$(find "$LOG_DIR" -name "*.log" -type f 2>/dev/null)
@@ -6532,7 +6556,8 @@ show_system_health_monitor() {
                                 selected_log=$(echo "$log_files" | sed -n "${log_choice}p")
                                 if [[ -f "$selected_log" ]]; then
                                     clear
-                                    print_info "=== $(basename "$selected_log") ==="
+                                    print_server_info_banner_minimal
+                                    print_secondary_menu_header "$(basename "$selected_log")"
                                     echo
                                     if command -v less >/dev/null 2>&1; then
                                         less "$selected_log"
@@ -6633,14 +6658,16 @@ main_menu() {
         echo "This menu provides access to all management functions."
         echo
         echo "Available options:"
-        echo "  • Configure New Tunnel: Create and configure a new Backhaul tunnel"
-        echo "  • Manage Existing Tunnels: Start, stop, and manage existing tunnels"
-        echo "  • Update/Re-install Binary: Download and install the latest Backhaul binary"
-        echo "  • Generate TLS Certificate: Create self-signed certificates for secure connections"
-        echo "  • Select Binary Directory: Change where the Backhaul binary is located"
-        echo "  • System Health Monitor: Monitor system resources and tunnel performance"
-        echo "  • Clean Up Processes: Remove zombie and orphaned processes"
-        echo "  • Uninstall: Completely remove EasyBackhaul and all configurations"
+        echo " 1. Configure New Tunnel: Create and configure a new Backhaul tunnel"
+        echo " 2. Manage Existing Tunnels: Start, stop, and manage existing tunnels"
+        echo " 3. Update/Re-install Binary: Download and install the latest Backhaul binary"
+        echo " 4. Generate TLS Certificate: Create self-signed certificates for secure connections"
+        echo " 5. Select Binary Directory: Change where the Backhaul binary is located"
+        echo " 6. System Health Monitor: Monitor system resources and tunnel performance"
+        echo " 7. Clean Up Processes: Remove zombie and orphaned processes"
+        echo " 8. Uninstall: Completely remove EasyBackhaul and all configurations"
+        echo " 0. Exit: Quit the application"
+        echo " ?. Help: Show this help screen"
         echo
         print_info "Note: The binary status shows if Backhaul is installed and working."
         echo "================================================================"
@@ -6650,10 +6677,10 @@ main_menu() {
     menu_loop 0 8 "?" "main_menu_help" "Select an option [0-8, ? for help]"
     
     case $choice in
-        1) configure_new_tunnel; press_any_key; main_menu ;;
+        1) configure_tunnel; main_menu ;;
         2) manage_tunnels; main_menu ;;
-        3) download_backhaul; press_any_key; main_menu ;;
-        4) generate_self_signed_cert; press_any_key; main_menu ;;
+        3) download_backhaul; main_menu ;;
+        4) generate_self_signed_cert; main_menu ;;
         5)
            read -e -p "Enter the full path for the Backhaul binary (e.g., /usr/local/bin/backhaul): " new_bin_path
            if [[ -n "$new_bin_path" ]]; then
@@ -6666,11 +6693,11 @@ main_menu() {
            main_menu
            ;;
         6)
-           show_system_health_monitor; press_any_key; main_menu ;;
+           show_system_health_monitor; main_menu ;;
         7)
            clear
-           print_server_info_banner_minimal
-           print_info "--- Clean Up Zombie/Orphaned Processes ---"
+           print_server_info_banner
+           print_secondary_menu_header "Clean Up Zombie/Orphaned Processes"
            echo
            print_info "This will clean up any zombie processes and orphaned watcher processes."
            echo
@@ -6680,10 +6707,10 @@ main_menu() {
            ;;
         8)
            if confirm_action "This will REMOVE the binary and ALL configs/services. This is irreversible. Are you sure?" "n"; then
-        confirm="y"
-    else
-        confirm="n"
-    fi
+               confirm="y"
+           else
+               confirm="n"
+           fi
            if [[ "${confirm,,}" == "y" ]]; then
                 echo
                 print_warning "Summary of what will be deleted:"
@@ -6747,10 +6774,10 @@ main_menu() {
                 local CERT_DIR="/etc/backhaul/certs"
                 if [ -d "$CERT_DIR" ] && compgen -G "$CERT_DIR/*.crt" > /dev/null; then
                     if confirm_action "Do you also want to delete all TLS certificates in $CERT_DIR?" "n"; then
-        delcerts="y"
-    else
-        delcerts="n"
-    fi
+                        delcerts="y"
+                    else
+                        delcerts="n"
+                    fi
                     if [[ "${delcerts,,}" == "y" ]]; then
                         rm -rf "$CERT_DIR"
                         print_success "All certificates in $CERT_DIR have been deleted."
