@@ -224,7 +224,7 @@ check_tunnel_health() {
 # Monitor all tunnels health with resource limits
 monitor_all_tunnels() {
     local tunnels
-    tunnels=$(find "$CONFIG_DIR" -name "*.conf" -exec basename {} .conf \; 2>/dev/null)
+    tunnels=$(find "$CONFIG_DIR" -name "config-*.toml" -exec basename {} .toml \; 2>/dev/null | sed 's/^config-//')
     local max_concurrent="${MAX_CONCURRENT_OPERATIONS:-3}"
     local running_jobs=0
     
@@ -469,14 +469,14 @@ attempt_error_recovery() {
             if [[ -n "$tunnel_name" ]]; then
                 # Try to clean up any stale processes
                 cleanup_watcher_files "$tunnel_name"
-                
+                    
                 # Wait a moment before retry
-                sleep 2
-                
+                    sleep 2
+                    
                 # Try to start the service again
                 if systemctl start "backhaul-$tunnel_name" 2>/dev/null; then
                     log_success "Service recovery successful for $tunnel_name"
-                    return 0
+                        return 0
                 fi
             fi
             ;;
@@ -484,8 +484,8 @@ attempt_error_recovery() {
             # Try alternative download sources
             log_info "Trying alternative download sources..."
             if check_basic_connectivity; then
-                return 0
-            fi
+                    return 0
+                fi
             ;;
         "config_update")
             # Try to restore from backup
@@ -497,8 +497,8 @@ attempt_error_recovery() {
                 if [[ -f "$backup_file" ]]; then
                     log_info "Restoring configuration from backup: $backup_file"
                     cp "$backup_file" "$config_file"
-                    return 0
-                fi
+                return 0
+            fi
             fi
             ;;
         *)
@@ -674,10 +674,10 @@ print_menu_footer() {
     local show_exit="${3:-false}"
     
     if [[ "$show_help" == "true" ]]; then
-        echo " ?. Help"
+    echo " ?. Help"
     fi
     if [[ "$show_back" == "true" ]]; then
-        echo " 0. Back"
+    echo " 0. Back"
     fi
     if [[ "$show_exit" == "true" ]]; then
         echo " x. Exit"
@@ -713,7 +713,7 @@ update_config_value() {
     # Add new line based on data type
     case "$data_type" in
         "numeric"|"number")
-            echo "${key} = ${value}" >> "$config_file"
+    echo "${key} = ${value}" >> "$config_file"
             ;;
         "string"|*)
             echo "${key} = \"${value}\"" >> "$config_file"
@@ -1972,7 +1972,7 @@ print_tunnel_status() {
     else
         print_error "Status: Stopped"
     fi
-}
+} 
 
 # --- File Locking for Race Condition Prevention ---
 acquire_file_lock() {
@@ -2964,6 +2964,8 @@ configure_tunnel() {
     local server_port=""
     local local_port=""
     local auth_token=""
+    local tls_cert_path=""
+    local tls_key_path=""
     
     clear
     print_server_info_banner_minimal
@@ -2973,9 +2975,22 @@ configure_tunnel() {
     print_info "You can cancel at any time by entering '0' or press '?' for help."
     echo
     
-    # Get tunnel name
+    # Get tunnel name with intelligent generation
+    echo
+    print_info "--- Tunnel Name ---"
+    print_info "Enter a descriptive name for your tunnel, or press Enter for auto-generation."
+    echo
+    
+    # Generate default tunnel name based on context
+    local default_name=""
+    if [[ "$setup_type" == "server" ]]; then
+        default_name="server-$(date +%Y%m%d)-$(tr -dc 'a-z0-9' < /dev/urandom | head -c 4)"
+    else
+        default_name="client-$(date +%Y%m%d)-$(tr -dc 'a-z0-9' < /dev/urandom | head -c 4)"
+    fi
+    
     while true; do
-        read -p "Enter tunnel name (e.g., my-vpn, web-server): " tunnel_name
+        read -p "Enter tunnel name (default: $default_name): " tunnel_name
         if [[ "$tunnel_name" == "0" ]]; then
             print_info "Configuration cancelled."
             return
@@ -2985,18 +3000,46 @@ configure_tunnel() {
             echo "Use descriptive names like 'my-vpn' or 'web-server'."
             echo "Avoid spaces and special characters."
             echo "This name will be used for the service and config files."
+            echo "Press Enter to use auto-generated name: $default_name"
             press_any_key
+        elif [[ -z "$tunnel_name" ]]; then
+            # Use default name
+            tunnel_name="$default_name"
+            print_success "Using auto-generated name: $tunnel_name"
+            break
         elif [[ -n "$tunnel_name" ]]; then
-            # Validate tunnel name
+            # Validate and improve user-provided name
             if [[ "$tunnel_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+                # Add improvements to user-provided name
+                local improved_name="$tunnel_name"
+                
+                # Add transport suffix if not present
+                if [[ ! "$improved_name" =~ -${transport}$ ]]; then
+                    improved_name="${improved_name}-${transport}"
+                fi
+                
+                # Add timestamp suffix for uniqueness
+                improved_name="${improved_name}-$(date +%m%d)"
+                
+                # Check if name already exists
+                local counter=1
+                local final_name="$improved_name"
+                while [[ -f "$CONFIG_DIR/config-${final_name}.toml" ]]; do
+                    final_name="${improved_name}-${counter}"
+                    ((counter++))
+                done
+                
+                if [[ "$final_name" != "$tunnel_name" ]]; then
+                    print_info "Improved tunnel name: $final_name"
+                    print_info "(Added transport suffix and timestamp for uniqueness)"
+                    tunnel_name="$final_name"
+                fi
+                
                 break
             else
                 print_warning "Invalid tunnel name. Use only letters, numbers, hyphens, and underscores."
                 press_any_key
             fi
-        else
-            print_warning "Please enter a tunnel name."
-            press_any_key
         fi
     done
     
@@ -3030,25 +3073,118 @@ configure_tunnel() {
     echo " 2. UDP (faster, less reliable)"
     echo " 3. WebSocket (for web environments)"
     echo " 4. WebSocket Secure (WSS, encrypted)"
+    echo " 5. TCP Multiplexed (tcpmux, multiple connections)"
+    echo " 6. WebSocket Multiplexed (wsmux, multiple connections)"
+    echo " 7. WebSocket Secure Multiplexed (wssmux, encrypted + multiple connections)"
     echo " 0. Cancel"
     echo
     while true; do
-        read -p "Select transport protocol [1-4, 0 to cancel]: " transport_choice
+        read -p "Select transport protocol [1-7, 0 to cancel]: " transport_choice
         case $transport_choice in
             1) transport="tcp"; break ;;
             2) transport="udp"; break ;;
             3) transport="ws"; break ;;
             4) transport="wss"; break ;;
+            5) transport="tcpmux"; break ;;
+            6) transport="wsmux"; break ;;
+            7) transport="wssmux"; break ;;
             0)
                 print_info "Configuration cancelled."
                 return
                 ;;
             *)
-                print_warning "Invalid option. Please enter 1-4 or 0 to cancel."
+                print_warning "Invalid option. Please enter 1-7 or 0 to cancel."
                 press_any_key
                 ;;
         esac
     done
+
+    # Handle TLS certificates for secure protocols
+    if [[ "$transport" == "wss" || "$transport" == "wssmux" ]]; then
+        echo
+        print_info "--- TLS Certificate Configuration ---"
+        print_info "Secure protocols (WSS/WSSMUX) require TLS certificates."
+        echo
+        echo " 1. Use existing certificate"
+        echo " 2. Generate new certificate"
+        echo " 3. Skip for now (tunnel will not work without certificate)"
+        echo " 0. Cancel"
+        echo
+        while true; do
+            read -p "Select certificate option [1-3, 0 to cancel]: " cert_choice
+            case $cert_choice in
+                1)
+                    # Use existing certificate
+                    local cert_dir="/etc/backhaul/certs"
+                    if [[ -d "$cert_dir" ]]; then
+                        local certs=($(find "$cert_dir" -name "*.crt" 2>/dev/null))
+                        if [[ ${#certs[@]} -gt 0 ]]; then
+                            echo
+                            print_info "Available certificates:"
+                            local i=1
+                            for cert in "${certs[@]}"; do
+                                echo " $i. $(basename "$cert")"
+                                ((i++))
+                            done
+                            echo " 0. Cancel"
+                            echo
+                            while true; do
+                                read -p "Select certificate [1-$((i-1)), 0 to cancel]: " cert_select
+                                if [[ "$cert_select" == "0" ]]; then
+                                    break
+                                elif [[ "$cert_select" =~ ^[1-9][0-9]*$ ]] && [[ $cert_select -lt $i ]]; then
+                                    tls_cert_path="${certs[$((cert_select-1))]}"
+                                    tls_key_path="${tls_cert_path%.crt}.key"
+                                    if [[ -f "$tls_key_path" ]]; then
+                                        print_success "Selected certificate: $(basename "$tls_cert_path")"
+                                        break
+                                    else
+                                        print_error "Certificate key file not found: $tls_key_path"
+                                        tls_cert_path=""
+                                        tls_key_path=""
+                                    fi
+                                else
+                                    print_warning "Invalid selection. Please enter 1-$((i-1)) or 0."
+                                fi
+                            done
+                        else
+                            print_warning "No certificates found in $cert_dir"
+                        fi
+                    else
+                        print_warning "Certificate directory not found: $cert_dir"
+                    fi
+                    break
+                    ;;
+                2)
+                    # Generate new certificate
+                    print_info "Generating new TLS certificate..."
+                    generate_self_signed_cert
+                    # The function will set the paths or we can extract them
+                    local cert_dir="/etc/backhaul/certs"
+                    local latest_cert=$(find "$cert_dir" -name "*.crt" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+                    if [[ -n "$latest_cert" ]]; then
+                        tls_cert_path="$latest_cert"
+                        tls_key_path="${tls_cert_path%.crt}.key"
+                        print_success "Generated certificate: $(basename "$tls_cert_path")"
+                    fi
+                    break
+                    ;;
+                3)
+                    print_warning "TLS certificate required for $transport protocol."
+                    print_info "You can add certificates later by editing the config file."
+                    break
+                    ;;
+                0)
+                    print_info "Configuration cancelled."
+                    return
+                    ;;
+                *)
+                    print_warning "Invalid option. Please enter 1-3 or 0 to cancel."
+                    press_any_key
+                    ;;
+            esac
+        done
+    fi
 
     # Get server details
     if [[ "$setup_type" == "client" ]]; then
@@ -3165,7 +3301,110 @@ configure_tunnel() {
     fi
     
     config_content+="transport = \"${transport}\"\n"
-    config_content+="heartbeat = 30\n"
+    
+    # Add TLS configuration for secure protocols
+    if [[ "$transport" == "wss" || "$transport" == "wssmux" ]]; then
+        if [[ -n "$tls_cert_path" && -n "$tls_key_path" ]]; then
+            config_content+="tls_cert = \"${tls_cert_path}\"\n"
+            config_content+="tls_key = \"${tls_key_path}\"\n"
+        else
+            print_warning "TLS certificates not configured for $transport protocol."
+            print_info "You will need to add tls_cert and tls_key to the config file manually."
+        fi
+    fi
+    
+    # Add protocol-specific default values based on backhaul core readme
+    case "$transport" in
+        "tcp")
+            config_content+="keepalive_period = 75\n"
+            config_content+="nodelay = false\n"
+            config_content+="channel_size = 2048\n"
+            config_content+="heartbeat = 40\n"
+            ;;
+        "tcpmux")
+            config_content+="keepalive_period = 75\n"
+            config_content+="nodelay = true\n"
+            config_content+="channel_size = 2048\n"
+            config_content+="heartbeat = 40\n"
+            config_content+="mux_con = 8\n"
+            config_content+="mux_version = 1\n"
+            config_content+="mux_framesize = 32768\n"
+            config_content+="mux_recievebuffer = 4194304\n"
+            config_content+="mux_streambuffer = 65536\n"
+            ;;
+        "ws")
+            config_content+="channel_size = 2048\n"
+            config_content+="keepalive_period = 75\n"
+            config_content+="heartbeat = 40\n"
+            config_content+="nodelay = true\n"
+            ;;
+        "wss")
+            config_content+="channel_size = 2048\n"
+            config_content+="keepalive_period = 75\n"
+            config_content+="nodelay = true\n"
+            ;;
+        "wsmux")
+            config_content+="keepalive_period = 75\n"
+            config_content+="nodelay = true\n"
+            config_content+="channel_size = 2048\n"
+            config_content+="heartbeat = 40\n"
+            config_content+="mux_con = 8\n"
+            config_content+="mux_version = 1\n"
+            config_content+="mux_framesize = 32768\n"
+            config_content+="mux_recievebuffer = 4194304\n"
+            config_content+="mux_streambuffer = 65536\n"
+            ;;
+        "wssmux")
+            config_content+="keepalive_period = 75\n"
+            config_content+="nodelay = true\n"
+            config_content+="channel_size = 2048\n"
+            config_content+="heartbeat = 40\n"
+            config_content+="mux_con = 8\n"
+            config_content+="mux_version = 1\n"
+            config_content+="mux_framesize = 32768\n"
+            config_content+="mux_recievebuffer = 4194304\n"
+            config_content+="mux_streambuffer = 65536\n"
+            ;;
+    esac
+    
+    # Add client-specific defaults
+    if [[ "$setup_type" == "client" ]]; then
+        config_content+="connection_pool = 8\n"
+        config_content+="aggressive_pool = false\n"
+        config_content+="dial_timeout = 10\n"
+        config_content+="retry_interval = 3\n"
+    fi
+    
+    # Ask if user wants advanced configuration
+    echo
+    print_info "--- Configuration Mode ---"
+    echo " 1. Use Default Values (recommended for most users)"
+    echo " 2. Advanced Configuration (customize all parameters)"
+    echo " 0. Cancel"
+    echo
+    while true; do
+        read -p "Select configuration mode [1-2, 0 to cancel]: " config_mode
+        case $config_mode in
+            1) 
+                print_info "Using default values for optimal performance."
+                break
+                ;;
+            2) 
+                print_info "Advanced configuration mode selected."
+                config_content=$(configure_advanced_settings "$config_content" "$transport" "$setup_type")
+                break
+                ;;
+            0)
+                print_info "Configuration cancelled."
+                return
+                ;;
+            *)
+                print_warning "Invalid option. Please enter 1-2 or 0 to cancel."
+                press_any_key
+                ;;
+        esac
+    done
+    
     config_content+="log_level = \"info\"\n"
     
     # Write configuration file
@@ -3335,6 +3574,285 @@ export_configuration() {
     else
         print_error "Invalid configuration for tunnel $tunnel_name"
     fi
+}
+
+# --- Advanced Configuration Function ---
+configure_advanced_settings() {
+    local config_content="$1"
+    local transport="$2"
+    local setup_type="$3"
+    
+    clear
+    print_info "=== Advanced Configuration ==="
+    print_info "Customize advanced parameters for your tunnel."
+    echo
+    
+    # Remove existing advanced settings from config_content
+    config_content=$(echo "$config_content" | grep -v -E "^(keepalive_period|nodelay|channel_size|heartbeat|mux_|connection_pool|aggressive_pool|dial_timeout|retry_interval) =")
+    
+    # Basic settings for all protocols
+    echo
+    print_info "--- Basic Settings ---"
+    
+    # Keepalive period
+    local keepalive_period
+    while true; do
+        read -p "Keepalive period in seconds [75]: " keepalive_period
+        keepalive_period=${keepalive_period:-75}
+        if [[ "$keepalive_period" =~ ^[0-9]+$ ]] && [[ $keepalive_period -ge 1 ]] && [[ $keepalive_period -le 3600 ]]; then
+            break
+        else
+            print_warning "Please enter a number between 1 and 3600."
+        fi
+    done
+    config_content+="keepalive_period = $keepalive_period\n"
+    
+    # Channel size
+    local channel_size
+    while true; do
+        read -p "Channel size [2048]: " channel_size
+        channel_size=${channel_size:-2048}
+        if [[ "$channel_size" =~ ^[0-9]+$ ]] && [[ $channel_size -ge 1 ]] && [[ $channel_size -le 100000 ]]; then
+            break
+        else
+            print_warning "Please enter a number between 1 and 100000."
+        fi
+    done
+    config_content+="channel_size = $channel_size\n"
+    
+    # Heartbeat
+    local heartbeat
+    while true; do
+        read -p "Heartbeat interval in seconds [40]: " heartbeat
+        heartbeat=${heartbeat:-40}
+        if [[ "$heartbeat" =~ ^[0-9]+$ ]] && [[ $heartbeat -ge 1 ]] && [[ $heartbeat -le 300 ]]; then
+            break
+        else
+            print_warning "Please enter a number between 1 and 300."
+        fi
+    done
+    config_content+="heartbeat = $heartbeat\n"
+    
+    # TCP_NODELAY for TCP-based protocols
+    if [[ "$transport" =~ ^(tcp|tcpmux|ws|wss|wsmux|wssmux)$ ]]; then
+        local nodelay
+        while true; do
+            read -p "Enable TCP_NODELAY (y/n) [n]: " nodelay
+            nodelay=${nodelay:-n}
+            if [[ "$nodelay" =~ ^[YyNn]$ ]]; then
+                if [[ "$nodelay" =~ ^[Yy]$ ]]; then
+                    config_content+="nodelay = true\n"
+                else
+                    config_content+="nodelay = false\n"
+                fi
+                break
+            else
+                print_warning "Please enter y or n."
+            fi
+        done
+    fi
+    
+    # Client-specific settings
+    if [[ "$setup_type" == "client" ]]; then
+        echo
+        print_info "--- Client-Specific Settings ---"
+        
+        # Connection pool
+        local connection_pool
+        while true; do
+            read -p "Connection pool size [8]: " connection_pool
+            connection_pool=${connection_pool:-8}
+            if [[ "$connection_pool" =~ ^[0-9]+$ ]] && [[ $connection_pool -ge 1 ]] && [[ $connection_pool -le 100 ]]; then
+                break
+            else
+                print_warning "Please enter a number between 1 and 100."
+            fi
+        done
+        config_content+="connection_pool = $connection_pool\n"
+        
+        # Aggressive pool
+        local aggressive_pool
+        while true; do
+            read -p "Enable aggressive pool management (y/n) [n]: " aggressive_pool
+            aggressive_pool=${aggressive_pool:-n}
+            if [[ "$aggressive_pool" =~ ^[YyNn]$ ]]; then
+                if [[ "$aggressive_pool" =~ ^[Yy]$ ]]; then
+                    config_content+="aggressive_pool = true\n"
+                else
+                    config_content+="aggressive_pool = false\n"
+                fi
+                break
+            else
+                print_warning "Please enter y or n."
+            fi
+        done
+        
+        # Dial timeout
+        local dial_timeout
+        while true; do
+            read -p "Dial timeout in seconds [10]: " dial_timeout
+            dial_timeout=${dial_timeout:-10}
+            if [[ "$dial_timeout" =~ ^[0-9]+$ ]] && [[ $dial_timeout -ge 1 ]] && [[ $dial_timeout -le 60 ]]; then
+                break
+            else
+                print_warning "Please enter a number between 1 and 60."
+            fi
+        done
+        config_content+="dial_timeout = $dial_timeout\n"
+        
+        # Retry interval
+        local retry_interval
+        while true; do
+            read -p "Retry interval in seconds [3]: " retry_interval
+            retry_interval=${retry_interval:-3}
+            if [[ "$retry_interval" =~ ^[0-9]+$ ]] && [[ $retry_interval -ge 1 ]] && [[ $retry_interval -le 30 ]]; then
+                break
+            else
+                print_warning "Please enter a number between 1 and 30."
+            fi
+        done
+        config_content+="retry_interval = $retry_interval\n"
+    fi
+    
+    # Multiplexing settings for *mux protocols
+    if [[ "$transport" =~ ^(tcpmux|wsmux|wssmux)$ ]]; then
+        echo
+        print_info "--- Multiplexing Settings ---"
+        
+        # Mux concurrency
+        local mux_con
+        while true; do
+            read -p "Mux concurrency (number of connections) [8]: " mux_con
+            mux_con=${mux_con:-8}
+            if [[ "$mux_con" =~ ^[0-9]+$ ]] && [[ $mux_con -ge 1 ]] && [[ $mux_con -le 64 ]]; then
+                break
+            else
+                print_warning "Please enter a number between 1 and 64."
+            fi
+        done
+        config_content+="mux_con = $mux_con\n"
+        
+        # Mux version
+        local mux_version
+        while true; do
+            read -p "SMUX protocol version (1 or 2) [1]: " mux_version
+            mux_version=${mux_version:-1}
+            if [[ "$mux_version" =~ ^[12]$ ]]; then
+                break
+            else
+                print_warning "Please enter 1 or 2."
+            fi
+        done
+        config_content+="mux_version = $mux_version\n"
+        
+        # Mux frame size
+        local mux_framesize
+        while true; do
+            read -p "Mux frame size in bytes [32768]: " mux_framesize
+            mux_framesize=${mux_framesize:-32768}
+            if [[ "$mux_framesize" =~ ^[0-9]+$ ]] && [[ $mux_framesize -ge 1024 ]] && [[ $mux_framesize -le 65536 ]]; then
+                break
+            else
+                print_warning "Please enter a number between 1024 and 65536."
+            fi
+        done
+        config_content+="mux_framesize = $mux_framesize\n"
+        
+        # Mux receive buffer
+        local mux_recievebuffer
+        while true; do
+            read -p "Mux receive buffer in bytes [4194304]: " mux_recievebuffer
+            mux_recievebuffer=${mux_recievebuffer:-4194304}
+            if [[ "$mux_recievebuffer" =~ ^[0-9]+$ ]] && [[ $mux_recievebuffer -ge 65536 ]] && [[ $mux_recievebuffer -le 16777216 ]]; then
+                break
+            else
+                print_warning "Please enter a number between 65536 and 16777216."
+            fi
+        done
+        config_content+="mux_recievebuffer = $mux_recievebuffer\n"
+        
+        # Mux stream buffer
+        local mux_streambuffer
+        while true; do
+            read -p "Mux stream buffer in bytes [65536]: " mux_streambuffer
+            mux_streambuffer=${mux_streambuffer:-65536}
+            if [[ "$mux_streambuffer" =~ ^[0-9]+$ ]] && [[ $mux_streambuffer -ge 1024 ]] && [[ $mux_streambuffer -le 1048576 ]]; then
+                break
+            else
+                print_warning "Please enter a number between 1024 and 1048576."
+            fi
+        done
+        config_content+="mux_streambuffer = $mux_streambuffer\n"
+    fi
+    
+    # Optional features
+    echo
+    print_info "--- Optional Features ---"
+    
+    # Sniffer
+    local sniffer
+    while true; do
+        read -p "Enable network sniffing/monitoring (y/n) [n]: " sniffer
+        sniffer=${sniffer:-n}
+        if [[ "$sniffer" =~ ^[YyNn]$ ]]; then
+            if [[ "$sniffer" =~ ^[Yy]$ ]]; then
+                config_content+="sniffer = true\n"
+                config_content+="sniffer_log = \"/var/log/backhaul-${tunnel_name}.json\"\n"
+            else
+                config_content+="sniffer = false\n"
+            fi
+            break
+        else
+            print_warning "Please enter y or n."
+        fi
+    done
+    
+    # Web interface port
+    local web_port
+    while true; do
+        read -p "Web interface port (0 to disable) [0]: " web_port
+        web_port=${web_port:-0}
+        if [[ "$web_port" =~ ^[0-9]+$ ]] && [[ $web_port -ge 0 ]] && [[ $web_port -le 65535 ]]; then
+            if [[ $web_port -gt 0 ]]; then
+                config_content+="web_port = $web_port\n"
+            fi
+            break
+        else
+            print_warning "Please enter a number between 0 and 65535."
+        fi
+    done
+    
+    print_success "Advanced configuration completed."
+    echo
+    print_info "Configuration summary:"
+    echo "  - Keepalive: ${keepalive_period}s"
+    echo "  - Channel size: $channel_size"
+    echo "  - Heartbeat: ${heartbeat}s"
+    if [[ "$transport" =~ ^(tcp|tcpmux|ws|wss|wsmux|wssmux)$ ]]; then
+        echo "  - TCP_NODELAY: $([[ "$nodelay" =~ ^[Yy]$ ]] && echo "enabled" || echo "disabled")"
+    fi
+    if [[ "$setup_type" == "client" ]]; then
+        echo "  - Connection pool: $connection_pool"
+        echo "  - Aggressive pool: $([[ "$aggressive_pool" =~ ^[Yy]$ ]] && echo "enabled" || echo "disabled")"
+        echo "  - Dial timeout: ${dial_timeout}s"
+        echo "  - Retry interval: ${retry_interval}s"
+    fi
+    if [[ "$transport" =~ ^(tcpmux|wsmux|wssmux)$ ]]; then
+        echo "  - Mux concurrency: $mux_con"
+        echo "  - Mux version: $mux_version"
+        echo "  - Mux frame size: $mux_framesize bytes"
+        echo "  - Mux receive buffer: $mux_recievebuffer bytes"
+        echo "  - Mux stream buffer: $mux_streambuffer bytes"
+    fi
+    echo "  - Sniffer: $([[ "$sniffer" =~ ^[Yy]$ ]] && echo "enabled" || echo "disabled")"
+    if [[ $web_port -gt 0 ]]; then
+        echo "  - Web interface: port $web_port"
+    else
+        echo "  - Web interface: disabled"
+    fi
+    
+    press_any_key
+    echo "$config_content"
 }
 
 
@@ -4056,51 +4574,53 @@ ufw_menu() {
         press_any_key
     }
 
-    clear
-    print_server_info_banner
-    print_primary_menu_header "UFW Firewall Management"
-    
-    # Check UFW status
-    local ufw_status=$(ufw status 2>/dev/null | head -n1 | grep -o "Status: .*" | cut -d' ' -f2)
-    local ufw_active=false
-    
-    if [[ "$ufw_status" == "active" ]]; then
-        ufw_active=true
-        print_success "UFW Status: Active"
-    else
-        print_warning "UFW Status: Inactive"
-    fi
-    
-    echo
-    echo "1. Enable UFW Firewall"
-    echo "2. Disable UFW Firewall"
-    echo "3. Reset UFW Rules"
-    echo "4. View UFW Status"
-    echo "5. Fix UFW Rules"
-    echo "0. Back to Main Menu"
-    echo
-    
-    menu_loop 0 5 "?" "ufw_menu_help" "Select an option [0-5, ? for help]:"
-    
-    case $choice in
-        1) enable_ufw ;;
-        2) disable_ufw ;;
-        3) reset_ufw ;;
-        4) view_ufw_status ;;
-        5) fix_ufw_rules ;;
-        0) main_menu ;;
-        *) print_warning "Invalid option. Please enter 0-5."; press_any_key; ufw_menu ;;
-    esac
+    while true; do
+        clear
+        print_server_info_banner
+        print_info "--- UFW Firewall Management ---"
+        echo
+        
+        # Check UFW status
+        local ufw_status
+        ufw_status=$(ufw status 2>/dev/null | head -n1 | awk '{print $2}')
+        local ufw_active=false
+        
+        if [[ "$ufw_status" == "active" ]]; then
+            ufw_active=true
+            print_success "UFW Status: Active"
+        else
+            print_warning "UFW Status: Inactive"
+        fi
+        
+        echo
+        echo "1. Enable UFW Firewall"
+        echo "2. Disable UFW Firewall"
+        echo "3. Reset UFW Rules"
+        echo "4. View UFW Status"
+        echo "5. Fix UFW Rules"
+        print_menu_footer
+        
+        menu_loop 0 5 "?" "ufw_menu_help" "Select an option [0-5, ? for help]:"
+        
+        case $choice in
+            1) enable_ufw ;;
+            2) disable_ufw ;;
+            3) reset_ufw ;;
+            4) view_ufw_status ;;
+            5) fix_ufw_rules ;;
+            0) return_to_previous_menu; return ;;
+            *) print_warning "Invalid option. Please enter 0-5."; press_any_key ;;
+        esac
+    done
 }
 
 enable_ufw() {
     clear
-            print_secondary_menu_header "Enable UFW Firewall"
+    print_secondary_menu_header "Enable UFW Firewall"
     
     if [[ "$ufw_active" == "true" ]]; then
         print_warning "UFW is already active"
         press_any_key
-        ufw_menu
         return
     fi
     
@@ -4108,12 +4628,12 @@ enable_ufw() {
     print_info "Make sure you have SSH access configured before proceeding."
     echo
     
-            if confirm_action "Proceed?" "n"; then
-            choice="y"
-        else
-            choice="n"
-        fi
-    
+    if confirm_action "Proceed?" "n"; then
+        choice="y"
+    else
+        choice="n"
+    fi
+
     if [[ "$choice" =~ ^[Yy]$ ]]; then
         if with_spinner "Enabling UFW" ufw --force enable; then
             print_success "UFW enabled successfully"
@@ -4125,17 +4645,15 @@ enable_ufw() {
     fi
     
     press_any_key
-    ufw_menu
 }
 
 disable_ufw() {
     clear
-            print_secondary_menu_header "Disable UFW Firewall"
+    print_secondary_menu_header "Disable UFW Firewall"
     
     if [[ "$ufw_active" != "true" ]]; then
         print_warning "UFW is not active"
         press_any_key
-        ufw_menu
         return
     fi
     
@@ -4143,12 +4661,12 @@ disable_ufw() {
     print_info "This will make your system more vulnerable to attacks."
     echo
     
-            if confirm_action "Are you sure?" "n"; then
-            choice="y"
-        else
-            choice="n"
-        fi
-    
+    if confirm_action "Are you sure?" "n"; then
+        choice="y"
+    else
+        choice="n"
+    fi
+
     if [[ "$choice" =~ ^[Yy]$ ]]; then
         if with_spinner "Disabling UFW" ufw disable; then
             print_success "UFW disabled successfully"
@@ -4160,12 +4678,11 @@ disable_ufw() {
     fi
     
     press_any_key
-    ufw_menu
 }
 
 reset_ufw() {
     clear
-            print_secondary_menu_header "Reset UFW Rules"
+    print_secondary_menu_header "Reset UFW Rules"
     
     print_warning "WARNING: This will remove ALL UFW rules and reset to default."
     print_info "This action cannot be undone."
@@ -4184,17 +4701,15 @@ reset_ufw() {
     fi
     
     press_any_key
-    ufw_menu
 }
 
 view_ufw_status() {
     clear
-            print_secondary_menu_header "UFW Status"
+    print_secondary_menu_header "UFW Status"
     
     if [[ "$ufw_active" != "true" ]]; then
         print_error "UFW is not active - no firewall protection"
         press_any_key
-        ufw_menu
         return
     fi
     
@@ -4213,17 +4728,15 @@ view_ufw_status() {
     fi
     
     press_any_key
-    ufw_menu
 }
 
 fix_ufw_rules() {
     clear
-            print_secondary_menu_header "Fix UFW Rules"
+    print_secondary_menu_header "Fix UFW Rules"
     
     if [[ "$ufw_active" != "true" ]]; then
         print_warning "UFW is not active - no rules to fix"
         press_any_key
-        ufw_menu
         return
     fi
     
@@ -4249,10 +4762,10 @@ fix_ufw_rules() {
         done
         echo
         if confirm_action "Remove orphaned rules?" "n"; then
-        fix_choice="y"
-    else
-        fix_choice="n"
-    fi
+            fix_choice="y"
+        else
+            fix_choice="n"
+        fi
         if [[ "$fix_choice" =~ ^[Yy]$ ]]; then
             # Remove orphaned rules (this is a simplified approach)
             print_info "Removing orphaned rules..."
@@ -4262,7 +4775,6 @@ fix_ufw_rules() {
     fi
     
     press_any_key
-    ufw_menu
 } 
 # --- MODULE: modules/systemd.sh ---
 # systemd.sh
@@ -4919,8 +5431,7 @@ edit_watcher_config() {
     echo "  2. Edit restart delays"
     echo "  3. Edit max retries"
     echo "  4. Edit ports"
-    echo "  0. Back"
-    echo
+    print_menu_footer
     
     local choice
     read -p "Select an option [0-4]: " choice
@@ -5221,8 +5732,7 @@ show_watcher_secret() {
         echo "  1. Copy secret to clipboard (if available)"
         echo "  2. Generate new secret"
         echo "  3. Enter secret manually"
-        echo "  0. Back"
-        echo
+        print_menu_footer
         
         local choice
         read -p "Select an option [0-3]: " choice
@@ -5355,9 +5865,7 @@ manage_tunnels() {
         done
         echo
         print_info "----------------------------------------------------------------"
-        echo " ?. Help"
-        echo " 0. Back"
-        echo
+        print_menu_footer
         menu_loop 0 $((i-1)) "?" "tunnel_list_help" "Select tunnel to manage [0-$((i-1)), ? for help]"
         case $choice in
             0) return_to_previous_menu; return ;;
@@ -5447,9 +5955,7 @@ manage_specific_tunnel() {
         echo "13. Delete Tunnel"
         echo
         print_info "----------------------------------------------------------------"
-        echo " ?. Help"
-        echo " 0. Back"
-        echo
+        print_menu_footer
         
         menu_loop 0 13 "?" "tunnel_management_help" "Select an option [0-13, ? for help]"
         case $choice in
@@ -6362,7 +6868,7 @@ show_system_health_monitor() {
     echo
     print_info "--- Tunnel Health Status ---"
     local tunnels
-    tunnels=$(find "$CONFIG_DIR" -name "*.conf" -exec basename {} .conf \; 2>/dev/null)
+    tunnels=$(find "$CONFIG_DIR" -name "config-*.toml" -exec basename {} .toml \; 2>/dev/null | sed 's/^config-//')
     
     if [[ -n "$tunnels" ]]; then
         local healthy_count=0
@@ -6677,10 +7183,10 @@ main_menu() {
     menu_loop 0 8 "?" "main_menu_help" "Select an option [0-8, ? for help]"
     
     case $choice in
-        1) configure_tunnel; main_menu ;;
-        2) manage_tunnels; main_menu ;;
-        3) download_backhaul; main_menu ;;
-        4) generate_self_signed_cert; main_menu ;;
+        1) configure_tunnel ;;
+        2) manage_tunnels ;;
+        3) download_backhaul ;;
+        4) generate_self_signed_cert ;;
         5)
            read -e -p "Enter the full path for the Backhaul binary (e.g., /usr/local/bin/backhaul): " new_bin_path
            if [[ -n "$new_bin_path" ]]; then
@@ -6690,10 +7196,9 @@ main_menu() {
                print_warning "No path entered. Keeping current: $BIN_PATH"
            fi
            press_any_key
-           main_menu
            ;;
         6)
-           show_system_health_monitor; main_menu ;;
+           show_system_health_monitor ;;
         7)
            clear
            print_server_info_banner
@@ -6703,7 +7208,6 @@ main_menu() {
            echo
            cleanup_zombie_processes
            press_any_key
-           main_menu
            ;;
         8)
            if confirm_action "This will REMOVE the binary and ALL configs/services. This is irreversible. Are you sure?" "n"; then
@@ -6726,7 +7230,6 @@ main_menu() {
                 if [[ "$really_delete" != "DELETE" ]]; then
                     print_warning "Uninstall cancelled. Nothing was deleted."
                     press_any_key
-                    main_menu
                     return
                 fi
                 print_warning "Stopping and disabling all backhaul services..."
@@ -6790,7 +7293,6 @@ main_menu() {
                 exit 0
            fi
            press_any_key
-           main_menu
            ;;
         0) exit 0 ;;
         *) print_warning "Invalid option. Please enter 0-8 or ? for help."; press_any_key ;;
