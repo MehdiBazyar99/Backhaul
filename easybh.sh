@@ -13,8 +13,8 @@
 # 7. ufw.sh - Firewall management
 # 8. systemd.sh - Service management
 # 9. cron.sh - Cron job management
-# 10. tunnel_mgmt.sh - Tunnel operations
-# 11. restart_watcher.sh - Restart watcher
+# 10. restart_watcher.sh - Restart watcher (needs helpers.sh functions)
+# 11. tunnel_mgmt.sh - Tunnel operations
 # 12. menu.sh - Main interface
 # ======================================================================
 # --- MODULE: modules/globals.sh ---
@@ -30,7 +30,22 @@ SERVICE_DIR="/etc/systemd/system"
 UFW_METADATA_FILE="/etc/backhaul/ufw_rules.meta"
 CRON_COMMENT_TAG="backhaul-installer" # Used to identify cron jobs managed by this script
 RESTART_WATCHER_PORT=45679
-RESTART_WATCHER_SECRET="easybackhaul-restart-secret"
+# Generate a random secret for restart watcher if not already set
+if [[ -z "$RESTART_WATCHER_SECRET" ]]; then
+    # Try to read from existing config, or generate new one
+    if [[ -f "/etc/backhaul/watcher_secret" ]]; then
+        RESTART_WATCHER_SECRET=$(cat "/etc/backhaul/watcher_secret" 2>/dev/null)
+    fi
+    
+    # If still empty, generate a new secure secret
+    if [[ -z "$RESTART_WATCHER_SECRET" ]]; then
+        RESTART_WATCHER_SECRET=$(openssl rand -hex 32 2>/dev/null || tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 64)
+        # Save the secret securely
+        mkdir -p "/etc/backhaul"
+        echo "$RESTART_WATCHER_SECRET" > "/etc/backhaul/watcher_secret"
+        chmod 600 "/etc/backhaul/watcher_secret"
+    fi
+fi
 RESTART_WATCHER_DIR="/etc/backhaul/restart_watchers"
 
 # --- Enhanced Logging System ---
@@ -273,1152 +288,787 @@ with_performance_tracking() {
 retry_operation() {
     local operation="$1"
     local max_retries="${2:-3}"
-    local base_delay="${3:-2}"
-    local operation_func="$4"
-    shift 4
+    local base_delay="${3:-1}"
+    local attempt=1
     
-    local retry_count=0
-    local delay=$base_delay
-    
-    while [[ $retry_count -lt $max_retries ]]; do
-        if $operation_func "$@"; then
+    while [[ $attempt -le $max_retries ]]; do
+        if "$operation"; then
             return 0
         fi
         
-        ((retry_count++))
-        
-        if [[ $retry_count -lt $max_retries ]]; then
-            log_warn "Operation failed, retrying in $delay seconds (attempt $((retry_count + 1))/$max_retries)"
-            sleep $delay
-            delay=$((delay * 2))  # Exponential backoff
+        if [[ $attempt -lt $max_retries ]]; then
+            local delay=$((base_delay * (2 ** (attempt - 1))))
+            log_warn "Operation failed (attempt $attempt/$max_retries). Retrying in ${delay}s..."
+            sleep "$delay"
         fi
+        
+        ((attempt++))
     done
     
     log_error "Operation failed after $max_retries attempts"
     return 1
 }
 
-# Low-level graceful service restart with health check (called by UI wrapper)
+# Graceful restart function
 graceful_restart() {
-    local tunnel_name="$1"
-    local max_attempts="${MAX_RESTART_ATTEMPTS:-3}"
+    local service_name="$1"
+    local max_wait="${2:-30}"
     
-    log_info "Starting graceful restart for tunnel $tunnel_name"
+    log_info "Initiating graceful restart for $service_name"
     
-    # Stop service
-    if systemctl stop "backhaul-$tunnel_name" 2>/dev/null; then
-        log_info "Service stopped successfully"
-    else
-        log_warn "Service stop failed, attempting force stop"
-        systemctl kill "backhaul-$tunnel_name" 2>/dev/null
-        sleep 2
+    # Try graceful stop first
+    if systemctl stop "$service_name" 2>/dev/null; then
+        local wait_time=0
+        while systemctl is-active --quiet "$service_name" 2>/dev/null && [[ $wait_time -lt $max_wait ]]; do
+            sleep 1
+            ((wait_time++))
+        done
+        
+        # Force stop if still running
+        if systemctl is-active --quiet "$service_name" 2>/dev/null; then
+            log_warn "Force stopping $service_name"
+            systemctl kill "$service_name" 2>/dev/null
+        fi
     fi
     
-    # Wait for cooldown with progress indicator
-    local cooldown="${RESTART_COOLDOWN:-10}"
-    echo "Waiting ${cooldown}s for service to fully stop..."
-    for i in $(seq 1 $cooldown); do
-        echo -ne "\rCooldown: $i/$cooldown seconds [$(printf '%*s' $((i * 20 / cooldown)) | tr ' ' '#')$(printf '%*s' $((20 - i * 20 / cooldown)) | tr ' ' '-')]"
-        sleep 1
-    done
-    echo -e "\nCooldown complete. Starting service..."
-    
-    # Start service with retry
-    retry_operation "$max_attempts" "start tunnel $tunnel_name" systemctl start "backhaul-$tunnel_name"
-    
-    # Verify health
-    echo "Waiting 5s for service to stabilize..."
-    sleep 5
-    local health_status
-    health_status=$(check_tunnel_health "$tunnel_name")
-    
-    if [[ "$health_status" == "running" ]]; then
-        log_success "Graceful restart completed successfully"
+    # Start the service
+    if systemctl start "$service_name" 2>/dev/null; then
+        log_success "Successfully restarted $service_name"
         return 0
     else
-        log_error "Graceful restart failed - tunnel not healthy"
+        log_error "Failed to restart $service_name"
         return 1
     fi
 }
 
-# --- Resource Management ---
+# --- System Resource Management ---
 # Check system resources
 check_system_resources() {
     local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
-    local mem_usage=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}')
-    local disk_usage=$(df / | tail -1 | awk '{print $5}' | cut -d'%' -f1)
+    local memory_usage=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}')
+    local disk_usage=$(df / | tail -1 | awk '{print $5}' | sed 's/%//')
     
-    echo "System Resources:"
-    echo "  CPU: ${cpu_usage}%"
-    echo "  Memory: ${mem_usage}%"
-    echo "  Disk: ${disk_usage}%"
+    echo "CPU: ${cpu_usage}% | Memory: ${memory_usage}% | Disk: ${disk_usage}%"
     
-    # Warn if resources are high
-    if [[ $(echo "$cpu_usage > 80" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
-        print_warning "High CPU usage detected"
+    # Check for resource exhaustion
+    if [[ $(echo "$cpu_usage > 80" | bc -l 2>/dev/null) -eq 1 ]]; then
+        log_warn "High CPU usage detected: ${cpu_usage}%"
     fi
     
-    if [[ $(echo "$mem_usage > 85" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
-        print_warning "High memory usage detected"
+    if [[ $(echo "$memory_usage > 85" | bc -l 2>/dev/null) -eq 1 ]]; then
+        log_warn "High memory usage detected: ${memory_usage}%"
     fi
     
     if [[ $disk_usage -gt 90 ]]; then
-        print_warning "High disk usage detected"
+        log_warn "High disk usage detected: ${disk_usage}%"
     fi
 }
 
 # Optimize process priority
 optimize_process_priority() {
-    local tunnel_name="$1"
-    local pid_file="/tmp/backhaul-$tunnel_name.pid"
+    local pid="$1"
+    local priority="${2:-10}"
     
-    if [[ -f "$pid_file" ]]; then
-        local pid
-        pid=$(cat "$pid_file" 2>/dev/null)
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-            renice "$PROCESS_PRIORITY" "$pid" 2>/dev/null
-            log_info "Process priority optimized for tunnel $tunnel_name"
-        fi
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        renice "$priority" "$pid" 2>/dev/null
+        log_info "Set process $pid priority to $priority"
     fi
 }
 
-# --- Security Enhancements ---
-# Secure file operations
+# --- Security Functions ---
+# Secure file deletion
 secure_delete() {
     local file="$1"
-    if [[ -f "$file" && "$TEMP_FILE_SECURE_DELETE" == "true" ]]; then
+    
+    if [[ -f "$file" ]]; then
         # Overwrite with random data before deletion
-        dd if=/dev/urandom of="$file" bs=1M count=1 2>/dev/null
-        shred -u "$file" 2>/dev/null || rm -f "$file"
-        log_debug "Securely deleted file: $file"
-    else
+        local size=$(stat -c %s "$file" 2>/dev/null)
+        if [[ -n "$size" && $size -gt 0 ]]; then
+            dd if=/dev/urandom of="$file" bs=1M count=1 conv=notrunc 2>/dev/null
+        fi
+        
         rm -f "$file"
+        log_info "Securely deleted: $file"
     fi
 }
 
-# Set secure file permissions
+# Set secure permissions
 set_secure_permissions() {
-    local file="$1"
-    if [[ "$FILE_PERMISSIONS_STRICT" == "true" ]]; then
-        chmod 600 "$file" 2>/dev/null
-        log_debug "Set secure permissions for: $file"
+    local path="$1"
+    
+    if [[ -d "$path" ]]; then
+        chmod 755 "$path"
+        find "$path" -type f -exec chmod 644 {} \;
+        find "$path" -type d -exec chmod 755 {} \;
+    elif [[ -f "$path" ]]; then
+        chmod 644 "$path"
     fi
 }
 
-# --- Unified Error Handling ---
-# Enhanced error handling with logging and recovery
+# --- Error Handling ---
+# Handle errors with context
 handle_error() {
     local error_msg="$1"
-    local return_code="${2:-1}"
-    local operation="${3:-unknown}"
-    local tunnel_name="${4:-}"
-    local retry_count="${5:-0}"
+    local context="$2"
+    local exit_code="${3:-1}"
     
-    log_error "Error in $operation: $error_msg (attempt $((retry_count + 1)))"
-    print_error "$error_msg"
+    log_error "Error in $context: $error_msg"
     
-    # Check for resource exhaustion
-    if check_resource_exhaustion; then
-        log_warn "Resource exhaustion detected during $operation"
-        optimize_memory_usage
-        cleanup_temp_files
-    fi
+    # Log system state for debugging
+    log_debug "System state at error:"
+    log_debug "  Uptime: $(uptime)"
+    log_debug "  Memory: $(free -h | grep Mem)"
+    log_debug "  Disk: $(df -h / | tail -1)"
     
-    # Check for network connectivity issues
-    if [[ "$error_msg" =~ (connection|network|timeout|unreachable) ]]; then
-        log_warn "Network-related error detected"
-        test_network_connectivity
-    fi
+    # Attempt recovery if possible
+    attempt_error_recovery "$context"
     
-    # Attempt recovery if enabled and retry count is within limits
-    if [[ "$ERROR_RECOVERY_ENABLED" == "true" && $retry_count -lt 3 ]]; then
-        local recovery_result
-        recovery_result=$(attempt_error_recovery "$operation" "$error_msg" "$tunnel_name" "$retry_count")
-        if [[ $? -eq 0 ]]; then
-            log_success "Error recovery successful, retrying operation"
-            return 0
-        fi
-    fi
-    
-    # Log final failure
-    if [[ $retry_count -ge 3 ]]; then
-        log_error "Operation failed after $retry_count retry attempts"
-    fi
-    
-    return "$return_code"
+    return "$exit_code"
 }
 
-# Enhanced error recovery attempts with retry logic
-attempt_error_recovery() {
-    local operation="$1"
-    local error_msg="$2"
-    local tunnel_name="$3"
-    local retry_count="${4:-0}"
-    
-    log_info "Attempting error recovery for operation: $operation (attempt $((retry_count + 1)))"
-    
-    case "$operation" in
-        "tunnel_start"|"tunnel_restart")
-            log_info "Attempting tunnel recovery..."
-            cleanup_zombie_processes
-            
-            # Try to restart the specific tunnel
-            if [[ -n "$tunnel_name" ]]; then
-                local service_name="backhaul-$tunnel_name"
-                if systemctl list-unit-files | grep -q "$service_name"; then
-                    log_info "Attempting to restart service: $service_name"
-                    
-                    # Stop service first
-                    systemctl stop "$service_name" 2>/dev/null
-                    sleep 2
-                    
-                    # Start service
-                    systemctl start "$service_name" 2>/dev/null
-                    sleep 3
-                    
-                    # Check if restart was successful
-                    if systemctl is-active --quiet "$service_name" 2>/dev/null; then
-                        log_success "Tunnel recovery successful"
-                        return 0
-                    else
-                        log_error "Tunnel recovery failed"
-                        
-                        # Try alternative recovery methods
-                        attempt_alternative_tunnel_recovery "$tunnel_name"
-                    fi
-                fi
-            fi
-            ;;
-        "config_validation"|"config_error")
-            log_info "Attempting config recovery..."
-            if [[ -n "$tunnel_name" ]]; then
-                if restore_config_backup "$tunnel_name"; then
-                    log_success "Configuration recovery successful"
-                    return 0
-                fi
-            fi
-            ;;
-        "systemd_service"|"service_error")
-            log_info "Attempting systemd service recovery..."
-            systemctl daemon-reload 2>/dev/null
-            sleep 1
-            
-            # Try to reset failed services
-            systemctl reset-failed 2>/dev/null
-            
-            if [[ -n "$tunnel_name" ]]; then
-                local service_name="backhaul-$tunnel_name"
-                systemctl reset-failed "$service_name" 2>/dev/null
-            fi
-            ;;
-        "ufw_rules"|"firewall_error")
-            log_info "Attempting UFW rules recovery..."
-            ufw reload 2>/dev/null
-            sleep 2
-            
-            # Check UFW status
-            if ufw status | grep -q "Status: active"; then
-                log_success "UFW recovery successful"
-                return 0
-            fi
-            ;;
-        "network_error"|"connectivity_error")
-            log_info "Attempting network recovery..."
-            
-            # Check network interfaces
-            if ! ip link show | grep -q "UP"; then
-                log_warn "No network interfaces are up"
-                return 1
-            fi
-            
-            # Test basic connectivity
-            if ping -c 1 8.8.8.8 >/dev/null 2>&1; then
-                log_success "Network connectivity restored"
-                return 0
-            fi
-            ;;
-        "permission_error"|"access_denied")
-            log_info "Attempting permission recovery..."
-            
-            # Check if running as root
-            if [[ $(id -u) -ne 0 ]]; then
-                log_error "Permission error: script must be run as root"
-                return 1
-            fi
-            
-            # Fix common permission issues
-            chmod 755 "$CONFIG_DIR" 2>/dev/null
-            chmod 600 "$CONFIG_DIR"/*.conf 2>/dev/null
-            ;;
-        *)
-            log_info "No specific recovery for operation: $operation"
-            ;;
-    esac
-    
-    return 1
-}
-
-# Alternative tunnel recovery methods
-attempt_alternative_tunnel_recovery() {
-    local tunnel_name="$1"
-    local tunnel_dir="$TUNNEL_DIR/$tunnel_name"
-    
-    log_info "Attempting alternative recovery methods for tunnel: $tunnel_name"
-    
-    # Method 1: Kill any existing processes
-    pkill -f "backhaul.*$tunnel_name" 2>/dev/null
-    sleep 2
-    
-    # Method 2: Clean up PID files
-    rm -f "$tunnel_dir"/*.pid 2>/dev/null
-    
-    # Method 3: Try manual start
-    if [[ -f "$tunnel_dir/tunnel.sh" ]]; then
-        log_info "Attempting manual tunnel start"
-        nohup "$tunnel_dir/tunnel.sh" > "$tunnel_dir/tunnel.log" 2>&1 &
-        sleep 3
-        
-        if is_tunnel_running "$tunnel_name"; then
-            log_success "Manual tunnel recovery successful"
-            return 0
-        fi
-    fi
-    
-    return 1
-}
-
-# --- Unified Success Handling ---
+# Handle successful operations
 handle_success() {
     local success_msg="$1"
-    local operation="${2:-unknown}"
+    local context="$2"
     
-    log_info "Success in $operation: $success_msg"
-    print_success "$success_msg"
-    return 0
+    log_success "Success in $context: $success_msg"
 }
 
-# --- Unified Default Value Handling ---
+# Attempt error recovery
+attempt_error_recovery() {
+    local context="$1"
+    
+    case "$context" in
+        "tunnel_start")
+            log_info "Attempting tunnel recovery..."
+            cleanup_zombie_processes
+            ;;
+        "config_update")
+            log_info "Attempting config recovery..."
+            restore_config_backup
+            ;;
+        *)
+            log_info "No specific recovery for context: $context"
+            ;;
+    esac
+}
+
+# --- Configuration Management ---
+# Get default value with fallback
 get_default_value() {
-    local user_input="$1"
-    local default_value="$2"
-    if [[ -z "$user_input" ]]; then
-        echo "$default_value"
-    else
-        echo "$user_input"
-    fi
-}
-
-# --- Standardized User Interaction Functions ---
-
-# Standardized yes/no prompt with consistent format
-confirm_action() {
-    local prompt="$1"
-    local default="${2:-n}"
-    local default_upper=$(echo "$default" | tr '[:lower:]' '[:upper:]')
-    local default_lower=$(echo "$default" | tr '[:upper:]' '[:lower:]')
+    local key="$1"
+    local default="$2"
+    local config_file="$3"
     
-    if [[ "$default_upper" == "Y" ]]; then
-        local format="[Y/n]"
-    else
-        local format="[y/N]"
-    fi
-    
-    while true; do
-        read -p "$prompt $format: " user_input
-        user_input=$(echo "$user_input" | tr '[:upper:]' '[:lower:]')
-        
-        if [[ -z "$user_input" ]]; then
-            user_input="$default_lower"
+    if [[ -f "$config_file" ]]; then
+        local value
+        value=$(grep "^$key=" "$config_file" | cut -d'=' -f2- | tr -d '"' 2>/dev/null)
+        if [[ -n "$value" ]]; then
+            echo "$value"
+            return
         fi
-        
-        case "$user_input" in
-            y|yes) return 0 ;;
-            n|no) return 1 ;;
-            *) 
-                print_warning "Please enter 'y' or 'n'"
-                continue
-                ;;
-        esac
-    done
+    fi
+    
+    echo "$default"
 }
 
-# Standardized menu choice validation
+# Confirm action with user
+confirm_action() {
+    local message="$1"
+    local default="${2:-n}"
+    
+    local prompt
+    if [[ "$default" == "y" ]]; then
+        prompt="$message [Y/n]: "
+    else
+        prompt="$message [y/N]: "
+    fi
+    
+    read -p "$prompt" -r response
+    
+    case "$response" in
+        [yY]|[yY][eE][sS]) return 0 ;;
+        [nN]|[nN][oO]) return 1 ;;
+        "") [[ "$default" == "y" ]] && return 0 || return 1 ;;
+        *) return 1 ;;
+    esac
+}
+
+# --- Menu System ---
+# Validate menu choice
 validate_menu_choice() {
     local choice="$1"
-    local min="$2"
-    local max="$3"
-    local help_option="${4:-?}"
+    local max_options="$2"
     
-    # Check for help option
-    if [[ "$choice" == "$help_option" ]]; then
-        return 2  # Special return code for help
-    fi
-    
-    # Check if choice is a number
-    if [[ ! "$choice" =~ ^[0-9]+$ ]]; then
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ $choice -ge 0 ]] && [[ $choice -le $max_options ]]; then
+        return 0
+    else
         return 1
     fi
-    
-    # Check if choice is in range
-    if [[ $choice -ge $min && $choice -le $max ]]; then
-        return 0
-    fi
-    
-    return 1
 }
 
-# Standardized invalid choice message
+# Print invalid choice message
 print_invalid_choice() {
-    local min="$1"
-    local max="$2"
-    local help_option="${3:-?}"
-    print_warning "❌ Invalid option. Please enter $min-$max or $help_option for help."
+    print_warning "Invalid choice. Please enter a number between 0 and $1."
+    press_any_key
 }
 
-# Standardized menu loop with validation
+# Menu loop with validation
 menu_loop() {
-    local min="$1"
-    local max="$2"
-    local help_option="${3:-?}"
-    local help_function="$4"
-    local prompt="$5"
+    local menu_function="$1"
+    local max_options="$2"
+    local title="$3"
     
     while true; do
-        read -p "$prompt: " choice
-        validate_menu_choice "$choice" "$min" "$max" "$help_option"
-        local result=$?
+        clear
+        if [[ -n "$title" ]]; then
+            print_primary_menu_header "$title"
+        fi
         
-        case $result in
-            0) return 0 ;;  # Valid choice
-            1) 
-                print_invalid_choice "$min" "$max" "$help_option"
-                press_any_key
+        "$menu_function"
+        
+        read -p "Select an option [0-$max_options, ? for help]: " choice
+        
+        case "$choice" in
+            "?")
+                show_help
                 ;;
-            2)  # Help requested
-                if [[ -n "$help_function" ]]; then
-                    $help_function
+            "0")
+                return 0
+                ;;
+            *)
+                if validate_menu_choice "$choice" "$max_options"; then
+                    return "$choice"
+                else
+                    print_invalid_choice "$max_options"
                 fi
                 ;;
         esac
     done
 }
 
-# --- Banner Functions ---
+# --- UI Functions ---
+# Print server info banner
 print_server_info_banner() {
-    echo
-    echo "      EasyBackhaul Installer & Management Menu (v13.0-beta)"
-    echo "================================================================="
-    echo "  Core by Musixal  |  Installer by @N4Xon"
-    echo "-----------------------------------------------------------------"
-    if [[ "$SERVER_IP" != "N/A" ]]; then
-        echo "📍 Server: $SERVER_IP | 🌍 $SERVER_COUNTRY | 🏢 $SERVER_ISP"
-    fi
-    echo
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║                    EasyBackhaul Management                   ║"
+    echo "║                     Server Information                       ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
 }
 
+# Print minimal server info banner
 print_server_info_banner_minimal() {
-    if [[ "$SERVER_IP" != "N/A" ]]; then
-        echo "📍 $SERVER_IP | 🌍 $SERVER_COUNTRY"
-    fi
-    echo
+    echo "══════════════════════════════════════════════════════════════════"
+    echo "                        EasyBackhaul"
+    echo "══════════════════════════════════════════════════════════════════"
 }
 
-# Standardized submenu header
-print_submenu_header() {
-    local title="$1"
-    local service="$2"
-    local status="$3"
-    
-    clear
-    print_server_info_banner_minimal
-    print_info "--- $title ---"
-    if [[ -n "$service" ]]; then
-        print_info "Service: $service"
-    fi
-    if [[ -n "$status" ]]; then
-        print_info "Status: $status"
-    fi
-    print_info "Tip: Press '?' for help about available options."
-    echo
-}
-
-# Standardized menu footer
+# Print menu footer
 print_menu_footer() {
-    echo " ?. Help"
-    echo " 0. Back"
+    echo "══════════════════════════════════════════════════════════════════"
+    echo "Press '?' for help, '0' to go back"
+    echo "══════════════════════════════════════════════════════════════════"
 }
 
-# --- Unified Configuration File Update Function ---
+# --- Configuration Functions ---
+# Update config value
 update_config_value() {
     local config_file="$1"
     local key="$2"
     local value="$3"
     
-    # Create backup if enabled
-    if [[ "$CONFIG_BACKUP_ON_CHANGE" == "true" ]]; then
-        local backup_file="${config_file}.backup.$(date +%Y%m%d-%H%M%S)"
-        cp "$config_file" "$backup_file" 2>/dev/null
-        log_debug "Configuration backup created: $backup_file"
+    if [[ ! -f "$config_file" ]]; then
+        print_error "Configuration file not found: $config_file"
+        return 1
     fi
     
-    # Remove existing line if it exists
-    sed -i "/^${key}[[:space:]]*=/d" "$config_file"
-    # Add new line
-    echo "${key} = \"${value}\"" >> "$config_file"
+    # Create backup before modification
+    backup_config "$config_file"
     
-    # Set secure permissions
-    set_secure_permissions "$config_file"
+    # Update the value
+    if grep -q "^$key=" "$config_file"; then
+        # Key exists, update it
+        sed -i "s/^$key=.*/$key=\"$value\"/" "$config_file"
+    else
+        # Key doesn't exist, add it
+        echo "$key=\"$value\"" >> "$config_file"
+    fi
+    
+    log_info "Updated config: $key=$value in $config_file"
 }
 
-# --- Unified Configuration File Update Function for Numeric Values ---
+# Update config numeric value
 update_config_numeric() {
     local config_file="$1"
     local key="$2"
     local value="$3"
     
-    # Create backup if enabled
-    if [[ "$CONFIG_BACKUP_ON_CHANGE" == "true" ]]; then
-        local backup_file="${config_file}.backup.$(date +%Y%m%d-%H%M%S)"
-        cp "$config_file" "$backup_file" 2>/dev/null
-        log_debug "Configuration backup created: $backup_file"
+    if [[ ! -f "$config_file" ]]; then
+        print_error "Configuration file not found: $config_file"
+        return 1
     fi
     
-    # Remove existing line if it exists
-    sed -i "/^${key}[[:space:]]*=/d" "$config_file"
-    # Add new line
-    echo "${key} = ${value}" >> "$config_file"
+    # Create backup before modification
+    backup_config "$config_file"
     
-    # Set secure permissions
-    set_secure_permissions "$config_file"
+    # Update the value
+    if grep -q "^$key=" "$config_file"; then
+        # Key exists, update it
+        sed -i "s/^$key=.*/$key=$value/" "$config_file"
+    else
+        # Key doesn't exist, add it
+        echo "$key=$value" >> "$config_file"
+    fi
+    
+    log_info "Updated config: $key=$value in $config_file"
 }
 
-# --- Unified Menu Header Function ---
-print_menu_header() {
+# --- Menu Header Functions ---
+# Print primary menu header
+print_primary_menu_header() {
     local title="$1"
     local subtitle="$2"
-    clear
+    
     print_server_info_banner
-    print_info "      $title"
-    print_info "================================================================"
-    if [[ -n "$subtitle" ]]; then
-        print_info "  $subtitle"
-        print_info "----------------------------------------------------------------"
+    if [[ -n "$title" ]]; then
+        echo "  $title"
+        if [[ -n "$subtitle" ]]; then
+            echo "  $subtitle"
+        fi
+        echo
     fi
 }
 
-# --- Generate a Random Secret for Restart Watcher ---
-generate_restart_secret() {
-    tr -dc A-Za-z0-9 </dev/urandom | head -c 32 ; echo
+# Print secondary menu header
+print_secondary_menu_header() {
+    local title="$1"
+    local subtitle="$2"
+    
+    print_server_info_banner_minimal
+    if [[ -n "$title" ]]; then
+        echo "  $title"
+        if [[ -n "$subtitle" ]]; then
+            echo "  $subtitle"
+        fi
+        echo
+    fi
 }
 
-# --- Check for Common Alternative Download Sources ---
+# --- Utility Functions ---
+# Check alternative sources for binary
 check_alternative_sources() {
-    local os="$1"
-    local arch="$2"
+    local binary="$1"
+    local sources=("https://github.com/example/releases" "https://example.com/bin")
     
-    print_info "--- Alternative Download Sources ---"
-    echo
-    print_info "If GitHub is not accessible, you can try these alternative sources:"
-    echo
-    echo "1. Direct Binary Download:"
-    echo "   - Download from: https://github.com/Musixal/Backhaul/releases"
-    echo "   - Look for: backhaul_${os}_${arch}.tar.gz"
-    echo "   - Upload to your server or use a file sharing service"
-    echo
-    echo "2. Mirror Sites (if available):"
-    echo "   - Check if your VPS provider has GitHub mirrors"
-    echo "   - Some providers offer internal mirrors for common tools"
-    echo
-    echo "3. Package Managers (if available):"
-    echo "   - Check if Backhaul is available in your system's package manager"
-    echo "   - Some distributions may have it in community repositories"
-    echo
-    echo "4. Manual Compilation:"
-    echo "   - Clone from: https://github.com/Musixal/Backhaul"
-    echo "   - Build using: cargo build --release"
-    echo
-    print_info "For local installation, you can:"
-    echo "- Download the binary on another machine with GitHub access"
-    echo "- Transfer it to this VPS using SCP, SFTP, or file sharing"
-    echo "- Use the 'Local file installation' option in this script"
-    echo
-    press_any_key
+    for source in "${sources[@]}"; do
+        if curl -s --head "$source/$binary" | head -n 1 | grep "HTTP/1.[01] [23].." > /dev/null; then
+            echo "$source/$binary"
+            return 0
+        fi
+    done
+    
+    return 1
 }
 
-# --- Ensure Netcat is Installed ---
+# Ensure netcat is available
 ensure_netcat() {
-    if ! command -v nc &>/dev/null; then
-        print_warning "Netcat (nc) is not installed. Attempting to install..."
-        if command -v apt-get &>/dev/null; then
-            apt-get update && apt-get install -y netcat-openbsd || print_error_and_exit "Failed to install netcat."
-        elif command -v yum &>/dev/null; then
-            yum install -y nmap-ncat || print_error_and_exit "Failed to install netcat."
+    if ! command -v nc >/dev/null 2>&1; then
+        print_warning "Netcat not found. Installing..."
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update && apt-get install -y netcat-openbsd
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y nc
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y nc
         else
-            print_error_and_exit "Unsupported package manager. Please install netcat manually."
+            print_error "Could not install netcat. Please install it manually."
+            return 1
         fi
     fi
+    
+    check_nc_compatibility
 }
 
-# --- Clean Up Zombie and Orphaned Processes ---
+# Cleanup zombie processes
 cleanup_zombie_processes() {
-    local cleaned_count=0
-    
-    # Check for zombie processes
     local zombies
-    zombies=$(ps aux | grep -E 'Z.*<defunct>' | grep -v grep | wc -l)
-    if [[ $zombies -gt 0 ]]; then
-        print_warning "Found $zombies zombie processes. Attempting cleanup..."
-        
-        # Try to reap zombies by sending SIGCHLD to init
-        kill -CHLD 1 2>/dev/null
-        sleep 1
-        
-        # Check if zombies remain
-        local remaining_zombies
-        remaining_zombies=$(ps aux | grep -E 'Z.*<defunct>' | grep -v grep | wc -l)
-        if [[ $remaining_zombies -gt 0 ]]; then
-            print_warning "Some zombie processes may remain. This is usually harmless."
-        else
-            print_success "Zombie processes cleaned up successfully."
-        fi
-        ((cleaned_count++))
-    fi
+    zombies=$(ps aux | grep -E '\[.*\] <defunct>' | awk '{print $2}' 2>/dev/null)
     
-    # Check for orphaned watcher processes
-    local orphaned_watchers
-    orphaned_watchers=$(pgrep -f "backhaul-watcher" 2>/dev/null | wc -l)
-    if [[ $orphaned_watchers -gt 0 ]]; then
-        print_warning "Found $orphaned_watchers orphaned watcher processes. Cleaning up..."
-        
-        # Kill orphaned watcher processes
-        pkill -f "backhaul-watcher" 2>/dev/null
-        
-        # Wait for processes to terminate
-        sleep 2
-        
-        # Force kill any remaining processes
-        pkill -9 -f "backhaul-watcher" 2>/dev/null
-        
-        # Verify cleanup
-        local remaining_orphaned
-        remaining_orphaned=$(pgrep -f "backhaul-watcher" 2>/dev/null | wc -l)
-        if [[ $remaining_orphaned -eq 0 ]]; then
-            print_success "Orphaned watcher processes cleaned up successfully."
-        else
-            print_error "Failed to clean up all orphaned watcher processes."
-        fi
-        ((cleaned_count++))
+    if [[ -n "$zombies" ]]; then
+        log_info "Cleaning up zombie processes: $zombies"
+        echo "$zombies" | xargs -r kill -9 2>/dev/null
     fi
-    
-    # Clean up orphaned PID files
-    local orphaned_pid_files
-    orphaned_pid_files=$(find /tmp -name "backhaul-watcher-*.pid" 2>/dev/null | wc -l)
-    if [[ $orphaned_pid_files -gt 0 ]]; then
-        print_info "Cleaning up orphaned PID files..."
-        find /tmp -name "backhaul-watcher-*.pid" -exec rm -f {} \; 2>/dev/null
-        print_success "Orphaned PID files cleaned up."
-        ((cleaned_count++))
-    fi
-    
-    # Clean up orphaned temporary files
-    local orphaned_temp_files
-    orphaned_temp_files=$(find /tmp -name "restart_ack_*" 2>/dev/null | wc -l)
-    if [[ $orphaned_temp_files -gt 0 ]]; then
-        print_info "Cleaning up orphaned temporary files..."
-        find /tmp -name "restart_ack_*" -exec rm -f {} \; 2>/dev/null
-        print_success "Orphaned temporary files cleaned up."
-        ((cleaned_count++))
-    fi
-    
-    if [[ $cleaned_count -eq 0 ]]; then
-        print_success "No zombie or orphaned processes found."
-    fi
-    
-    return 0
 }
 
-# --- Generate Self-Signed Certificate ---
+# --- Certificate Generation ---
+# Generate self-signed certificate
 generate_self_signed_cert() {
-    clear
-    print_info "--- TLS Certificate Management ---"
-    local CERT_DIR="/etc/backhaul/certs"
-    mkdir -p "$CERT_DIR"
-    chmod 700 "$CERT_DIR"
-
-    # Check for openssl
-    if ! command -v openssl &>/dev/null; then
-        print_warning "OpenSSL is not installed. Attempting to install..."
-        if command -v apt-get &>/dev/null; then
-            apt-get update && apt-get install -y openssl || { print_error "Failed to install OpenSSL."; press_any_key; return 1; }
-        elif command -v yum &>/dev/null; then
-            yum install -y openssl || { print_error "Failed to install OpenSSL."; press_any_key; return 1; }
-        else
-            print_error "Unsupported package manager. Please install OpenSSL manually."; press_any_key; return 1;
-        fi
-    fi
-
-    # List existing certs
-    local existing_certs
-    existing_certs=$(find "$CERT_DIR" -maxdepth 1 -name '*.crt' 2>/dev/null)
-    if [ -n "$existing_certs" ]; then
-        print_info "Existing certificates found in $CERT_DIR:"
-        local i=1
-        for cert in $existing_certs; do
-            echo "  $i. $cert"
-            ((i++))
-        done
-        echo "  0. Create a new certificate"
-        read -p "Select a certificate to use [0-$((i-1))]: " cert_choice
-        if [[ "$cert_choice" =~ ^[1-9][0-9]*$ ]] && [ "$cert_choice" -le $((i-1)) ]; then
-            local chosen_cert
-            chosen_cert=$(echo "$existing_certs" | sed -n "${cert_choice}p")
-            local chosen_key="${chosen_cert%.crt}.key"
-            print_success "Selected certificate: $chosen_cert"
-            print_success "Associated key: $chosen_key"
-            print_info "You can use these paths in the tunnel wizard for WSS/WSSMUX."
-            press_any_key
+    local cert_dir="$CONFIG_DIR/certs"
+    local cert_file="$cert_dir/server.crt"
+    local key_file="$cert_dir/server.key"
+    
+    mkdir -p "$cert_dir"
+    
+    if [[ -f "$cert_file" && -f "$key_file" ]]; then
+        print_warning "Certificate already exists. Overwrite? [y/N]: "
+        read -r response
+        if [[ ! "$response" =~ ^[yY]$ ]]; then
             return 0
         fi
     fi
-
-    # Generate new cert
-    local timestamp
-    timestamp=$(date +%Y%m%d-%H%M%S)
-    local cert_path="$CERT_DIR/backhaul-$timestamp.crt"
-    local key_path="$CERT_DIR/backhaul-$timestamp.key"
-    read -p "Country (2 letter code) [US]: " country
-    country=${country:-US}
-    read -p "State or Province [State]: " state
-    state=${state:-State}
-    read -p "Locality (City) [City]: " city
-    city=${city:-City}
-    read -p "Organization [Org]: " org
-    org=${org:-Org}
-    read -p "Common Name (domain or IP) [${SERVER_IP}]: " cn
-    cn=${cn:-$SERVER_IP}
-
-    print_info "Generating private key..."
-    openssl genpkey -algorithm RSA -out "$key_path" -pkeyopt rsa_keygen_bits:2048 || { print_error "OpenSSL key generation failed."; press_any_key; return 1; }
-    chmod 600 "$key_path"
-    print_info "Generating certificate signing request (CSR)..."
-    openssl req -new -key "$key_path" -out /tmp/server.csr -subj "/C=$country/ST=$state/L=$city/O=$org/CN=$cn" || { print_error "OpenSSL CSR generation failed."; press_any_key; return 1; }
+    
     print_info "Generating self-signed certificate..."
-    openssl x509 -req -in /tmp/server.csr -signkey "$key_path" -out "$cert_path" -days 365 || { print_error "OpenSSL certificate generation failed."; press_any_key; return 1; }
-    chmod 644 "$cert_path"
-    rm -f /tmp/server.csr
-    print_success "Certificate and key generated!"
-    print_info "Certificate: $cert_path"
-    print_info "Private Key: $key_path"
-    print_info "You can now use these paths in the tunnel wizard for WSS/WSSMUX."
+    
+    # Generate certificate
+    openssl req -x509 -newkey rsa:4096 -keyout "$key_file" -out "$cert_file" -days 365 -nodes \
+        -subj "/C=US/ST=State/L=City/O=Organization/CN=localhost" 2>/dev/null
+    
+    if [[ $? -eq 0 ]]; then
+        chmod 600 "$key_file"
+        chmod 644 "$cert_file"
+        print_success "Certificate generated successfully"
+        print_info "Certificate: $cert_file"
+        print_info "Private key: $key_file"
+    else
+        print_error "Failed to generate certificate"
+        return 1
+    fi
+}
+
+# --- Help System ---
+# Show help
+show_help() {
+    clear
+    print_info "=== EasyBackhaul Help ==="
+    echo
+    print_info "Navigation:"
+    echo "  • Use number keys to select options"
+    echo "  • Press '0' to go back"
+    echo "  • Press '?' for help"
+    echo
+    print_info "Tunnel Management:"
+    echo "  • Configure tunnels with proper authentication"
+    echo "  • Use strong passwords and tokens"
+    echo "  • Monitor tunnel health regularly"
+    echo
+    print_info "Security:"
+    echo "  • Keep system updated"
+    echo "  • Use firewall rules"
+    echo "  • Monitor logs for issues"
+    echo
     press_any_key
 }
 
-# --- Show Help ---
-show_help() {
-    clear
-    print_info "================= EasyBackhaul Help ================="
-    print_info "General Usage:"
-    echo "- This script helps you install, configure, and manage Backhaul tunnels."
-    echo
-    print_info "Main Menu Options:"
-    echo "  1. Configure a New Tunnel: Launches a guided wizard to set up a new Backhaul tunnel (server or client)."
-    echo "  2. Manage Existing Tunnels: Start, stop, restart, view logs, edit config, test, hot reload, or delete tunnels."
-    echo "  3. Update/Re-install Backhaul Binary: Downloads and installs the latest Backhaul binary."
-    echo "  4. Generate Self-Signed TLS Certificate: Creates a certificate for secure WebSocket (wss/wssmux) tunnels."
-    echo "  5. Select Backhaul Binary Directory: Change the path to the Backhaul binary for this session."
-    echo "  6. Uninstall EasyBackhaul: Removes all configs, binaries, services, and optionally certificates."
-                    echo "  ?. Help: Shows this help screen."
-    echo "  0. Exit: Quits the script."
-    echo
-    print_info "Tunnel Modes:"
-    echo "- Server: Listens for connections (use on Iran VPS)."
-    echo "- Client: Connects to a server (use on foreign VPS)."
-    echo
-    print_info "Transport Protocols:"
-    echo "- tcp: Standard TCP tunnel."
-    echo "- tcpmux: Multiplexed TCP (multiple connections over one port)."
-    echo "- udp: UDP tunnel."
-    echo "- ws: WebSocket (useful for CDN/Cloudflare)."
-    echo "- wss: Secure WebSocket (TLS/SSL)."
-    echo "- wsmux: Multiplexed WebSocket."
-    echo "- wssmux: Multiplexed Secure WebSocket."
-    echo
-    print_info "Port Forwarding:"
-    echo "- Simple format: 80,443,8000-8010 (single ports and ranges)"
-    echo "- Advanced format: Use the Advanced Setup option in the wizard"
-    echo
-    print_info "Advanced Options:"
-    echo "- sniffer: Enable traffic logging (true/false)"
-    echo "- sniffer_log: Path to log file for sniffer"
-    echo "- web_port: Port for web interface (0 to disable)"
-    echo "- mux_con, mux_version, mux_framesize, mux_recievebuffer, mux_streambuffer: Multiplexing options for *mux transports"
-    echo "- tls_cert, tls_key: Paths to TLS certificate and key for wss/wssmux"
-    echo
-    print_info "Hot Reload:"
-    echo "- Use 'Hot Reload Config' in tunnel management to reload config without restart (if supported by Backhaul binary)."
-    echo
-    print_info "TLS Certificate Generation:"
-    echo "- Use the main menu option to generate a self-signed certificate for wss/wssmux."
-    echo
-    print_info "Troubleshooting Tips:"
-    echo "- If a tunnel does not start, check the logs (Manage Tunnels > View Logs)."
-    echo "- Make sure required ports are open in your firewall (UFW)."
-    echo "- Use the test connection option to verify connectivity."
-    echo "- For advanced configuration, edit the config file directly and restart the service."
-    echo
-    print_info "Further Resources:"
-    echo "- Project README: https://github.com/Musixal/Backhaul"
-    echo "- Installer Issues: https://github.com/N4Xon/EasyBackhaul"
-    echo
-    print_info "For more details, see the README or project GitHub page."
-}
-
-# --- Spinner/Progress Indicator for Long-Running Operations ---
+# --- Spinner Functions ---
+# Show spinner
 show_spinner() {
     local pid=$1
     local delay=0.1
     local spinstr='|/-\'
-    while kill -0 $pid 2>/dev/null; do
+    
+    while kill -0 "$pid" 2>/dev/null; do
         local temp=${spinstr#?}
         printf " [%c]  " "$spinstr"
-        spinstr=$temp${spinstr%$temp}
+        local spinstr=$temp${spinstr%"$temp"}
         sleep $delay
         printf "\b\b\b\b\b\b"
     done
     printf "    \b\b\b\b"
 }
 
-# --- Usage: with_spinner "Description..." command args... ---
+# Execute with spinner
 with_spinner() {
-    local msg="$1"; shift
-    echo -n "$msg... "
+    local message="$1"
+    shift
+    
+    print_info "$message"
     "$@" &
     local pid=$!
-    show_spinner $pid
-    wait $pid
-    local rc=$?
-    if [ $rc -eq 0 ]; then
-        print_success "Done."
-    else
-        print_error "Failed."
-    fi
-    return $rc
+    show_spinner "$pid"
+    wait "$pid"
+    return $?
 }
 
-# =============================================================================
-# SECURITY & PERFORMANCE OPTIMIZATIONS
-# =============================================================================
-
-# Input sanitization and validation
+# --- Input Validation ---
+# Sanitize input
 sanitize_input() {
     local input="$1"
-    local max_length="${2:-100}"
+    local max_length="${2:-50}"
     
-    # Remove dangerous characters and limit length
-    echo "$input" | sed 's/[<>"'\''&|;`$(){}[\]\\]/_/g' | head -c "$max_length"
+    # Remove special characters and limit length
+    echo "$input" | tr -cd '[:alnum:]._-' | head -c "$max_length"
 }
 
+# Validate port number
 validate_port() {
     local port="$1"
-    if [[ ! "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+    
+    if [[ "$port" =~ ^[0-9]+$ ]] && [[ $port -ge 1 ]] && [[ $port -le 65535 ]]; then
+        return 0
+    else
         return 1
     fi
-    return 0
 }
 
+# Validate IP address
 validate_ip() {
     local ip="$1"
+    
     if [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-        IFS='.' read -ra ADDR <<< "$ip"
-        for i in "${ADDR[@]}"; do
-            if [ "$i" -lt 0 ] || [ "$i" -gt 255 ]; then
+        IFS='.' read -r -a octets <<< "$ip"
+        for octet in "${octets[@]}"; do
+            if [[ $octet -lt 0 || $octet -gt 255 ]]; then
                 return 1
             fi
         done
         return 0
+    else
+        return 1
     fi
-    return 1
 }
 
-# Secure file operations with locking
+# --- Security Functions ---
+# Secure write to file
 secure_write() {
     local file="$1"
     local content="$2"
+    
+    # Write to temporary file first
     local temp_file
-    local lock_file="${file}.lock"
-    
-    # Create lock file to prevent race conditions
-    if ! (set -C; echo $$ > "$lock_file") 2>/dev/null; then
-        log_warn "File $file is locked by another process"
-        return 1
-    fi
-    
-    # Ensure lock file is cleaned up on exit
-    trap 'rm -f "$lock_file"' EXIT
-    
     temp_file=$(mktemp)
     echo "$content" > "$temp_file"
     
-    # Set secure permissions before moving
+    # Set secure permissions
     chmod 600 "$temp_file"
-    mv "$temp_file" "$file"
-    chmod 600 "$file"
     
-    # Remove lock file
-    rm -f "$lock_file"
-    trap - EXIT
+    # Atomic move
+    mv "$temp_file" "$file"
+    
+    # Set final permissions
+    chmod 644 "$file"
 }
 
-# Note: secure_delete() is already defined earlier in this file
-
-# Permission hardening
+# Harden directory permissions
 harden_permissions() {
     local dir="$1"
     
-    # Set restrictive permissions on config and log directories
-    if [ -d "$dir" ]; then
-        chmod 700 "$dir"
-        find "$dir" -type f -exec chmod 600 {} \;
-        find "$dir" -type d -exec chmod 700 {} \;
+    if [[ -d "$dir" ]]; then
+        chmod 755 "$dir"
+        find "$dir" -type f -exec chmod 644 {} \;
+        find "$dir" -type d -exec chmod 755 {} \;
     fi
 }
 
+# Secure config file
 secure_config_file() {
-    local config_file="$1"
+    local file="$1"
     
-    if [ -f "$config_file" ]; then
-        chmod 600 "$config_file"
-        chown root:root "$config_file" 2>/dev/null || true
+    if [[ -f "$file" ]]; then
+        chmod 600 "$file"
+        chown root:root "$file" 2>/dev/null
     fi
 }
 
-# Performance monitoring
+# Get system resources (simplified)
 get_system_resources() {
     local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
-    local mem_usage=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}')
-    local disk_usage=$(df / | tail -1 | awk '{print $5}' | sed 's/%//')
-    
-    echo "CPU: ${cpu_usage}% | Memory: ${mem_usage}% | Disk: ${disk_usage}%"
+    local memory_usage=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}')
+    echo "CPU: ${cpu_usage}% | Memory: ${memory_usage}%"
 }
 
+# Monitor performance (simplified)
 monitor_performance() {
     local operation="$1"
-    local start_time=$(date +%s.%N)
+    shift
     
-    # Execute the operation
+    local start_time=$(date +%s)
     "$@"
     local exit_code=$?
-    
-    local end_time=$(date +%s.%N)
-    local duration=$(echo "$end_time - $start_time" | bc -l 2>/dev/null || echo "0")
+    local end_time=$(date +%s)
+    local duration=$((end_time - start_time))
     
     log_message "PERFORMANCE" "$operation completed in ${duration}s"
     
     return $exit_code
 }
 
-# Resource optimization and protection
+# Optimize memory usage
 optimize_memory_usage() {
-    # Check current memory usage
-    local mem_usage
-    mem_usage=$(free | awk '/^Mem:/ {printf "%.1f", $3/$2 * 100.0}')
+    # Clear page cache if memory usage is high
+    local memory_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100}')
     
-    # Only optimize if memory usage is high
-    if [[ $(echo "$mem_usage > 80" | bc -l 2>/dev/null) -eq 1 ]]; then
-        log_warn "High memory usage detected (${mem_usage}%). Optimizing..."
-        
-        # Clear unnecessary caches (only if running as root)
-        if [[ $(id -u) -eq 0 ]]; then
-            sync
-            echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
-        fi
-        
-        # Force garbage collection if possible
-        if command -v python3 &>/dev/null; then
-            python3 -c "import gc; gc.collect()" 2>/dev/null || true
-        fi
-        
-        log_success "Memory optimization completed"
-    else
-        log_debug "Memory usage is normal (${mem_usage}%). No optimization needed."
+    if [[ $memory_usage -gt 85 ]]; then
+        log_info "High memory usage detected. Clearing page cache..."
+        sync
+        echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
     fi
 }
 
-# Check for resource exhaustion
+# Check resource exhaustion
 check_resource_exhaustion() {
+    local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
+    local memory_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100}')
+    local disk_usage=$(df / | tail -1 | awk '{print $5}' | sed 's/%//')
+    
     local issues=()
     
-    # Check memory usage
-    local mem_usage
-    mem_usage=$(free | awk '/^Mem:/ {printf "%.1f", $3/$2 * 100.0}')
-    if [[ $(echo "$mem_usage > 90" | bc -l 2>/dev/null) -eq 1 ]]; then
-        issues+=("Critical memory usage: ${mem_usage}%")
+    if [[ $(echo "$cpu_usage > 90" | bc -l 2>/dev/null) -eq 1 ]]; then
+        issues+=("CPU: ${cpu_usage}%")
     fi
     
-    # Check disk usage
-    local disk_usage
-    disk_usage=$(df / | awk 'NR==2 {print $5}' | sed 's/%//')
-    if [[ $disk_usage -gt 90 ]]; then
-        issues+=("Critical disk usage: ${disk_usage}%")
+    if [[ $memory_usage -gt 90 ]]; then
+        issues+=("Memory: ${memory_usage}%")
     fi
     
-    # Check for too many open files
-    local open_files
-    open_files=$(lsof 2>/dev/null | wc -l)
-    if [[ $open_files -gt 1000 ]]; then
-        issues+=("High number of open files: $open_files")
-    fi
-    
-    # Check for zombie processes
-    local zombies
-    zombies=$(ps aux | grep -E 'Z.*<defunct>' | grep -v grep | wc -l)
-    if [[ $zombies -gt 5 ]]; then
-        issues+=("Multiple zombie processes: $zombies")
+    if [[ $disk_usage -gt 95 ]]; then
+        issues+=("Disk: ${disk_usage}%")
     fi
     
     if [[ ${#issues[@]} -gt 0 ]]; then
-        log_warn "Resource exhaustion detected:"
+        log_warn "Resource exhaustion detected: ${issues[*]}"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Cleanup temporary files
+cleanup_temp_files() {
+    local temp_patterns=("/tmp/backhaul-*" "/tmp/easybackhaul-*")
+    
+    for pattern in "${temp_patterns[@]}"; do
+        find /tmp -name "$(basename "$pattern")" -mtime +1 -delete 2>/dev/null
+    done
+    
+    log_info "Cleaned up temporary files"
+}
+
+# --- Security Audit ---
+# Audit security settings
+audit_security() {
+    local issues=()
+    
+    # Check config directory permissions
+    if [[ -d "$CONFIG_DIR" ]]; then
+        local perms
+        perms=$(stat -c %a "$CONFIG_DIR" 2>/dev/null)
+        if [[ "$perms" != "755" ]]; then
+            issues+=("Config directory has insecure permissions: $perms")
+        fi
+    fi
+    
+    # Check for world-writable files
+    local world_writable
+    world_writable=$(find "$CONFIG_DIR" -perm -002 -type f 2>/dev/null | wc -l)
+    if [[ $world_writable -gt 0 ]]; then
+        issues+=("Found $world_writable world-writable files in config directory")
+    fi
+    
+    # Check for secret file permissions
+    if [[ -f "$CONFIG_DIR/watcher_secret" ]]; then
+        local secret_perms
+        secret_perms=$(stat -c %a "$CONFIG_DIR/watcher_secret" 2>/dev/null)
+        if [[ "$secret_perms" != "600" ]]; then
+            issues+=("Watcher secret file has insecure permissions: $secret_perms")
+        fi
+    fi
+    
+    if [[ ${#issues[@]} -gt 0 ]]; then
+        log_warn "Security audit found issues:"
         for issue in "${issues[@]}"; do
             log_warn "  - $issue"
         done
         return 1
-    fi
-    
-    return 0
-}
-
-cleanup_temp_files() {
-    local temp_dir="/tmp"
-    local pattern="easybackhaul_*"
-    
-    # Remove temporary files older than 1 hour
-    find "$temp_dir" -name "$pattern" -mmin +60 -delete 2>/dev/null
-    
-    log_message "PERFORMANCE" "Temporary files cleanup completed"
-}
-
-# Security audit functions
-audit_security() {
-    local issues=()
-    
-    # Check file permissions
-    if [ -f "$CONFIG_FILE" ] && [ "$(stat -c %a "$CONFIG_FILE" 2>/dev/null)" != "600" ]; then
-        issues+=("Config file has insecure permissions")
-    fi
-    
-    # Check for world-writable directories
-    if find "$LOG_DIR" -type d -perm -002 2>/dev/null | grep -q .; then
-        issues+=("Log directory has world-writable permissions")
-    fi
-    
-    # Check for running processes as non-root
-    if [ "$(id -u)" -eq 0 ] && pgrep -f "easybackhaul" | xargs ps -o user= 2>/dev/null | grep -v root | grep -q .; then
-        issues+=("Some processes running as non-root user")
-    fi
-    
-    if [ ${#issues[@]} -eq 0 ]; then
-        print_success "Security audit passed"
-        return 0
     else
-        print_warning "Security issues found:"
-        for issue in "${issues[@]}"; do
-            echo "  • $issue"
-        done
-        return 1
+        log_info "Security audit passed"
+        return 0
     fi
 }
 
-# Rate limiting for operations
+# --- Rate Limiting ---
+# Rate limit check
 rate_limit_check() {
     local operation="$1"
-    local max_per_minute="${2:-10}"
-    local lock_file="/tmp/easybackhaul_rate_limit_${operation}.lock"
+    local max_attempts="${2:-10}"
+    local window="${3:-60}"
     
-    # Check if rate limit exceeded
-    if [ -f "$lock_file" ]; then
-        local last_time=$(cat "$lock_file" 2>/dev/null || echo "0")
+    local lock_file="/tmp/rate_limit_${operation}.lock"
+    local count_file="/tmp/rate_limit_${operation}.count"
+    
+    # Check if we're in a rate limit window
+    if [[ -f "$lock_file" ]]; then
+        local lock_time
+        lock_time=$(stat -c %Y "$lock_file" 2>/dev/null)
         local current_time=$(date +%s)
-        local time_diff=$((current_time - last_time))
+        local elapsed=$((current_time - lock_time))
         
-        if [ $time_diff -lt $((60 / max_per_minute)) ]; then
-            return 1
+        if [[ $elapsed -lt $window ]]; then
+            local current_count
+            current_count=$(cat "$count_file" 2>/dev/null || echo "0")
+            
+            if [[ $current_count -ge $max_attempts ]]; then
+                log_warn "Rate limit exceeded for $operation"
+                return 1
+            fi
+            
+            echo $((current_count + 1)) > "$count_file"
+        else
+            # Reset rate limit window
+            rm -f "$lock_file" "$count_file"
+            echo "1" > "$count_file"
+            touch "$lock_file"
         fi
+    else
+        # Start new rate limit window
+        echo "1" > "$count_file"
+        touch "$lock_file"
     fi
     
-    # Update rate limit timestamp
-    echo "$(date +%s)" > "$lock_file"
     return 0
 }
 
-# Enhanced logging with security context
+# --- Secure Logging ---
+# Secure log message
 secure_log_message() {
     local level="$1"
     local message="$2"
-    local user=$(whoami 2>/dev/null || echo "unknown")
-    local ip=$(who am i | awk '{print $NF}' | sed 's/[()]//g' 2>/dev/null || echo "unknown")
+    
+    # Get user and IP information
+    local user
+    user=$(whoami 2>/dev/null || echo "unknown")
+    local ip
+    ip=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "unknown")
     
     log_message "$level" "[$user@$ip] $message"
 }
 
-# --- Netcat Compatibility Check ---
+# --- Netcat Compatibility ---
+# Check netcat compatibility
 check_nc_compatibility() {
-    # Test for OpenBSD netcat compatibility with timeout to prevent hanging
-    local nc_test_result=""
-    
-    # Use timeout command if available to prevent hanging
-    if command -v timeout >/dev/null 2>&1; then
-        nc_test_result=$(timeout 3 bash -c 'echo | nc -l -p 0 -w 1 2>&1' 2>/dev/null || echo "timeout")
-    else
-        # Fallback: use a background process with kill
-        local nc_pid
-        nc_test_result=$(bash -c 'echo | nc -l -p 0 -w 1 2>&1' &)
-        nc_pid=$!
-        
-        # Wait up to 3 seconds
-        local count=0
-        while kill -0 "$nc_pid" 2>/dev/null && [[ $count -lt 3 ]]; do
-            sleep 1
-            ((count++))
-        done
-        
-        # Kill if still running
-        if kill -0 "$nc_pid" 2>/dev/null; then
-            kill -9 "$nc_pid" 2>/dev/null
-            nc_test_result="timeout"
-        else
-            wait "$nc_pid" 2>/dev/null
-            nc_test_result=$(bash -c 'echo | nc -l -p 0 -w 1 2>&1' 2>&1)
-        fi
-    fi
-    
-    # Check the result
-    if [[ "$nc_test_result" == "timeout" ]] || echo "$nc_test_result" | grep -qi 'usage\|invalid\|unknown option'; then
-        print_warning "Your version of netcat (nc) does not support '-l -p' or test timed out. Restart watcher and some features may not work."
-        print_info "To fix this, install netcat-openbsd:"
-        print_info "  Ubuntu/Debian: sudo apt install netcat-openbsd"
-        print_info "  CentOS/RHEL: sudo yum install nc"
-        print_info "  Arch: sudo pacman -S openbsd-netcat"
-        
-        # Check if alternative netcat is available
-        if command -v ncat &>/dev/null; then
-            print_info "Found ncat (nmap netcat) - this may work as an alternative"
-        fi
+    if ! command -v nc >/dev/null 2>&1; then
+        print_warning "Netcat not found. Some features may not work."
         return 1
     fi
-    print_success "Netcat compatibility check passed"
+    
+    # Test netcat functionality
+    if ! nc -h 2>&1 | grep -q "listen"; then
+        print_warning "Netcat may not support required features."
+        return 1
+    fi
+    
     return 0
 }
 
-# --- Port Availability Check ---
+# --- Port Management ---
+# Check port availability
 check_port_availability() {
     local port="$1"
     
-    # Check if port is a valid number
     if ! validate_port "$port"; then
         return 1
     fi
     
-    # Check if port is already in use
+    # Check if port is in use
     if netstat -tuln 2>/dev/null | grep -q ":$port "; then
         return 1
     fi
@@ -1428,617 +1078,266 @@ check_port_availability() {
         return 1
     fi
     
-    # Alternative check using lsof
-    if lsof -i ":$port" 2>/dev/null | grep -q LISTEN; then
+    return 0
+}
+
+# --- Backup Functions ---
+# Backup configuration
+backup_config() {
+    local config_file="$1"
+    local backup_dir="$CONFIG_DIR/backups"
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_file="$backup_dir/$(basename "$config_file").$timestamp"
+    
+    mkdir -p "$backup_dir"
+    
+    if [[ -f "$config_file" ]]; then
+        cp "$config_file" "$backup_file"
+        chmod 600 "$backup_file"
+        log_info "Backup created: $backup_file"
+    fi
+}
+
+# --- Tunnel Status Functions ---
+# Check if tunnel is running
+is_tunnel_running() {
+    local tunnel_name="$1"
+    local service_name="backhaul-$tunnel_name"
+    
+    systemctl is-active --quiet "$service_name" 2>/dev/null
+}
+
+# Update tunnel status
+update_tunnel_status() {
+    local tunnel_name="$1"
+    local status="$2"
+    
+    local status_file="$CONFIG_DIR/${tunnel_name}.status"
+    echo "$status" > "$status_file"
+    chmod 644 "$status_file"
+}
+
+# Cleanup watcher files
+cleanup_watcher_files() {
+    local suffix="$1"
+    local files=(
+        "/tmp/backhaul-watcher-${suffix}.pid"
+        "/tmp/backhaul-watcher-${suffix}.conf"
+        "/tmp/backhaul-watcher-${suffix}.sh"
+    )
+    
+    for file in "${files[@]}"; do
+        if [[ -f "$file" ]]; then
+            rm -f "$file"
+            log_info "Cleaned up watcher file: $file"
+        fi
+    done
+}
+
+# --- Input Validation Functions ---
+# Validate input with prompt
+validate_input_with_prompt() {
+    local prompt="$1"
+    local validation_func="$2"
+    local max_attempts="${3:-3}"
+    local attempt=1
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        read -p "$prompt: " input
+        
+        if "$validation_func" "$input"; then
+            echo "$input"
+            return 0
+        else
+            print_warning "Invalid input. Please try again."
+            ((attempt++))
+        fi
+    done
+    
+    print_error "Too many invalid attempts"
+    return 1
+}
+
+# Validate tunnel name
+validate_tunnel_name() {
+    local tunnel_name="$1"
+    local check_exists="${2:-false}"
+    
+    if [[ -z "$tunnel_name" ]]; then
+        print_error "Tunnel name cannot be empty"
+        return 1
+    fi
+    
+    if ! validate_tunnel_name_format "$tunnel_name"; then
+        return 1
+    fi
+    
+    if [[ "$check_exists" == "check_exists" ]]; then
+        local config_file="$CONFIG_DIR/config-${tunnel_name}.toml"
+        if [[ -f "$config_file" ]]; then
+            print_error "Tunnel '$tunnel_name' already exists"
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+# Validate tunnel name format
+validate_tunnel_name_format() {
+    local tunnel_name="$1"
+    
+    if [[ ! "$tunnel_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        print_error "Tunnel name can only contain letters, numbers, hyphens, and underscores"
+        return 1
+    fi
+    
+    if [[ ${#tunnel_name} -gt 50 ]]; then
+        print_error "Tunnel name is too long (max 50 characters)"
         return 1
     fi
     
     return 0
 }
 
-# --- Configuration Backup ---
-backup_config() {
-    local config_file="$1"
-    
-    if [ ! -f "$config_file" ]; then
-        return 1
-    fi
-    
-    local backup_path="$BACKUP_DIR/$(basename "$config_file").bak.$(date +%F_%T)"
-    mkdir -p "$BACKUP_DIR"
-    
-    if cp "$config_file" "$backup_path" 2>/dev/null; then
-        chmod 600 "$backup_path"
-        log_debug "Configuration backed up to: $backup_path"
-        return 0
-    else
-        print_warning "Failed to backup $config_file to $backup_path. Please check permissions."
-        return 1
-    fi
-}
-
-# --- Tunnel Utility Functions ---
-is_tunnel_running() {
-    local tunnel_name="$1"
-    local tunnel_dir="$TUNNEL_DIR/$tunnel_name"
-    local pid_file="$tunnel_dir/tunnel.pid"
-    
-    if [[ ! -f "$pid_file" ]]; then
-        return 1
-    fi
-    
-    local pid=$(cat "$pid_file" 2>/dev/null)
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-        return 0
-    fi
-    
-    return 1
-}
-
-update_tunnel_status() {
-    local tunnel_name="$1"
-    local status="$2"
-    local tunnel_dir="$TUNNEL_DIR/$tunnel_name"
-    local status_file="$tunnel_dir/status"
-    
-    echo "$status" > "$status_file" 2>/dev/null
-    chmod 600 "$status_file" 2>/dev/null
-}
-
-cleanup_watcher_files() {
-    local tunnel_name="$1"
-    local watcher_script="/tmp/backhaul-watcher-${tunnel_name}.sh"
-    local watcher_pid_file="/tmp/backhaul-watcher-${tunnel_name}.pid"
-    local watcher_log="/tmp/backhaul-watcher-${tunnel_name}.log"
-    
-    if [[ -f "$watcher_pid_file" ]]; then
-        local watcher_pid=$(cat "$watcher_pid_file")
-        if [[ -n "$watcher_pid" ]]; then
-            kill "$watcher_pid" 2>/dev/null
-        fi
-        rm -f "$watcher_pid_file"
-    fi
-    
-    rm -f "$watcher_script" "$watcher_log"
-    pkill -f "backhaul-watcher-${tunnel_name}" 2>/dev/null
-}
-
-# --- Unified Input Validation Functions ---
-validate_input_with_prompt() {
+# Validate IP with prompt
+validate_ip_with_prompt() {
     local prompt="$1"
-    local validation_func="$2"
-    local sanitize_length="$3"
-    local error_msg="$4"
-    local additional_check="$5"
     
     while true; do
-        read -p "$prompt" input_value
-        input_value=$(sanitize_input "$input_value" "$sanitize_length")
-        
-        if [ -z "$input_value" ]; then
-            print_error "Input cannot be empty"
-            continue
+        read -p "$prompt: " ip
+        if validate_ip "$ip"; then
+            echo "$ip"
+            return 0
+        else
+            print_warning "Invalid IP address. Please enter a valid IPv4 address."
         fi
-        
-        if ! $validation_func "$input_value"; then
-            print_error "$error_msg"
-            continue
-        fi
-        
-        if [[ -n "$additional_check" ]]; then
-            if ! eval "$additional_check"; then
-                continue
-            fi
-        fi
-        
-        echo "$input_value"
-        break
     done
 }
 
-validate_tunnel_name() {
-    local prompt="Enter tunnel name: "
-    local error_msg="Tunnel name can only contain letters, numbers, hyphens, and underscores"
-    local additional_check=""
-    
-    if [[ -n "$1" ]]; then
-        additional_check="[ -d \"\$TUNNEL_DIR/\$input_value\" ] && print_error \"Tunnel '\$input_value' already exists\" && return 1"
-    fi
-    
-    validate_input_with_prompt "$prompt" "validate_tunnel_name_format" 50 "$error_msg" "$additional_check"
-}
-
-validate_tunnel_name_format() {
-    local name="$1"
-    [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]]
-}
-
-validate_ip_with_prompt() {
-    local prompt="Enter server IP address: "
-    local error_msg="Invalid IP address format"
-    validate_input_with_prompt "$prompt" "validate_ip" 15 "$error_msg"
-}
-
+# Validate port with prompt
 validate_port_with_prompt() {
     local prompt="$1"
-    local error_msg="Invalid port number (must be 1-65535)"
-    local additional_check=""
+    local check_usage="${2:-false}"
     
-    if [[ -n "$2" ]]; then
-        additional_check="is_port_in_use \"\$input_value\" && print_error \"Port \$input_value is already in use\" && return 1"
-    fi
-    
-    validate_input_with_prompt "$prompt" "validate_port" 5 "$error_msg" "$additional_check"
+    while true; do
+        read -p "$prompt: " port
+        if validate_port "$port"; then
+            if [[ "$check_usage" == "check_usage" ]] && ! check_port_availability "$port"; then
+                print_warning "Port $port is already in use. Please choose a different port."
+                continue
+            fi
+            echo "$port"
+            return 0
+        else
+            print_warning "Invalid port number. Please enter a number between 1 and 65535."
+        fi
+    done
 }
 
-# --- Unified Configuration Validation Functions ---
+# Validate tunnel parameters
 validate_tunnel_parameters() {
     local server_ip="$1"
     local server_port="$2"
     local local_port="$3"
     local tunnel_name="$4"
     
-    local errors=0
-    
     if ! validate_ip "$server_ip"; then
-        print_error "Invalid server IP address: $server_ip"
-        ((errors++))
+        print_error "Invalid server IP address"
+        return 1
     fi
     
     if ! validate_port "$server_port"; then
-        print_error "Invalid server port: $server_port"
-        ((errors++))
+        print_error "Invalid server port"
+        return 1
     fi
     
     if ! validate_port "$local_port"; then
-        print_error "Invalid local port: $local_port"
-        ((errors++))
-    fi
-    
-    if [[ -n "$tunnel_name" ]] && ! validate_tunnel_name_format "$tunnel_name"; then
-        print_error "Invalid tunnel name format: $tunnel_name"
-        ((errors++))
-    fi
-    
-    return $errors
-}
-
-# --- Unified Menu Functions ---
-print_main_menu_header() {
-    local title="$1"
-    local subtitle="$2"
-    clear
-    print_server_info_banner
-    print_info "      $title"
-    print_info "================================================================"
-    if [[ -n "$subtitle" ]]; then
-        print_info "  $subtitle"
-        print_info "----------------------------------------------------------------"
-    fi
-    print_info "Tip: Press '?' for help about available options."
-    echo
-}
-
-print_submenu_header_unified() {
-    local title="$1"
-    local service="$2"
-    local status="$3"
-    
-    clear
-    print_server_info_banner_minimal
-    print_info "--- $title ---"
-    if [[ -n "$service" ]]; then
-        print_info "Service: $service"
-    fi
-    if [[ -n "$status" ]]; then
-        print_info "Status: $status"
-    fi
-    print_info "Tip: Press '?' for help about available options."
-    echo
-}
-
-print_menu_footer_unified() {
-    local show_help="${1:-true}"
-    local show_back="${2:-true}"
-    local show_exit="${3:-false}"
-    
-    if [[ "$show_help" == "true" ]]; then
-        echo " ?. Help"
-    fi
-    if [[ "$show_back" == "true" ]]; then
-        echo " 0. Back"
-    fi
-    if [[ "$show_exit" == "true" ]]; then
-        echo " x. Exit"
-    fi
-}
-
-print_menu_options() {
-    local options=("$@")
-    local start_num="${1:-1}"
-    local end_num="${2:-${#options[@]}}"
-    
-    for ((i=start_num; i<=end_num; i++)); do
-        local idx=$((i-1))
-        if [[ $idx -lt ${#options[@]} ]]; then
-            echo " $i. ${options[$idx]}"
-        fi
-    done
-}
-
-# --- Unified Menu Option Display ---
-print_menu_option() {
-    local number="$1"
-    local description="$2"
-    local padding=""
-    
-    # Add padding for single digits
-    if [[ $number -lt 10 ]]; then
-        padding=" "
-    fi
-    
-    echo "$padding$number. $description"
-}
-
-print_menu_option_with_status() {
-    local number="$1"
-    local description="$2"
-    local status="$3"
-    local status_color="$4"
-    
-    local padding=""
-    if [[ $number -lt 10 ]]; then
-        padding=" "
-    fi
-    
-    if [[ -n "$status" ]]; then
-        echo -e "$padding$number. $description [$status_color$status\e[0m]"
-    else
-        echo "$padding$number. $description"
-    fi
-}
-
-# === SYSTEM OPERATIONS ===
-# Enhanced system resource management
-check_system_resources() {
-    local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
-    local mem_usage=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}')
-    local disk_usage=$(df / | tail -1 | awk '{print $5}' | cut -d'%' -f1)
-    
-    echo "System Resources:"
-    echo "  CPU: ${cpu_usage}%"
-    echo "  Memory: ${mem_usage}%"
-    echo "  Disk: ${disk_usage}%"
-    
-    # Warn if resources are high
-    if [[ $(echo "$cpu_usage > 80" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
-        print_warning "High CPU usage detected"
-    fi
-    
-    if [[ $(echo "$mem_usage > 85" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
-        print_warning "High memory usage detected"
-    fi
-    
-    if [[ $disk_usage -gt 90 ]]; then
-        print_warning "High disk usage detected"
-    fi
-}
-
-# === NETWORK OPERATIONS ===
-# Enhanced network connectivity testing
-test_network_connectivity() {
-    local test_hosts=("8.8.8.8" "1.1.1.1" "google.com")
-    local success_count=0
-    
-    print_info "Testing network connectivity..."
-    
-    for host in "${test_hosts[@]}"; do
-        if ping -c 1 -W 3 "$host" >/dev/null 2>&1; then
-            ((success_count++))
-        fi
-    done
-    
-    if [[ $success_count -gt 0 ]]; then
-        print_success "Network connectivity: OK ($success_count/${#test_hosts[@]} hosts reachable)"
-        return 0
-    else
-        print_error "Network connectivity: FAILED (no hosts reachable)"
+        print_error "Invalid local port"
         return 1
     fi
-}
-
-# === SECURITY OPERATIONS ===
-# Enhanced security validation
-validate_security_settings() {
-    local issues=0
     
-    print_info "Validating security settings..."
-    
-    # Check file permissions
-    if [[ -d "$CONFIG_DIR" ]]; then
-        local perms=$(stat -c %a "$CONFIG_DIR" 2>/dev/null)
-        if [[ "$perms" != "700" ]]; then
-            print_warning "Config directory has insecure permissions: $perms"
-            ((issues++))
-        fi
-    fi
-    
-    # Check for world-writable files
-    local world_writable=$(find "$CONFIG_DIR" -perm -002 -type f 2>/dev/null | wc -l)
-    if [[ $world_writable -gt 0 ]]; then
-        print_warning "Found $world_writable world-writable files in config directory"
-        ((issues++))
-    fi
-    
-    # Check for running processes as root
-    local root_processes=$(ps aux | grep -E "backhaul.*root" | grep -v grep | wc -l)
-    if [[ $root_processes -gt 0 ]]; then
-        print_warning "Found $root_processes Backhaul processes running as root"
-        ((issues++))
-    fi
-    
-    if [[ $issues -eq 0 ]]; then
-        print_success "Security validation passed"
-        return 0
-    else
-        print_warning "Security validation found $issues issue(s)"
+    if ! validate_tunnel_name "$tunnel_name"; then
         return 1
     fi
+    
+    return 0
 }
 
-# === PERFORMANCE MONITORING ===
-# Enhanced performance tracking with detailed metrics
-track_performance_enhanced() {
-    local operation="$1"
-    local start_time=$(date +%s.%N)
-    local start_memory=$(free | grep Mem | awk '{print $3}')
-    local start_cpu=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
-    
-    # Execute the operation
-    "$@"
-    local result=$?
-    
-    local end_time=$(date +%s.%N)
-    local end_memory=$(free | grep Mem | awk '{print $3}')
-    local end_cpu=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
-    
-    # Calculate metrics
-    local duration=$(echo "$end_time - $start_time" | bc -l 2>/dev/null || echo "0")
-    local memory_delta=$((end_memory - start_memory))
-    local cpu_delta=$(echo "$end_cpu - $start_cpu" | bc -l 2>/dev/null || echo "0")
-    
-    # Log performance data
-    local performance_data="{\"operation\":\"$operation\",\"duration\":$duration,\"memory_delta\":$memory_delta,\"cpu_delta\":$cpu_delta,\"success\":$([[ $result -eq 0 ]] && echo "true" || echo "false"),\"timestamp\":\"$(date -Iseconds)\"}"
-    echo "$performance_data" >> "$PERFORMANCE_LOG_FILE" 2>/dev/null
-    
-    # Alert on performance issues
-    if [[ $(echo "$duration > 30" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
-        log_warn "Performance alert: $operation took ${duration}s"
-    fi
-    
-    if [[ $memory_delta -gt 100000 ]]; then
-        log_warn "Performance alert: $operation used ${memory_delta}KB of memory"
-    fi
-    
-    return $result
-}
-
-# Performance bottleneck detection
-detect_performance_bottlenecks() {
-    local bottlenecks=()
-    
-    print_info "Analyzing performance bottlenecks..."
-    
-    # Check CPU usage
-    local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
-    if [[ $(echo "$cpu_usage > 90" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
-        bottlenecks+=("High CPU usage: ${cpu_usage}%")
-    fi
-    
-    # Check memory usage
-    local mem_usage=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}')
-    if [[ $(echo "$mem_usage > 95" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
-        bottlenecks+=("High memory usage: ${mem_usage}%")
-    fi
-    
-    # Check disk I/O
-    local disk_io=$(iostat -x 1 1 2>/dev/null | tail -1 | awk '{print $NF}')
-    if [[ -n "$disk_io" && $(echo "$disk_io > 80" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
-        bottlenecks+=("High disk I/O: ${disk_io}%")
-    fi
-    
-    # Check network latency
-    local latency=$(ping -c 3 8.8.8.8 2>/dev/null | tail -1 | awk -F'/' '{print $5}')
-    if [[ -n "$latency" && $(echo "$latency > 100" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
-        bottlenecks+=("High network latency: ${latency}ms")
-    fi
-    
-    # Report findings
-    if [[ ${#bottlenecks[@]} -eq 0 ]]; then
-        print_success "No performance bottlenecks detected"
-        return 0
-    else
-        print_warning "Performance bottlenecks detected:"
-        for bottleneck in "${bottlenecks[@]}"; do
-            echo "  • $bottleneck"
-        done
-        return 1
-    fi
-}
-
-# === ENHANCED LOGGING ===
-# Structured logging with JSON format
-log_structured() {
-    local level="$1"
-    local message="$2"
-    local operation="${3:-}"
-    local tunnel_name="${4:-}"
-    local extra_data="${5:-}"
-    
-    local timestamp=$(date -Iseconds)
-    local structured_log="{\"timestamp\":\"$timestamp\",\"level\":\"$level\",\"message\":\"$message\""
-    
-    if [[ -n "$operation" ]]; then
-        structured_log+=",\"operation\":\"$operation\""
-    fi
-    
-    if [[ -n "$tunnel_name" ]]; then
-        structured_log+=",\"tunnel\":\"$tunnel_name\""
-    fi
-    
-    if [[ -n "$extra_data" ]]; then
-        structured_log+=",\"data\":\"$extra_data\""
-    fi
-    
-    structured_log+="}"
-    
-    echo "$structured_log" >> "$LOG_FILE" 2>/dev/null
-    
-    # Also log to standard format for compatibility
-    log_message "$level" "$message"
-}
-
-# Enhanced log rotation with compression
-setup_enhanced_log_rotation() {
-    local max_size_mb="${1:-10}"
-    local max_files="${2:-5}"
-    
-    print_info "Setting up enhanced log rotation..."
-    
-    # Create log rotation script
-    cat > /tmp/log_rotate.sh << EOF
-#!/bin/bash
-LOG_FILE="$LOG_FILE"
-MAX_SIZE=\$((1024 * 1024 * $max_size_mb))
-MAX_FILES=$max_files
-
-if [[ -f "\$LOG_FILE" ]]; then
-    local size=\$(stat -c %s "\$LOG_FILE" 2>/dev/null || echo "0")
-    if [[ \$size -gt \$MAX_SIZE ]]; then
-        # Rotate logs
-        for ((i=\$MAX_FILES; i>1; i--)); do
-            if [[ -f "\$LOG_FILE.\$((i-1)).gz" ]]; then
-                mv "\$LOG_FILE.\$((i-1)).gz" "\$LOG_FILE.\$i.gz"
-            fi
-        done
-        
-        if [[ -f "\$LOG_FILE" ]]; then
-            mv "\$LOG_FILE" "\$LOG_FILE.1"
-            gzip "\$LOG_FILE.1" 2>/dev/null
-        fi
-        
-        # Create new log file
-        touch "\$LOG_FILE"
-        chmod 600 "\$LOG_FILE"
-    fi
-fi
-EOF
-    
-    chmod +x /tmp/log_rotate.sh
-    
-    # Add to crontab if not already present
-    if ! crontab -l 2>/dev/null | grep -q "log_rotate.sh"; then
-        (crontab -l 2>/dev/null; echo "*/15 * * * * /tmp/log_rotate.sh") | crontab -
-    fi
-    
-    print_success "Enhanced log rotation configured"
-}
-
-# Log analysis and reporting
-analyze_logs() {
-    local days="${1:-7}"
-    local analysis_file="/tmp/log_analysis_$(date +%Y%m%d_%H%M%S).txt"
-    
-    print_info "Analyzing logs for the past $days days..."
-    
-    # Create analysis report
-    cat > "$analysis_file" << EOF
-=== EasyBackhaul Log Analysis Report ===
-Generated: $(date)
-Period: Past $days days
-Log File: $LOG_FILE
-
-EOF
-    
-    # Count log levels
-    echo "=== Log Level Summary ===" >> "$analysis_file"
-    find "$LOG_DIR" -name "*.log*" -mtime -$days -exec cat {} \; 2>/dev/null | \
-        grep -E "^(ERROR|WARN|INFO|DEBUG)" | \
-        awk '{print $1}' | sort | uniq -c | \
-        while read count level; do
-            echo "$level: $count entries" >> "$analysis_file"
-        done
-    
-    # Top error messages
-    echo -e "\n=== Top Error Messages ===" >> "$analysis_file"
-    find "$LOG_DIR" -name "*.log*" -mtime -$days -exec cat {} \; 2>/dev/null | \
-        grep "^ERROR" | cut -d' ' -f4- | sort | uniq -c | sort -nr | head -10 | \
-        while read count message; do
-            echo "$count: $message" >> "$analysis_file"
-        done
-    
-    # Tunnel-specific issues
-    echo -e "\n=== Tunnel-Specific Issues ===" >> "$analysis_file"
-    find "$LOG_DIR" -name "*.log*" -mtime -$days -exec cat {} \; 2>/dev/null | \
-        grep -E "(ERROR|WARN).*tunnel" | cut -d' ' -f4- | sort | uniq -c | sort -nr | head -5 | \
-        while read count message; do
-            echo "$count: $message" >> "$analysis_file"
-        done
-    
-    # Performance issues
-    echo -e "\n=== Performance Issues ===" >> "$analysis_file"
-    find "$LOG_DIR" -name "*.log*" -mtime -$days -exec cat {} \; 2>/dev/null | \
-        grep -E "(performance|slow|timeout)" | cut -d' ' -f4- | sort | uniq -c | sort -nr | head -5 | \
-        while read count message; do
-            echo "$count: $message" >> "$analysis_file"
-        done
-    
-    print_success "Log analysis complete: $analysis_file"
-    echo "Report saved to: $analysis_file"
-}
-
-# --- Unified Status Display Functions ---
+# --- Status Display Functions ---
+# Print status with icon
 print_status_with_icon() {
     local status="$1"
     local message="$2"
     
     case "$status" in
-        "running"|"active"|"success"|"ok")
-            print_success "$message"
+        "running"|"active"|"healthy")
+            print_success "✓ $message"
             ;;
-        "stopped"|"inactive"|"error"|"failed")
-            print_error "$message"
+        "stopped"|"inactive")
+            print_warning "⚠ $message"
             ;;
-        "warning"|"partial")
-            print_warning "$message"
+        "dead"|"failed"|"unhealthy")
+            print_error "✗ $message"
             ;;
         *)
-            print_info "$message"
+            print_info "ℹ $message"
             ;;
     esac
 }
 
+# Print service status
 print_service_status() {
-    local service_name="$1"
+    local service="$1"
     local status="$2"
     
-    if [[ "$status" == "running" || "$status" == "active" ]]; then
-        echo -e " $service_name (\e[32m✓ Running\e[0m)"
-    else
-        echo -e " $service_name (\e[31m✗ Stopped\e[0m)"
-    fi
+    case "$status" in
+        "active")
+            print_status_active "$service"
+            ;;
+        "inactive")
+            print_status_inactive "$service"
+            ;;
+        *)
+            print_info "$service: $status"
+            ;;
+    esac
 }
 
+# Print tunnel status
 print_tunnel_status() {
-    local tunnel_name="$1"
+    local tunnel="$1"
     local status="$2"
     
-    if [[ "$status" == "running" || "$status" == "active" ]]; then
-        print_success "Status: Running"
-    else
-        print_error "Status: Stopped"
-    fi
-} 
+    case "$status" in
+        "running")
+            print_status_running "$tunnel"
+            ;;
+        "stopped")
+            print_status_stopped "$tunnel"
+            ;;
+        "not_started")
+            print_status_not_started "$tunnel"
+            ;;
+        "dead")
+            print_status_dead "$tunnel"
+            ;;
+        *)
+            print_info "$tunnel: $status"
+            ;;
+    esac
+}
+
+# --- Status Print Functions ---
+print_status_running() { print_success "✓ $1: Running"; }
+print_status_stopped() { print_warning "⚠ $1: Stopped"; }
+print_status_not_started() { print_info "ℹ $1: Not Started"; }
+print_status_dead() { print_error "✗ $1: Dead"; }
+print_status_active() { print_success "✓ $1: Active"; }
+print_status_inactive() { print_warning "⚠ $1: Inactive"; }
+print_status_healthy() { print_success "✓ $1: Healthy"; }
+print_status_unhealthy() { print_error "✗ $1: Unhealthy"; }
+print_status_warning() { print_warning "⚠ $1: $2"; }
 # --- MODULE: modules/prereqs.sh ---
 # prereqs.sh
 # Root check and dependency installation logic
@@ -2204,9 +1503,9 @@ verify_binary_installation() {
 }
 
 # Test network connectivity to various sources
-test_network_connectivity() {
+run_network_diagnostics_menu() {
     clear
-    print_submenu_header "Network Connectivity Test"
+    print_secondary_menu_header "Network Connectivity Test"
     
     print_info "Testing connectivity to various sources..."
     echo
@@ -2234,10 +1533,10 @@ test_network_connectivity() {
         
         print_info "Testing $name ($url)..."
         if curl -s --connect-timeout 5 --max-time 10 "$url" >/dev/null 2>&1; then
-            print_success "✓ $name is accessible"
+            print_success "$name is accessible"
             ((accessible_count++))
         else
-            print_error "✗ $name is not accessible"
+            print_error "$name is not accessible"
         fi
     done
     
@@ -2266,7 +1565,7 @@ test_network_connectivity() {
 
 download_backhaul() {
     clear
-    print_menu_header "Backhaul Binary Installation"
+    print_primary_menu_header "Backhaul Binary Installation"
     
     # Show server info banner
     get_server_info
@@ -2345,7 +1644,7 @@ download_backhaul() {
                 return 0
                 ;;
             5) 
-                test_network_connectivity
+                run_network_diagnostics_menu
                 # After testing, ask again
                 download_backhaul
                 return 0
@@ -2426,7 +1725,7 @@ download_from_local_file() {
     local arch="$2"
     
     clear
-    print_submenu_header "Local File Installation"
+    print_secondary_menu_header "Local File Installation"
     
     print_info "Please provide the path to your local Backhaul binary file."
     print_info "Supported formats: .tar.gz, .zip, or direct binary file"
@@ -2510,7 +1809,7 @@ download_from_alternative_source() {
     local arch="$2"
     
     clear
-    print_submenu_header "Alternative Download Source"
+    print_secondary_menu_header "Alternative Download Source"
     
     print_info "Please provide an alternative download URL for the Backhaul binary."
     print_info "The URL should point to a .tar.gz file containing the binary."
@@ -2691,11 +1990,11 @@ configure_tunnel() {
             if [[ "$tunnel_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
                 break
             else
-                print_warning "❌ Invalid tunnel name. Use only letters, numbers, hyphens, and underscores."
+                print_warning "Invalid tunnel name. Use only letters, numbers, hyphens, and underscores."
                 press_any_key
             fi
         else
-            print_warning "❌ Please enter a tunnel name."
+            print_warning "Please enter a tunnel name."
             press_any_key
         fi
     done
@@ -2717,7 +2016,7 @@ configure_tunnel() {
                 return
                 ;;
             *)
-                print_warning "❌ Invalid option. Please enter 1-2 or 0 to cancel."
+                print_warning "Invalid option. Please enter 1-2 or 0 to cancel."
                 press_any_key
                 ;;
         esac
@@ -2744,7 +2043,7 @@ configure_tunnel() {
                 return
                 ;;
             *)
-                print_warning "❌ Invalid option. Please enter 1-4 or 0 to cancel."
+                print_warning "Invalid option. Please enter 1-4 or 0 to cancel."
                 press_any_key
                 ;;
         esac
@@ -2770,11 +2069,11 @@ configure_tunnel() {
                 if [[ "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
                     break
                 else
-                    print_warning "❌ Please enter a valid IP address (e.g., 192.168.1.100)."
+                    print_warning "Please enter a valid IP address (e.g., 192.168.1.100)."
                     press_any_key
                 fi
             else
-                print_warning "❌ Please enter a server IP address."
+                print_warning "Please enter a server IP address."
                 press_any_key
             fi
         done
@@ -2793,7 +2092,7 @@ configure_tunnel() {
             elif [[ -n "$server_port" ]] && [[ "$server_port" =~ ^[0-9]+$ ]] && [[ $server_port -ge 1 ]] && [[ $server_port -le 65535 ]]; then
                 break
             else
-                print_warning "❌ Please enter a valid port number (1-65535)."
+                print_warning "Please enter a valid port number (1-65535)."
                 press_any_key
             fi
         done
@@ -2816,7 +2115,7 @@ configure_tunnel() {
         elif [[ -n "$local_port" ]] && [[ "$local_port" =~ ^[0-9]+$ ]] && [[ $local_port -ge 1 ]] && [[ $local_port -le 65535 ]]; then
             break
         else
-            print_warning "❌ Please enter a valid port number (1-65535)."
+            print_warning "Please enter a valid port number (1-65535)."
             press_any_key
         fi
     done
@@ -2872,14 +2171,14 @@ configure_tunnel() {
     echo -e "$config_content" > "$config_file"
     chmod 600 "$config_file"
     
-    print_success "✅ Configuration created: $config_file"
+    print_success "Configuration created: $config_file"
     
     # Create systemd service
     echo
     print_info "--- Creating System Service ---"
     create_systemd_service "$service_name_suffix" "$config_file"
     
-    print_success "✅ Tunnel configuration completed successfully!"
+    print_success "Tunnel configuration completed successfully!"
     print_info "You can now manage this tunnel from the main menu."
     echo
     print_info "Configuration summary:"
@@ -2971,9 +2270,9 @@ backup_configuration() {
     local backup_file="$backup_dir/backhaul_config_$(date +%Y%m%d_%H%M%S).tar.gz"
     
     if tar -czf "$backup_file" -C "$CONFIG_DIR" . 2>/dev/null; then
-        print_success "✅ Configuration backed up to: $backup_file"
+        print_success "Configuration backed up to: $backup_file"
     else
-        print_error "❌ Failed to create backup"
+        print_error "Failed to create backup"
     fi
 }
 
@@ -2982,13 +2281,13 @@ restore_configuration() {
     
     local backup_dir="$CONFIG_DIR/backups"
     if [ ! -d "$backup_dir" ]; then
-        print_error "❌ No backup directory found"
+        print_error "No backup directory found"
         return 1
     fi
     
     local backup_files=($(ls -t "$backup_dir"/*.tar.gz 2>/dev/null))
     if [ ${#backup_files[@]} -eq 0 ]; then
-        print_error "❌ No backup files found"
+        print_error "No backup files found"
         return 1
     fi
     
@@ -3012,14 +2311,14 @@ restore_configuration() {
             
             if confirm_action "Proceed with restore?" "n"; then
                 if tar -xzf "$selected_backup" -C "$CONFIG_DIR" 2>/dev/null; then
-                    print_success "✅ Configuration restored from: $(basename "$selected_backup")"
+                    print_success "Configuration restored from: $(basename "$selected_backup")"
                 else
-                    print_error "❌ Failed to restore configuration"
+                                          print_error "Failed to restore configuration"
                 fi
             fi
             break
         else
-            print_warning "❌ Invalid selection"
+            print_warning "Invalid selection"
         fi
     done
 }
@@ -3031,9 +2330,9 @@ export_configuration() {
     
     if [ -f "$CONFIG_DIR/config-${tunnel_name}.toml" ]; then
         cp "$CONFIG_DIR/config-${tunnel_name}.toml" "$export_file"
-        print_success "✅ Configuration exported to: $export_file"
+        print_success "Configuration exported to: $export_file"
     else
-        print_error "❌ Invalid configuration for tunnel $tunnel_name"
+        print_error "Invalid configuration for tunnel $tunnel_name"
     fi
 }
 
@@ -3581,14 +2880,14 @@ validate_config_detailed() {
     echo
     print_info "--- Validation Summary ---"
     if [[ $validation_result -eq 0 ]]; then
-        print_success "✓ Configuration is valid"
+        print_success "Configuration is valid"
         if [[ $warnings_found -gt 0 ]]; then
             print_info "Found $warnings_found warning(s) - review recommended"
         else
             print_info "All checks passed successfully"
         fi
     else
-        print_error "✗ Configuration has issues"
+        print_error "Configuration has issues"
         print_info "Found $issues_found error(s) that need attention"
         
         if confirm_action "Would you like to create a backup before attempting fixes?" "y"; then
@@ -3615,7 +2914,11 @@ manage_ufw_add() {
     fi
     if ! ufw status | grep -q "Status: active"; then
         print_warning "UFW is not active."
-        read -p "Do you want to enable UFW and add the required rules? (y/n): " enable_ufw
+        if confirm_action "Do you want to enable UFW and add the required rules?" "n"; then
+        enable_ufw="y"
+    else
+        enable_ufw="n"
+    fi
         if [[ "${enable_ufw,,}" == "y" ]]; then
             # Detect SSH port(s) from sshd_config and listening ports
             local ssh_ports
@@ -3729,7 +3032,7 @@ remove_ufw_rules() {
 ufw_menu() {
     clear
     print_server_info_banner
-    print_menu_header "UFW Firewall Management"
+    print_primary_menu_header "UFW Firewall Management"
     
     # Check UFW status
     local ufw_status=$(ufw status 2>/dev/null | head -n1 | grep -o "Status: .*" | cut -d' ' -f2)
@@ -3751,29 +3054,7 @@ ufw_menu() {
     echo "0. Back to Main Menu"
     echo
     
-    # Help function for UFW menu
-    ufw_menu_help() {
-        clear
-        print_server_info_banner_minimal
-        print_info "================= UFW Firewall Management Help ================="
-        echo
-        echo "UFW (Uncomplicated Firewall) is a frontend for iptables."
-        echo "This menu helps you manage firewall rules for EasyBackhaul tunnels."
-        echo
-        echo "Available options:"
-        echo "  • Enable UFW: Turn on the firewall (requires SSH access)"
-        echo "  • Disable UFW: Turn off the firewall (security risk)"
-        echo "  • Reset UFW Rules: Remove all rules and reset to default"
-        echo "  • View UFW Status: See current firewall status and rules"
-        echo "  • Fix UFW Rules: Remove orphaned rules for deleted tunnels"
-        echo
-        print_info "Note: Enabling UFW may block SSH access if not configured properly."
-        print_info "Make sure you have alternative access before enabling UFW."
-        echo "================================================================"
-        press_any_key
-    }
-    
-    menu_loop 0 5 "?" "ufw_menu_help" "Enter choice [0-5, ? for help]"
+    menu_loop 0 5 "?" "ufw_menu_help" "Select an option [0-5, ? for help]:"
     
     case $choice in
         1) enable_ufw ;;
@@ -3788,7 +3069,7 @@ ufw_menu() {
 
 enable_ufw() {
     clear
-    print_submenu_header_unified "Enable UFW Firewall"
+            print_secondary_menu_header "Enable UFW Firewall"
     
     if [[ "$ufw_active" == "true" ]]; then
         print_warning "UFW is already active"
@@ -3801,7 +3082,11 @@ enable_ufw() {
     print_info "Make sure you have SSH access configured before proceeding."
     echo
     
-    read -p "Proceed? [y/N]: " choice
+            if confirm_action "Proceed?" "n"; then
+            choice="y"
+        else
+            choice="n"
+        fi
     
     if [[ "$choice" =~ ^[Yy]$ ]]; then
         if with_spinner "Enabling UFW" ufw --force enable; then
@@ -3819,7 +3104,7 @@ enable_ufw() {
 
 disable_ufw() {
     clear
-    print_submenu_header_unified "Disable UFW Firewall"
+            print_secondary_menu_header "Disable UFW Firewall"
     
     if [[ "$ufw_active" != "true" ]]; then
         print_warning "UFW is not active"
@@ -3832,7 +3117,11 @@ disable_ufw() {
     print_info "This will make your system more vulnerable to attacks."
     echo
     
-    read -p "Are you sure? [y/N]: " choice
+            if confirm_action "Are you sure?" "n"; then
+            choice="y"
+        else
+            choice="n"
+        fi
     
     if [[ "$choice" =~ ^[Yy]$ ]]; then
         if with_spinner "Disabling UFW" ufw disable; then
@@ -3850,7 +3139,7 @@ disable_ufw() {
 
 reset_ufw() {
     clear
-    print_submenu_header_unified "Reset UFW Rules"
+            print_secondary_menu_header "Reset UFW Rules"
     
     print_warning "WARNING: This will remove ALL UFW rules and reset to default."
     print_info "This action cannot be undone."
@@ -3874,7 +3163,7 @@ reset_ufw() {
 
 view_ufw_status() {
     clear
-    print_submenu_header_unified "UFW Status"
+            print_secondary_menu_header "UFW Status"
     
     if [[ "$ufw_active" != "true" ]]; then
         print_error "UFW is not active - no firewall protection"
@@ -3903,7 +3192,7 @@ view_ufw_status() {
 
 fix_ufw_rules() {
     clear
-    print_submenu_header_unified "Fix UFW Rules"
+            print_secondary_menu_header "Fix UFW Rules"
     
     if [[ "$ufw_active" != "true" ]]; then
         print_warning "UFW is not active - no rules to fix"
@@ -3933,7 +3222,11 @@ fix_ufw_rules() {
             echo "  $rule"
         done
         echo
-        read -p "Remove orphaned rules? [y/N]: " fix_choice
+        if confirm_action "Remove orphaned rules?" "n"; then
+        fix_choice="y"
+    else
+        fix_choice="n"
+    fi
         if [[ "$fix_choice" =~ ^[Yy]$ ]]; then
             # Remove orphaned rules (this is a simplified approach)
             print_info "Removing orphaned rules..."
@@ -3956,7 +3249,11 @@ create_systemd_service() {
 
     if ! command -v systemctl &>/dev/null; then
         print_warning "Systemd is not available on this system."
-        read -p "Do you want to run the tunnel in the foreground instead? (y/n): " fg_run
+        if confirm_action "Do you want to run the tunnel in the foreground instead?" "n"; then
+        fg_run="y"
+    else
+        fg_run="n"
+    fi
         if [[ "${fg_run,,}" == "y" ]]; then
             print_info "Running: $BIN_PATH -c $config_path"
             "$BIN_PATH" -c "$config_path"
@@ -3990,7 +3287,11 @@ EOL
     fi
     if ! systemctl start "backhaul-${name_suffix}.service"; then
         print_error "Failed to start service. Check config and logs with 'journalctl -u backhaul-${name_suffix}.service'."
-        read -p "Show the last 20 lines of the service log? (y/n): " showlog
+        if confirm_action "Show the last 20 lines of the service log?" "y"; then
+        showlog="y"
+    else
+        showlog="n"
+    fi
         if [[ "${showlog,,}" == "y" ]]; then
             journalctl -u "backhaul-${name_suffix}.service" -n 20 --no-pager
         fi
@@ -3998,7 +3299,11 @@ EOL
     fi
     print_success "Service backhaul-${name_suffix}.service created and started."
 
-    read -p "Check service status now? (y/n) [y]: " check_status
+    if confirm_action "Check service status now?" "y"; then
+        check_status="y"
+    else
+        check_status="n"
+    fi
     if [[ "${check_status:-y}" == "y" ]]; then
         systemctl status "backhaul-${name_suffix}.service" --no-pager
     fi
@@ -4048,7 +3353,7 @@ manage_cron_menu() {
         fi
         
         echo
-        print_info "Select an option:"
+        print_info "Select an option [0-9, ? for help]:"
         echo " 1. Set/Update Job: Every 15 Minutes"
         echo " 2. Set/Update Job: Every Hour"
         echo " 3. Set/Update Job: Every 6 Hours"
@@ -4057,7 +3362,7 @@ manage_cron_menu() {
         echo " 6. Remove Existing Cron Job"
         print_menu_footer
         
-        menu_loop 0 6 "?" "cron_menu_help" "Enter choice [0-6, ? for help]"
+        menu_loop 0 6 "?" "cron_menu_help" "Select an option [0-6, ? for help]"
         
         case $choice in
             1) set_cron_job "*/15 * * * *" "$service"; break;;
@@ -4082,7 +3387,7 @@ manage_cron_menu() {
                         set_cron_job "*/$interval * * * *" "$service"
                         break
                     else
-                        print_warning "❌ Invalid interval. Please enter a number between 1 and 1440."
+                        print_warning "Invalid interval. Please enter a number between 1 and 1440."
                         press_any_key
                     fi
                 done
@@ -4099,16 +3404,874 @@ set_cron_job() {
     remove_cron_job "$service"
     local cron_job="$schedule systemctl restart $service # $CRON_COMMENT_TAG"
     (crontab -l 2>/dev/null; echo "$cron_job") | crontab -
-    print_success "✅ Cron job set successfully for $service."
+    print_success "Cron job set successfully for $service."
 }
 
 remove_cron_job() {
     local service=$1
     if crontab -l 2>/dev/null | grep -q "$service"; then
        (crontab -l 2>/dev/null | grep -v "$service") | crontab -
-       print_success "✅ Cron job for $service removed."
+       print_success "Cron job for $service removed."
     else
-       print_warning "⚠ No cron job found for $service."
+               print_warning "No cron job found for $service."
+    fi
+} 
+# --- MODULE: modules/restart_watcher.sh ---
+#!/bin/bash
+# restart_watcher.sh - Per-tunnel coordinated restart watcher for EasyBackhaul
+# This script is intended to be sourced or built into the main script, or run as a systemd service.
+
+# WARNING: This script requires a version of netcat (nc) that supports '-l -p'.
+#          Some distributions (e.g., Debian/Ubuntu) may require installing netcat-openbsd.
+
+# Required environment/config variables (set by main script or systemd):
+#   SERVICE_NAME         - systemd service name (e.g. backhaul-client-xxx.service)
+#   LOG_PATTERN          - regex for error detection (e.g. 'ERROR|FATAL')
+#   REMOTE_HOST          - IP or hostname of the remote side
+#   REMOTE_PORT          - netcat port on remote (default: 45678)
+#   RESTART_SECRET       - shared secret for authentication
+#   RESTART_DELAY_LOCAL  - seconds to wait before local restart (default: 10)
+#   RESTART_DELAY_REMOTE - seconds to wait before remote restart (default: 10)
+#   MAX_RETRIES          - max restart request attempts (default: 3)
+#   ROLE                 - 'client' or 'server' (for logging)
+#   LISTEN_PORT          - local port to listen for restart requests (default: 45678)
+
+# --- Defaults ---
+RESTART_DELAY_LOCAL=${RESTART_DELAY_LOCAL:-10}
+RESTART_DELAY_REMOTE=${RESTART_DELAY_REMOTE:-10}
+MAX_RETRIES=${MAX_RETRIES:-3}
+LISTEN_PORT=${LISTEN_PORT:-45679}
+REMOTE_PORT=${REMOTE_PORT:-45680}
+RESTART_SECRET=${RESTART_SECRET:-$RESTART_WATCHER_SECRET}
+ROLE=${ROLE:-unknown}
+
+# --- Helper: Log ---
+log() { echo "[RestartWatcher][$ROLE][$(date +'%F %T')] $1"; }
+
+# --- Main Entrypoint ---
+restart_watcher_main() {
+    # Set defaults if not provided
+    RESTART_DELAY_LOCAL=${RESTART_DELAY_LOCAL:-10}
+    RESTART_DELAY_REMOTE=${RESTART_DELAY_REMOTE:-10}
+    MAX_RETRIES=${MAX_RETRIES:-3}
+    LISTEN_PORT=${LISTEN_PORT:-45679}
+    REMOTE_PORT=${REMOTE_PORT:-45680}
+    RESTART_SECRET=${RESTART_SECRET:-$RESTART_WATCHER_SECRET}
+    ROLE=${ROLE:-unknown}
+    
+    # Validate required environment variables
+    if [[ -z "$SERVICE_NAME" ]]; then
+        log "ERROR: SERVICE_NAME environment variable is required"
+        exit 1
+    fi
+    
+    if [[ -z "$REMOTE_HOST" || "$REMOTE_HOST" == "0.0.0.0" ]]; then
+        log "ERROR: REMOTE_HOST environment variable is required and cannot be 0.0.0.0"
+        exit 1
+    fi
+    
+    log "Starting restart watcher for service: $SERVICE_NAME"
+    log "Remote host: $REMOTE_HOST:$REMOTE_PORT"
+    log "Listen port: $LISTEN_PORT"
+    log "Role: $ROLE"
+    
+    # Start listener in background
+    restart_listener &
+    LISTENER_PID=$!
+    
+    # Set up signal handlers for clean shutdown
+    trap 'log "Received shutdown signal. Cleaning up..."; kill $LISTENER_PID 2>/dev/null; exit 0' SIGTERM SIGINT
+    
+    # Start log monitor
+    monitor_and_restart
+    
+    # Cleanup
+    kill $LISTENER_PID 2>/dev/null
+}
+
+# --- Function: Listen for restart requests (in background) ---
+restart_listener() {
+    while true; do
+        # Listen for a single line (timeout 60s to allow clean exit)
+        local msg
+        msg=$(nc -l -p "$LISTEN_PORT" -w 60 2>/dev/null)
+        if [[ "$msg" =~ ^RESTART_REQUEST:(.+):(.+)$ ]]; then
+            local secret=${BASH_REMATCH[1]}
+            local sender_role=${BASH_REMATCH[2]}
+            if [[ "$secret" == "$RESTART_SECRET" ]]; then
+                log "Received RESTART_REQUEST from $sender_role. Sending ACK and scheduling restart."
+                # Send ACK back to sender
+                echo "RESTART_ACK:$RESTART_SECRET:$ROLE" | nc "$REMOTE_HOST" "$REMOTE_PORT" -w 2
+                # Schedule restart after delay
+                (sleep "$RESTART_DELAY_REMOTE"; systemctl restart "$SERVICE_NAME"; log "Service restarted (listener)") &
+            else
+                log "Received RESTART_REQUEST with invalid secret. Ignoring."
+            fi
+        elif [[ "$msg" =~ ^RESTART_ACK:(.+):(.+)$ ]]; then
+            # This is an ACK for a request we sent
+            local secret=${BASH_REMATCH[1]}
+            local ack_role=${BASH_REMATCH[2]}
+            if [[ "$secret" == "$RESTART_SECRET" ]]; then
+                log "Received RESTART_ACK from $ack_role."
+                # Touch a file to signal ACK received
+                touch "/tmp/restart_ack_${SERVICE_NAME}"
+            fi
+        fi
+    done
+}
+
+# --- Function: Monitor logs and trigger coordinated restart ---
+monitor_and_restart() {
+    log "Starting log monitor for $SERVICE_NAME (pattern: $LOG_PATTERN)"
+    journalctl -u "$SERVICE_NAME" -f --no-pager | while read -r line; do
+        if [[ "$line" =~ $LOG_PATTERN ]]; then
+            log "Error detected in logs. Initiating coordinated restart."
+            # Try to send restart request and wait for ACK
+            local attempt=1
+            while (( attempt <= MAX_RETRIES )); do
+                log "Sending RESTART_REQUEST to $REMOTE_HOST:$REMOTE_PORT (attempt $attempt)"
+                echo "RESTART_REQUEST:$RESTART_SECRET:$ROLE" | nc "$REMOTE_HOST" "$REMOTE_PORT" -w 2
+                # Wait for ACK (up to 10s)
+                for i in {1..10}; do
+                    if [ -f "/tmp/restart_ack_${SERVICE_NAME}" ]; then
+                        rm -f "/tmp/restart_ack_${SERVICE_NAME}"
+                        log "ACK received. Scheduling local restart in $RESTART_DELAY_LOCAL seconds."
+                        sleep "$RESTART_DELAY_LOCAL"
+                        systemctl restart "$SERVICE_NAME"
+                        log "Service restarted (initiator)"
+                        return
+                    fi
+                    sleep 1
+                done
+                log "No ACK received. Retrying..."
+                ((attempt++))
+            done
+            log "Failed to coordinate restart after $MAX_RETRIES attempts. Local restart only."
+            sleep "$RESTART_DELAY_LOCAL"
+            systemctl restart "$SERVICE_NAME"
+            log "Service restarted (local only)"
+            return
+        fi
+    done
+}
+
+# --- Watcher Management Functions ---
+
+# Enable watcher for a tunnel
+enable_watcher() {
+    local service="$1"
+    local suffix="$2"
+    local config_file="$3"
+    local role remote_host local_ip
+
+    clear
+    print_info "=== Watcher Setup ==="
+    echo
+    print_info "The watcher coordinates restarts between both sides."
+    echo
+    
+    # Determine role for better guidance
+    if grep -q '^\[server\]' "$config_file"; then
+        role="server"
+        print_info "This is a SERVER tunnel"
+        echo
+        read -p "Enter client IP address: " remote_host
+        if [[ -z "$remote_host" ]]; then
+            print_error "Client IP is required."
+            press_any_key
+            return
+        fi
+    else
+        role="client"
+        print_info "This is a CLIENT tunnel"
+        # For client, remote host is the server IP from tunnel config
+        remote_host=$(grep '^remote_addr' "$config_file" | cut -d'"' -f2 | cut -d':' -f1)
+        if [[ -z "$remote_host" ]]; then
+            print_error "Could not find server IP in tunnel config."
+            press_any_key
+            return
+        fi
+        print_info "Server IP: $remote_host"
+        
+        # Get client's own IPv4 IP for server configuration
+        local_ip=$(curl -s -4 ifconfig.me 2>/dev/null || curl -s -4 ipinfo.io/ip 2>/dev/null || echo "unknown")
+        if [[ "$local_ip" != "unknown" ]]; then
+            echo
+            print_info "Your IPv4 address: $local_ip"
+            print_info "Use this IP when configuring the server side watcher."
+        fi
+    fi
+
+    # Simple port setup - server uses higher ports, client uses lower ports
+    echo
+    local listen_port remote_port
+    if [[ "$role" == "server" ]]; then
+        listen_port=45690  # Server receives on higher port
+        remote_port=45680  # Server sends to lower port
+    else
+        listen_port=45680  # Client receives on lower port  
+        remote_port=45690  # Client sends to higher port
+    fi
+    
+    print_info "Checking port availability..."
+    
+    # Check if listen port is available using unified port checking
+    if ! check_port_availability "$listen_port"; then
+        read -p "Enter different receive port: " listen_port
+        if [[ -z "$listen_port" ]]; then
+            print_error "Port is required."
+            press_any_key
+            return 1
+        fi
+        # Re-check the new port
+        if ! check_port_availability "$listen_port"; then
+            print_error "Selected port is also in use."
+            press_any_key
+            return 1
+        fi
+    fi
+    
+    # Check if remote port is available (for local testing)
+    if ! check_port_availability "$remote_port"; then
+        print_warning "Port $remote_port is in use locally. This might cause issues."
+    fi
+    
+    # Check for conflicts with main tunnel ports
+    local tunnel_port
+    tunnel_port=$(grep '^bind_addr\|^remote_addr' "$config_file" | cut -d'"' -f2 | cut -d':' -f2 | head -1)
+    if [[ -n "$tunnel_port" ]]; then
+        if [[ "$listen_port" == "$tunnel_port" || "$remote_port" == "$tunnel_port" ]]; then
+            print_warning "Watcher port ($listen_port or $remote_port) conflicts with tunnel port ($tunnel_port)."
+            print_info "This is not recommended but will work."
+        fi
+    fi
+    
+    # Check for conflicts with other watchers
+    for existing_pid in /tmp/backhaul-watcher-*.pid; do
+        if [[ -f "$existing_pid" ]]; then
+            local existing_suffix=$(basename "$existing_pid" .pid | sed 's/backhaul-watcher-//')
+            if [[ "$existing_suffix" != "$suffix" ]]; then
+                local existing_config="$CONFIG_DIR/config-${existing_suffix}.toml"
+                if [[ -f "$existing_config" ]]; then
+                    local existing_listen=$(grep '^restart_watcher_listen_port' "$existing_config" | awk -F'=' '{print $2}' | tr -d ' "')
+                    local existing_remote=$(grep '^restart_watcher_remote_port' "$existing_config" | awk -F'=' '{print $2}' | tr -d ' "')
+                    if [[ "$listen_port" == "$existing_listen" || "$listen_port" == "$existing_remote" || "$remote_port" == "$existing_listen" || "$remote_port" == "$existing_remote" ]]; then
+                        print_warning "Port conflict detected with existing watcher for tunnel: $existing_suffix"
+                        print_info "This might cause communication issues between watchers."
+                    fi
+                fi
+            fi
+        fi
+    done
+    
+    print_success "Ports are available."
+
+    # Handle watcher secret - must be the same on both sides
+    local secret
+    if [[ "$role" == "server" ]]; then
+        # Server generates or uses existing secret
+        if [[ -f "$CONFIG_DIR/watcher_secret" ]]; then
+            secret=$(cat "$CONFIG_DIR/watcher_secret")
+            print_info "Using existing watcher secret"
+        else
+            # Generate a new secret for this tunnel pair
+            secret=$(openssl rand -hex 16 2>/dev/null || tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
+            echo "$secret" > "$CONFIG_DIR/watcher_secret"
+            chmod 600 "$CONFIG_DIR/watcher_secret"
+            print_info "Generated new watcher secret"
+        fi
+        print_info "Secret: $secret"
+        print_info "Share this secret with the client side."
+    else
+        # Client needs to enter the secret from server
+        echo
+        print_info "You need the watcher secret from the server side."
+        print_info "Ask the server administrator for the watcher secret."
+        echo
+        while true; do
+            read -p "Enter the watcher secret from server: " secret
+            if [[ -n "$secret" ]]; then
+                # Validate secret format (should be hex or alphanumeric)
+                if [[ "$secret" =~ ^[A-Za-z0-9]+$ ]]; then
+                    break
+                else
+                    print_warning "Secret should contain only letters and numbers"
+                fi
+            else
+                print_warning "Secret cannot be empty"
+            fi
+        done
+    fi
+
+    # Add UFW rule for listen port
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+        print_info "--> UFW is active. Adding rule for port ${listen_port}/tcp..."
+        ufw allow ${listen_port}/tcp >/dev/null 2>&1
+        if [[ $? -eq 0 ]]; then
+            print_success "UFW rule added successfully."
+        else
+            print_warning "Failed to add UFW rule. You may need to add it manually."
+        fi
+    fi
+
+    # Create watcher configuration file
+    local watcher_config="/tmp/backhaul-watcher-${suffix}.conf"
+    cat > "$watcher_config" <<EOL
+SERVICE_NAME="$service"
+REMOTE_HOST="$remote_host"
+REMOTE_PORT="$remote_port"
+LISTEN_PORT="$listen_port"
+RESTART_SECRET="$secret"
+ROLE="$role"
+LOG_PATTERN="ERROR|FATAL|connection.*failed|timeout"
+RESTART_DELAY_LOCAL=10
+RESTART_DELAY_REMOTE=10
+MAX_RETRIES=3
+EOL
+
+    # Create simple launcher script that uses the centralized restart watcher
+    local watcher_script="/tmp/backhaul-watcher-${suffix}.sh"
+    cat > "$watcher_script" <<EOL
+#!/bin/bash
+# Watcher launcher for $service
+# This script loads configuration and launches the centralized restart watcher
+
+# Load configuration
+source "/tmp/backhaul-watcher-${suffix}.conf"
+
+# Set up signal handlers for clean shutdown
+trap 'echo "[Watcher][\$ROLE][\$(date +"%F %T")] Received shutdown signal. Cleaning up..."; exit 0' SIGTERM SIGINT
+
+# Launch the centralized restart watcher
+restart_watcher_main
+EOL
+
+    chmod +x "$watcher_script"
+    
+    # Start the watcher in background
+    # Log rotation: keep last 5 logs
+    for i in 5 4 3 2 1; do
+        if [[ -f "/tmp/backhaul-watcher-${suffix}.log.$i" ]]; then
+            mv "/tmp/backhaul-watcher-${suffix}.log.$i" "/tmp/backhaul-watcher-${suffix}.log.$((i+1))"
+        fi
+    done
+    if [[ -f "/tmp/backhaul-watcher-${suffix}.log" ]]; then
+        mv "/tmp/backhaul-watcher-${suffix}.log" "/tmp/backhaul-watcher-${suffix}.log.1"
+    fi
+    nohup "$watcher_script" > "/tmp/backhaul-watcher-${suffix}.log" 2>&1 &
+    local watcher_pid=$!
+    
+    # Wait a moment to ensure process started
+    sleep 1
+    
+    # Verify process is still running before saving PID
+    if kill -0 "$watcher_pid" 2>/dev/null; then
+        # Save PID for later management
+        echo "$watcher_pid" > "/tmp/backhaul-watcher-${suffix}.pid"
+    else
+        print_error "Watcher process failed to start properly"
+        press_any_key
+        return 1
+    fi
+    
+    # Update config file using unified functions
+    update_config_value "$config_file" "restart_watcher_enabled" "y"
+    update_config_numeric "$config_file" "restart_watcher_listen_port" "$listen_port"
+    update_config_numeric "$config_file" "restart_watcher_remote_port" "$remote_port"
+    update_config_value "$config_file" "restart_watcher_secret" "$secret"
+    update_config_numeric "$config_file" "restart_watcher_pid" "$watcher_pid"
+    
+    print_success "Watcher enabled and started."
+    echo
+    print_info "--- Configuration ---"
+    echo "Secret: $secret"
+    echo "Receive port: $listen_port"
+    echo "Send port: $remote_port"
+    echo
+    if [[ "$role" == "server" ]]; then
+        print_info "IMPORTANT: Share this secret with the client side:"
+        print_info "Secret: $secret"
+        echo
+        print_info "The client will need this secret to enable their watcher."
+    elif [[ "$role" == "client" && "$local_ip" != "unknown" ]]; then
+        print_info "Use your IPv4 address ($local_ip) when configuring the server side."
+        print_info "Make sure the server uses the same secret: $secret"
+    fi
+    press_any_key
+}
+
+# Disable watcher for a tunnel
+disable_watcher() {
+    local service="$1"
+    local suffix="$2"
+    local config_file="$3"
+    
+    clear
+    print_info "=== Disable Watcher ==="
+    echo
+    
+    local pid_file="/tmp/backhaul-watcher-${suffix}.pid"
+    local log_file="/tmp/backhaul-watcher-${suffix}.log"
+    local config_file_watcher="/tmp/backhaul-watcher-${suffix}.conf"
+    local script_file="/tmp/backhaul-watcher-${suffix}.sh"
+    
+    if [[ ! -f "$pid_file" ]]; then
+        print_warning "Watcher is not running for this tunnel."
+        press_any_key
+        return
+    fi
+    
+    local pid=$(cat "$pid_file" 2>/dev/null)
+    
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        print_info "Stopping watcher process (PID: $pid)..."
+        kill -TERM "$pid" 2>/dev/null
+        
+        # Wait for graceful shutdown
+        local count=0
+        while kill -0 "$pid" 2>/dev/null && [[ $count -lt 10 ]]; do
+            sleep 1
+            ((count++))
+        done
+        
+        # Force kill if still running
+        if kill -0 "$pid" 2>/dev/null; then
+            print_warning "Force killing watcher process..."
+            kill -KILL "$pid" 2>/dev/null
+        fi
+        
+        print_success "Watcher stopped successfully."
+    else
+        print_warning "Watcher process not found or already stopped."
+    fi
+    
+    # Clean up files
+    rm -f "$pid_file" "$config_file_watcher" "$script_file"
+    
+    # Update config file
+    update_config_value "$config_file" "restart_watcher_enabled" "n"
+    update_config_numeric "$config_file" "restart_watcher_pid" "0"
+    
+    print_success "Watcher disabled and cleaned up."
+    echo
+    print_info "Log file preserved: $log_file"
+    press_any_key
+}
+
+# Edit watcher configuration
+edit_watcher_config() {
+    local service="$1"
+    local suffix="$2"
+    local config_file="$3"
+    
+    clear
+    print_info "=== Edit Watcher Configuration ==="
+    echo
+    
+    local watcher_config="/tmp/backhaul-watcher-${suffix}.conf"
+    
+    if [[ ! -f "$watcher_config" ]]; then
+        print_error "Watcher configuration not found. Enable watcher first."
+        press_any_key
+        return
+    fi
+    
+    # Load current configuration
+    source "$watcher_config"
+    
+    echo "Current configuration:"
+    echo "  Log pattern: $LOG_PATTERN"
+    echo "  Local restart delay: $RESTART_DELAY_LOCAL seconds"
+    echo "  Remote restart delay: $RESTART_DELAY_REMOTE seconds"
+    echo "  Max retries: $MAX_RETRIES"
+    echo "  Listen port: $LISTEN_PORT"
+    echo "  Remote port: $REMOTE_PORT"
+    echo
+    
+    print_info "Options:"
+    echo "  1. Edit log pattern"
+    echo "  2. Edit restart delays"
+    echo "  3. Edit max retries"
+    echo "  4. Edit ports"
+    echo "  0. Back"
+    echo
+    
+    local choice
+    read -p "Select an option [0-4]: " choice
+    
+    case "$choice" in
+        1)
+            echo
+            print_info "Current log pattern: $LOG_PATTERN"
+            print_info "Enter new log pattern (regex for error detection):"
+            read -p "New pattern: " new_pattern
+            if [[ -n "$new_pattern" ]]; then
+                LOG_PATTERN="$new_pattern"
+                print_success "Log pattern updated"
+            fi
+            ;;
+        2)
+            echo
+            print_info "Current delays: Local=$RESTART_DELAY_LOCAL, Remote=$RESTART_DELAY_REMOTE"
+            read -p "Enter local restart delay (seconds): " new_local_delay
+            read -p "Enter remote restart delay (seconds): " new_remote_delay
+            if [[ -n "$new_local_delay" ]] && [[ "$new_local_delay" =~ ^[0-9]+$ ]]; then
+                RESTART_DELAY_LOCAL="$new_local_delay"
+            fi
+            if [[ -n "$new_remote_delay" ]] && [[ "$new_remote_delay" =~ ^[0-9]+$ ]]; then
+                RESTART_DELAY_REMOTE="$new_remote_delay"
+            fi
+            print_success "Restart delays updated"
+            ;;
+        3)
+            echo
+            print_info "Current max retries: $MAX_RETRIES"
+            read -p "Enter new max retries: " new_retries
+            if [[ -n "$new_retries" ]] && [[ "$new_retries" =~ ^[0-9]+$ ]]; then
+                MAX_RETRIES="$new_retries"
+                print_success "Max retries updated"
+            fi
+            ;;
+        4)
+            echo
+            print_info "Current ports: Listen=$LISTEN_PORT, Remote=$REMOTE_PORT"
+            read -p "Enter new listen port: " new_listen_port
+            read -p "Enter new remote port: " new_remote_port
+            if [[ -n "$new_listen_port" ]] && [[ "$new_listen_port" =~ ^[0-9]+$ ]]; then
+                LISTEN_PORT="$new_listen_port"
+            fi
+            if [[ -n "$new_remote_port" ]] && [[ "$new_remote_port" =~ ^[0-9]+$ ]]; then
+                REMOTE_PORT="$new_remote_port"
+            fi
+            print_success "Ports updated"
+            ;;
+        0)
+            return
+            ;;
+        *)
+            print_warning "Invalid option"
+            ;;
+    esac
+    
+    # Save updated configuration
+    cat > "$watcher_config" <<EOL
+SERVICE_NAME="$SERVICE_NAME"
+REMOTE_HOST="$REMOTE_HOST"
+REMOTE_PORT="$REMOTE_PORT"
+LISTEN_PORT="$LISTEN_PORT"
+RESTART_SECRET="$RESTART_SECRET"
+ROLE="$ROLE"
+LOG_PATTERN="$LOG_PATTERN"
+RESTART_DELAY_LOCAL="$RESTART_DELAY_LOCAL"
+RESTART_DELAY_REMOTE="$RESTART_DELAY_REMOTE"
+MAX_RETRIES="$MAX_RETRIES"
+EOL
+    
+    # Update main config file
+    update_config_numeric "$config_file" "restart_watcher_listen_port" "$LISTEN_PORT"
+    update_config_numeric "$config_file" "restart_watcher_remote_port" "$REMOTE_PORT"
+    
+    print_success "Configuration saved. Restart watcher to apply changes."
+    press_any_key
+}
+
+# Test watcher communication
+test_watcher() {
+    local service="$1"
+    local suffix="$2"
+    local config_file="$3"
+    
+    clear
+    print_info "=== Test Watcher Communication ==="
+    echo
+    
+    local watcher_config="/tmp/backhaul-watcher-${suffix}.conf"
+    
+    if [[ ! -f "$watcher_config" ]]; then
+        print_error "Watcher configuration not found. Enable watcher first."
+        press_any_key
+        return
+    fi
+    
+    # Load configuration
+    source "$watcher_config"
+    
+    echo "Testing communication with $REMOTE_HOST:$REMOTE_PORT"
+    echo "Using secret: ${RESTART_SECRET:0:8}..."
+    echo
+    
+    # Test basic connectivity
+    print_info "Testing basic connectivity..."
+    if nc -z "$REMOTE_HOST" "$REMOTE_PORT" 2>/dev/null; then
+        print_success "✓ Port $REMOTE_PORT is reachable on $REMOTE_HOST"
+    else
+        print_error "✗ Cannot reach $REMOTE_HOST:$REMOTE_PORT"
+        print_info "Check firewall rules and ensure remote watcher is running."
+        press_any_key
+        return
+    fi
+    
+    # Test secret authentication
+    print_info "Testing secret authentication..."
+    echo "RESTART_REQUEST:$RESTART_SECRET:$ROLE" | nc "$REMOTE_HOST" "$REMOTE_PORT" -w 5
+    
+    # Wait for ACK
+    local ack_received=false
+    for i in {1..10}; do
+        if [[ -f "/tmp/restart_ack_${SERVICE_NAME}" ]]; then
+            rm -f "/tmp/restart_ack_${SERVICE_NAME}"
+            ack_received=true
+            break
+        fi
+        sleep 1
+    done
+    
+    if [[ "$ack_received" == "true" ]]; then
+        print_success "✓ Secret authentication successful"
+        print_success "✓ Watcher communication working properly"
+    else
+        print_warning "⚠ No ACK received. Possible issues:"
+        print_info "  - Remote watcher not running"
+        print_info "  - Different secret on remote side"
+        print_info "  - Network connectivity issues"
+    fi
+    
+    echo
+    print_info "Test completed."
+    press_any_key
+}
+
+# Show watcher status
+show_watcher_status() {
+    local service="$1"
+    local suffix="$2"
+    local config_file="$3"
+    
+    clear
+    print_info "=== Watcher Status ==="
+    echo
+    
+    local pid_file="/tmp/backhaul-watcher-${suffix}.pid"
+    local watcher_config="/tmp/backhaul-watcher-${suffix}.conf"
+    
+    if [[ ! -f "$pid_file" ]]; then
+        print_warning "Watcher is not running for this tunnel."
+        echo
+        print_info "To enable watcher:"
+        echo "  1. Go to tunnel management"
+        echo "  2. Select 'Manage watcher'"
+        echo "  3. Choose 'Enable watcher'"
+        press_any_key
+        return
+    fi
+    
+    local pid=$(cat "$pid_file" 2>/dev/null)
+    
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        print_success "✓ Watcher is running (PID: $pid)"
+        
+        # Show process info
+        echo
+        print_info "Process information:"
+        ps -p "$pid" -o pid,ppid,cmd,etime --no-headers 2>/dev/null || echo "  Process info unavailable"
+        
+        # Show configuration if available
+        if [[ -f "$watcher_config" ]]; then
+            source "$watcher_config"
+            echo
+            print_info "Configuration:"
+            echo "  Service: $SERVICE_NAME"
+            echo "  Remote host: $REMOTE_HOST"
+            echo "  Remote port: $REMOTE_PORT"
+            echo "  Listen port: $LISTEN_PORT"
+            echo "  Role: $ROLE"
+            echo "  Log pattern: $LOG_PATTERN"
+            echo "  Local delay: $RESTART_DELAY_LOCAL seconds"
+            echo "  Remote delay: $RESTART_DELAY_REMOTE seconds"
+            echo "  Max retries: $MAX_RETRIES"
+        fi
+        
+        # Show recent log entries
+        local log_file="/tmp/backhaul-watcher-${suffix}.log"
+        if [[ -f "$log_file" ]]; then
+            echo
+            print_info "Recent log entries:"
+            tail -10 "$log_file" | sed 's/^/  /'
+        fi
+        
+    else
+        print_error "✗ Watcher process not found or not responding"
+        print_info "The PID file exists but the process is not running."
+        print_info "This might indicate a crash or improper shutdown."
+    fi
+    
+    echo
+    press_any_key
+}
+
+# Show watcher logs
+show_watcher_logs() {
+    local service="$1"
+    local suffix="$2"
+    local config_file="$3"
+    
+    clear
+    print_info "=== Watcher Logs ==="
+    echo
+    
+    local log_file="/tmp/backhaul-watcher-${suffix}.log"
+    
+    if [[ ! -f "$log_file" ]]; then
+        print_warning "No log file found for this watcher."
+        press_any_key
+        return
+    fi
+    
+    print_info "Log file: $log_file"
+    echo "Press 'q' to exit, 'f' to follow, 'r' to refresh"
+    echo
+    
+    while true; do
+        # Show last 20 lines
+        tail -20 "$log_file" 2>/dev/null || echo "No log content available"
+        echo
+        echo "Options: [q]uit [f]ollow [r]efresh [c]lear"
+        read -p "Select option: " log_choice
+        
+        case "$log_choice" in
+            q|Q)
+                break
+                ;;
+            f|F)
+                clear
+                print_info "Following logs (Ctrl+C to stop)..."
+                tail -f "$log_file"
+                break
+                ;;
+            r|R)
+                clear
+                print_info "=== Watcher Logs (Refreshed) ==="
+                echo
+                ;;
+            c|C)
+                if confirm_action "Clear log file?" "n"; then
+                    > "$log_file"
+                    print_success "Log file cleared"
+                fi
+                ;;
+            *)
+                print_warning "Invalid option"
+                ;;
+        esac
+    done
+}
+
+# Show and manage watcher secret
+show_watcher_secret() {
+    local config_file="$1"
+    local secret
+    
+    clear
+    print_secondary_menu_header "Watcher Secret Management" "Tunnel Configuration"
+    
+    # Try to get secret from config file first
+    if [[ -f "$config_file" ]]; then
+        secret=$(grep '^restart_watcher_secret' "$config_file" | cut -d'"' -f2)
+    fi
+    
+    # If not in config, try global secret file
+    if [[ -z "$secret" ]] && [[ -f "$CONFIG_DIR/watcher_secret" ]]; then
+        secret=$(cat "$CONFIG_DIR/watcher_secret")
+    fi
+    
+    if [[ -n "$secret" ]]; then
+        print_success "Current watcher secret:"
+        echo "  $secret"
+        echo
+        print_info "This secret must be shared between client and server."
+        print_info "Both sides must use the same secret for coordination."
+        echo
+        print_info "Options:"
+        echo "  1. Copy secret to clipboard (if available)"
+        echo "  2. Generate new secret"
+        echo "  3. Enter secret manually"
+        echo "  0. Back"
+        echo
+        
+        local choice
+        read -p "Select an option [0-3]: " choice
+        
+        case "$choice" in
+            1)
+                if command -v xclip >/dev/null 2>&1; then
+                    echo "$secret" | xclip -selection clipboard
+                    print_success "Secret copied to clipboard"
+                elif command -v pbcopy >/dev/null 2>&1; then
+                    echo "$secret" | pbcopy
+                    print_success "Secret copied to clipboard"
+                else
+                    print_warning "Clipboard not available. Copy manually:"
+                    echo "$secret"
+                fi
+                press_any_key
+                ;;
+            2)
+                if confirm_action "Generate new secret? This will break existing watcher coordination." "n"; then
+                    local new_secret
+                    new_secret=$(openssl rand -hex 16 2>/dev/null || tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
+                    echo "$new_secret" > "$CONFIG_DIR/watcher_secret"
+                    chmod 600 "$CONFIG_DIR/watcher_secret"
+                    if [[ -f "$config_file" ]]; then
+                        update_config_value "$config_file" "restart_watcher_secret" "$new_secret"
+                    fi
+                    print_success "New secret generated: $new_secret"
+                    print_warning "You must update the secret on the other side as well."
+                fi
+                press_any_key
+                ;;
+            3)
+                print_info "Enter the new secret (letters and numbers only):"
+                read -p "New secret: " new_secret
+                if [[ -n "$new_secret" ]] && [[ "$new_secret" =~ ^[A-Za-z0-9]+$ ]]; then
+                    echo "$new_secret" > "$CONFIG_DIR/watcher_secret"
+                    chmod 600 "$CONFIG_DIR/watcher_secret"
+                    if [[ -f "$config_file" ]]; then
+                        update_config_value "$config_file" "restart_watcher_secret" "$new_secret"
+                    fi
+                    print_success "Secret updated successfully"
+                else
+                    print_error "Invalid secret format"
+                fi
+                press_any_key
+                ;;
+            0)
+                return
+                ;;
+            *)
+                print_warning "Invalid option"
+                press_any_key
+                ;;
+        esac
+    else
+        print_warning "No watcher secret found"
+        echo
+        print_info "To enable watcher coordination, you need to:"
+        echo "  1. Generate a secret on the server side"
+        echo "  2. Share that secret with the client side"
+        echo "  3. Both sides must use the same secret"
+        echo
+        if confirm_action "Generate a new secret now?" "y"; then
+            local new_secret
+            new_secret=$(openssl rand -hex 16 2>/dev/null || tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
+            echo "$new_secret" > "$CONFIG_DIR/watcher_secret"
+            chmod 600 "$CONFIG_DIR/watcher_secret"
+            if [[ -f "$config_file" ]]; then
+                update_config_value "$config_file" "restart_watcher_secret" "$new_secret"
+            fi
+            print_success "New secret generated: $new_secret"
+            print_info "Share this secret with the other side."
+        fi
+        press_any_key
     fi
 } 
 # --- MODULE: modules/tunnel_mgmt.sh ---
@@ -4149,7 +4312,7 @@ manage_tunnels() {
         mapfile -t services < <(systemctl list-unit-files --type=service 'backhaul-*.service' --no-legend | awk '{print $1}' | grep -v 'backhaul-watcher-')
 
         if [[ ${#services[@]} -eq 0 ]]; then
-            print_warning "⚠ No Backhaul tunnels found. Use 'Configure a New Tunnel' first."
+            print_warning "No Backhaul tunnels found. Use 'Configure a New Tunnel' first."
             press_any_key
             return
         fi
@@ -4266,7 +4429,7 @@ manage_specific_tunnel() {
         echo " 0. Back"
         echo
         
-        menu_loop 0 13 "?" "tunnel_management_help" "Enter choice [0-13, ? for help]"
+        menu_loop 0 13 "?" "tunnel_management_help" "Select an option [0-13, ? for help]"
         case $choice in
             1) 
                 with_spinner "Starting tunnel" systemctl start "$service"
@@ -4563,9 +4726,10 @@ manage_watcher_submenu() {
         echo "4. Show watcher status"
         echo "5. Show watcher logs"
         echo "6. Test watcher (send/receive signal)"
+        echo "7. Show watcher secret"
         echo "?. Help"
         echo "0. Back"
-        read -p "Select [0-6, ? for help]: " wopt
+        read -p "Select [0-7, ? for help]: " wopt
         case $wopt in
             1) enable_watcher "$service" "$suffix" "$config_file" ;;
             2) disable_watcher "$service" "$suffix" "$config_file" ;;
@@ -4573,6 +4737,7 @@ manage_watcher_submenu() {
             4) show_watcher_status "$service" "$suffix" "$config_file" ;;
             5) show_watcher_logs "$service" "$suffix" "$config_file" ;;
             6) test_watcher "$service" "$suffix" "$config_file" ;;
+            7) show_watcher_secret "$config_file" ;;
             \?) watcher_submenu_help ;;
             0) return ;;
             *) print_warning "Invalid option."; press_any_key ;;
@@ -4580,728 +4745,33 @@ manage_watcher_submenu() {
     done
 }
 
-enable_watcher() {
-    local service="$1"
-    local suffix="$2"
-    local config_file="$3"
-    local role remote_host local_ip
-
-    clear
-    print_info "=== Watcher Setup ==="
-    echo
-    print_info "The watcher coordinates restarts between both sides."
-    echo
-    
-    # Determine role for better guidance
-    if grep -q '^\[server\]' "$config_file"; then
-        role="server"
-        print_info "This is a SERVER tunnel"
-        echo
-        read -p "Enter client IP address: " remote_host
-        if [[ -z "$remote_host" ]]; then
-            print_error "Client IP is required."
-            press_any_key
-            return
-        fi
-    else
-        role="client"
-        print_info "This is a CLIENT tunnel"
-        # For client, remote host is the server IP from tunnel config
-        remote_host=$(grep '^remote_addr' "$config_file" | cut -d'"' -f2 | cut -d':' -f1)
-        if [[ -z "$remote_host" ]]; then
-            print_error "Could not find server IP in tunnel config."
-            press_any_key
-            return
-        fi
-        print_info "Server IP: $remote_host"
-        
-        # Get client's own IPv4 IP for server configuration
-        local_ip=$(curl -s -4 ifconfig.me 2>/dev/null || curl -s -4 ipinfo.io/ip 2>/dev/null || echo "unknown")
-        if [[ "$local_ip" != "unknown" ]]; then
-            echo
-            print_info "Your IPv4 address: $local_ip"
-            print_info "Use this IP when configuring the server side watcher."
-        fi
-    fi
-
-    # Simple port setup - server uses higher ports, client uses lower ports
-    echo
-    local listen_port remote_port
-    if [[ "$role" == "server" ]]; then
-        listen_port=45690  # Server receives on higher port
-        remote_port=45680  # Server sends to lower port
-    else
-        listen_port=45680  # Client receives on lower port  
-        remote_port=45690  # Client sends to higher port
-    fi
-    
-    print_info "Checking port availability..."
-    
-    # Check if listen port is available using unified port checking
-    if ! check_port_availability "$listen_port"; then
-        read -p "Enter different receive port: " listen_port
-        if [[ -z "$listen_port" ]]; then
-            print_error "Port is required."
-            press_any_key
-            return 1
-        fi
-        # Re-check the new port
-        if ! check_port_availability "$listen_port"; then
-            print_error "Selected port is also in use."
-            press_any_key
-            return 1
-        fi
-    fi
-    
-    # Check if remote port is available (for local testing)
-    if ! check_port_availability "$remote_port"; then
-        print_warning "Port $remote_port is in use locally. This might cause issues."
-    fi
-    
-    # Check for conflicts with main tunnel ports
-    local tunnel_port
-    tunnel_port=$(grep '^bind_addr\|^remote_addr' "$config_file" | cut -d'"' -f2 | cut -d':' -f2 | head -1)
-    if [[ -n "$tunnel_port" ]]; then
-        if [[ "$listen_port" == "$tunnel_port" || "$remote_port" == "$tunnel_port" ]]; then
-            print_warning "Watcher port ($listen_port or $remote_port) conflicts with tunnel port ($tunnel_port)."
-            print_info "This is not recommended but will work."
-        fi
-    fi
-    
-    # Check for conflicts with other watchers
-    for existing_pid in /tmp/backhaul-watcher-*.pid; do
-        if [[ -f "$existing_pid" ]]; then
-            local existing_suffix=$(basename "$existing_pid" .pid | sed 's/backhaul-watcher-//')
-            if [[ "$existing_suffix" != "$suffix" ]]; then
-                local existing_config="$CONFIG_DIR/config-${existing_suffix}.toml"
-                if [[ -f "$existing_config" ]]; then
-                    local existing_listen=$(grep '^restart_watcher_listen_port' "$existing_config" | awk -F'=' '{print $2}' | tr -d ' "')
-                    local existing_remote=$(grep '^restart_watcher_remote_port' "$existing_config" | awk -F'=' '{print $2}' | tr -d ' "')
-                    if [[ "$listen_port" == "$existing_listen" || "$listen_port" == "$existing_remote" || "$remote_port" == "$existing_listen" || "$remote_port" == "$existing_remote" ]]; then
-                        print_warning "Port conflict detected with existing watcher for tunnel: $existing_suffix"
-                        print_info "This might cause communication issues between watchers."
-                    fi
-                fi
-            fi
-        fi
-    done
-    
-    print_success "Ports are available."
-
-    # Use default secret
-    local secret="backhaul-watcher-naxon"
-
-    # Add UFW rule for listen port
-    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-        print_info "--> UFW is active. Adding rule for port ${listen_port}/tcp..."
-        ufw allow ${listen_port}/tcp >/dev/null 2>&1
-        if [[ $? -eq 0 ]]; then
-            print_success "UFW rule added successfully."
-        else
-            print_warning "Failed to add UFW rule. You may need to add it manually."
-        fi
-    fi
-
-    # Create simple background watcher script with proper signal handling
-    local watcher_script="/tmp/backhaul-watcher-${suffix}.sh"
-    cat > "$watcher_script" <<EOL
-#!/bin/bash
-# Simple watcher for $service
-# This script runs in background and coordinates restarts
-
-SERVICE_NAME="$service"
-REMOTE_HOST="$remote_host"
-REMOTE_PORT="$remote_port"
-LISTEN_PORT="$listen_port"
-SECRET="$secret"
-ROLE="$role"
-
-log() { echo "[Watcher][\$ROLE][\$(date +'%F %T')] \$1"; }
-
-# Global variables for cleanup
-LISTENER_PID=""
-JOURNAL_PID=""
-
-# Cleanup function
-cleanup() {
-    log "Cleaning up watcher processes..."
-    
-    # Kill listener process
-    if [[ -n "\$LISTENER_PID" ]]; then
-        kill "\$LISTENER_PID" 2>/dev/null
-        # Wait for graceful termination
-        local count=0
-        while kill -0 "\$LISTENER_PID" 2>/dev/null && [[ \$count -lt 3 ]]; do
-            sleep 1
-            ((count++))
-        done
-        # Force kill if still running
-        if kill -0 "\$LISTENER_PID" 2>/dev/null; then
-            kill -9 "\$LISTENER_PID" 2>/dev/null
-        fi
-    fi
-    
-    # Kill journalctl process
-    if [[ -n "\$JOURNAL_PID" ]]; then
-        kill "\$JOURNAL_PID" 2>/dev/null
-        # Wait for graceful termination
-        local count=0
-        while kill -0 "\$JOURNAL_PID" 2>/dev/null && [[ \$count -lt 3 ]]; do
-            sleep 1
-            ((count++))
-        done
-        # Force kill if still running
-        if kill -0 "\$JOURNAL_PID" 2>/dev/null; then
-            kill -9 "\$JOURNAL_PID" 2>/dev/null
-        fi
-    fi
-    
-    # Clean up temporary files
-    rm -f "/tmp/restart_ack_\${SERVICE_NAME}"
-    
-    log "Cleanup completed"
-    exit 0
-}
-
-# Set up signal handlers
-trap cleanup SIGTERM SIGINT SIGQUIT
-
-# Function to send restart request and wait for ACK
-send_restart_request() {
-    log "Sending restart request to \$REMOTE_HOST:\$REMOTE_PORT"
-    echo "RESTART_REQUEST:\$SECRET:\$ROLE" | nc "\$REMOTE_HOST" "\$REMOTE_PORT" -w 2 2>/dev/null
-    
-    # Wait for ACK (up to 10 seconds)
-    log "Waiting for ACK from remote side..."
-    for i in {1..10}; do
-        # Check for ACK file (created by listener)
-        if [[ -f "/tmp/restart_ack_\${SERVICE_NAME}" ]]; then
-            rm -f "/tmp/restart_ack_\${SERVICE_NAME}"
-            log "ACK received. Coordinated restart will proceed."
-            return 0
-        fi
-        sleep 1
-    done
-    log "No ACK received. Proceeding with local restart only."
-    return 1
-}
-
-# Function to listen for restart requests
-listen_for_requests() {
-    while true; do
-        # Use timeout to prevent hanging
-        msg=\$(timeout 30 nc -l -p "\$LISTEN_PORT" 2>/dev/null)
-        if [[ "\$msg" =~ ^RESTART_REQUEST:\$SECRET: ]]; then
-            local sender_role=\${msg##*:}
-            log "Received restart request from \$sender_role. Sending ACK and restarting service."
-            
-            # Send ACK back to sender
-            echo "RESTART_ACK:\$SECRET:\$ROLE" | nc "\$REMOTE_HOST" "\$REMOTE_PORT" -w 2 2>/dev/null
-            
-            # Create ACK file for local coordination
-            touch "/tmp/restart_ack_\${SERVICE_NAME}"
-            
-            # Wait a bit then restart
-            sleep 5
-            if systemctl list-unit-files | grep -q "\$SERVICE_NAME"; then
-                systemctl restart "\$SERVICE_NAME"
-                log "Service restarted (coordinated)"
-            else
-                log "ERROR: Service \$SERVICE_NAME not found"
-            fi
-        elif [[ "\$msg" =~ ^RESTART_ACK:\$SECRET: ]]; then
-            # This is an ACK for a request we sent
-            local ack_role=\${msg##*:}
-            log "Received ACK from \$ack_role"
-            # Create ACK file for coordination
-            touch "/tmp/restart_ack_\${SERVICE_NAME}"
-        fi
-        # Small sleep to prevent CPU hogging
-        sleep 1
-    done
-}
-
-# Start listener in background
-listen_for_requests &
-LISTENER_PID=\$!
-
-# Monitor service logs for errors (with resource limits)
-log "Starting watcher for \$SERVICE_NAME"
-# Use timeout and limit log lines to prevent resource exhaustion
-timeout 3600 journalctl -u "\$SERVICE_NAME" -f --no-pager --lines=100 | while read -r line; do
-    if [[ "\$line" =~ ERROR|FATAL ]]; then
-        log "Error detected. Initiating coordinated restart."
-        
-        # Try coordinated restart first
-        if send_restart_request; then
-            # ACK received, wait for coordination
-            sleep 5
-            if systemctl list-unit-files | grep -q "\$SERVICE_NAME"; then
-                systemctl restart "\$SERVICE_NAME"
-                log "Service restarted (coordinated)"
-            else
-                log "ERROR: Service \$SERVICE_NAME not found"
-            fi
-        else
-            # No ACK, restart locally only
-            sleep 5
-            if systemctl list-unit-files | grep -q "\$SERVICE_NAME"; then
-                systemctl restart "\$SERVICE_NAME"
-                log "Service restarted (local only)"
-            else
-                log "ERROR: Service \$SERVICE_NAME not found"
-            fi
-        fi
-        break
-    fi
-done &
-JOURNAL_PID=\$!
-
-# Wait for either process to exit
-wait
-EOL
-
-    chmod +x "$watcher_script"
-    
-    # Start the watcher in background
-    # Log rotation: keep last 5 logs
-    for i in 5 4 3 2 1; do
-        if [[ -f "/tmp/backhaul-watcher-${suffix}.log.$i" ]]; then
-            mv "/tmp/backhaul-watcher-${suffix}.log.$i" "/tmp/backhaul-watcher-${suffix}.log.$((i+1))"
-        fi
-    done
-    if [[ -f "/tmp/backhaul-watcher-${suffix}.log" ]]; then
-        mv "/tmp/backhaul-watcher-${suffix}.log" "/tmp/backhaul-watcher-${suffix}.log.1"
-    fi
-    nohup "$watcher_script" > "/tmp/backhaul-watcher-${suffix}.log" 2>&1 &
-    local watcher_pid=$!
-    
-    # Wait a moment to ensure process started
-    sleep 1
-    
-    # Verify process is still running before saving PID
-    if kill -0 "$watcher_pid" 2>/dev/null; then
-        # Save PID for later management
-        echo "$watcher_pid" > "/tmp/backhaul-watcher-${suffix}.pid"
-    else
-        print_error "Watcher process failed to start properly"
-        press_any_key
-        return 1
-    fi
-    
-    # Update config file using unified functions
-    update_config_value "$config_file" "restart_watcher_enabled" "y"
-    update_config_numeric "$config_file" "restart_watcher_listen_port" "$listen_port"
-    update_config_numeric "$config_file" "restart_watcher_remote_port" "$remote_port"
-    update_config_value "$config_file" "restart_watcher_secret" "$secret"
-    update_config_numeric "$config_file" "restart_watcher_pid" "$watcher_pid"
-    
-    print_success "Watcher enabled and started."
-    echo
-    print_info "--- Configuration ---"
-    echo "Secret: $secret"
-    echo "Receive port: $listen_port"
-    echo "Send port: $remote_port"
-    echo
-    if [[ "$role" == "client" && "$local_ip" != "unknown" ]]; then
-        print_info "Use your IPv4 address ($local_ip) when configuring the server side."
-    fi
-    press_any_key
-}
-
-disable_watcher() {
-    local service="$1"
-    local suffix="$2"
-    local config_file="$3"
-    local watcher_script="/tmp/backhaul-watcher-${suffix}.sh"
-    local watcher_pid_file="/tmp/backhaul-watcher-${suffix}.pid"
-    local watcher_log="/tmp/backhaul-watcher-${suffix}.log"
-    
-    # Stop background process with proper cleanup
-    if [[ -f "$watcher_pid_file" ]]; then
-        local watcher_pid=$(cat "$watcher_pid_file")
-        if [[ -n "$watcher_pid" ]]; then
-            print_info "Stopping watcher process (PID: $watcher_pid)..."
-            
-            # Try graceful termination first
-            kill "$watcher_pid" 2>/dev/null
-            
-            # Wait up to 5 seconds for graceful shutdown
-            local count=0
-            while kill -0 "$watcher_pid" 2>/dev/null && [[ $count -lt 5 ]]; do
-                sleep 1
-                ((count++))
-            done
-            
-            # If still running, force kill
-            if kill -0 "$watcher_pid" 2>/dev/null; then
-                print_warning "Process not responding to SIGTERM, forcing termination..."
-                kill -9 "$watcher_pid" 2>/dev/null
-                sleep 1
-            fi
-            
-            # Verify process is dead
-            if kill -0 "$watcher_pid" 2>/dev/null; then
-                print_error "Failed to terminate watcher process (PID: $watcher_pid)"
-            else
-                print_success "Watcher process terminated successfully"
-            fi
-            
-            rm -f "$watcher_pid_file"
-        fi
-    fi
-    
-    # Kill any remaining child processes of the watcher
-    pkill -f "backhaul-watcher-${suffix}" 2>/dev/null
-    
-    # Remove watcher script
-    if [[ -f "$watcher_script" ]]; then
-        rm -f "$watcher_script"
-        print_info "Removed watcher script"
-    fi
-    
-    # Remove watcher log
-    if [[ -f "$watcher_log" ]]; then
-        rm -f "$watcher_log"
-        print_info "Removed watcher log"
-    fi
-    
-    # Remove any temporary ACK files
-    rm -f "/tmp/restart_ack_${service}"
-    
-    # Remove UFW rule for listen port (if present in config)
-    local listen_port
-    listen_port=$(grep '^restart_watcher_listen_port' "$config_file" | awk -F'=' '{print $2}' | tr -d ' "')
-    if [ -n "$listen_port" ]; then
-        manage_ufw_delete "${suffix}-watcher"
-    fi
-    
-    # Update config file
-    sed -i '/^restart_watcher_enabled/d' "$config_file"
-    sed -i '/^restart_watcher_pid/d' "$config_file"
-    echo "restart_watcher_enabled = \"n\"" >> "$config_file"
-    print_success "Watcher disabled and all processes removed."
-    press_any_key
-}
-
-edit_watcher_config() {
-    local service="$1"
-    local suffix="$2"
-    local config_file="$3"
-    local role remote_host remote_port listen_port secret
-    
-    # Determine role and extract config
-    if grep -q '^\[server\]' "$config_file"; then
-        role="server"
-        print_info "This is a SERVER tunnel"
-    else
-        role="client"
-        print_info "This is a CLIENT tunnel"
-    fi
-    
-    remote_host=$(grep '^remote_addr' "$config_file" | cut -d'"' -f2 | cut -d':' -f1)
-    remote_port=$(grep '^restart_watcher_remote_port' "$config_file" | awk -F'=' '{print $2}' | tr -d ' "')
-    listen_port=$(grep '^restart_watcher_listen_port' "$config_file" | awk -F'=' '{print $2}' | tr -d ' "')
-    secret=$(grep '^restart_watcher_secret' "$config_file" | cut -d'"' -f2)
-    remote_port=${remote_port:-45680}
-    listen_port=${listen_port:-45679}
-    secret=${secret:-$RESTART_WATCHER_SECRET}
-
-    clear
-    print_info "=== Watcher Configuration ==="
-    echo
-    
-    echo
-    print_info "The watcher helps both sides restart together when there are problems."
-    echo
-    
-    # Show current secret
-    if [[ -n "$secret" ]]; then
-        print_info "Current secret: $secret"
-        echo "Copy this to the other side."
-        echo
-    else
-        print_info "No secret configured yet."
-        echo
-    fi
-    
-    # Port configuration with role-based defaults
-    print_info "--- Ports ---"
-    
-    local default_listen_port default_remote_port
-    if [[ "$role" == "server" ]]; then
-        default_listen_port=45690
-        default_remote_port=45680
-        # Get remote host from config or ask user
-        remote_host=$(grep '^restart_watcher_remote_host' "$config_file" | cut -d'"' -f2 2>/dev/null)
-        if [[ -z "$remote_host" ]]; then
-            read -p "Enter client IP address: " remote_host
-        fi
-    else
-        default_listen_port=45680
-        default_remote_port=45690
-        # Get remote host from tunnel config
-        remote_host=$(grep '^remote_addr' "$config_file" | cut -d'"' -f2 | cut -d':' -f1)
-    fi
-    
-    # Use unified default value handling
-    echo "Current receive port: ${listen_port:-$default_listen_port}"
-    while true; do
-        read -p "Port for receiving messages [${listen_port:-$default_listen_port}]: " new_listen_port
-        new_listen_port=$(get_default_value "$new_listen_port" "${listen_port:-$default_listen_port}")
-        if ! validate_port "$new_listen_port"; then
-            print_warning "Invalid port number. Please enter a value between 1 and 65535."
-            continue
-        fi
-        break
-    done
-    echo "Current send port: ${remote_port:-$default_remote_port}"
-    while true; do
-        read -p "Port for sending messages [${remote_port:-$default_remote_port}]: " new_remote_port
-        new_remote_port=$(get_default_value "$new_remote_port" "${remote_port:-$default_remote_port}")
-        if ! validate_port "$new_remote_port"; then
-            print_warning "Invalid port number. Please enter a value between 1 and 65535."
-            continue
-        fi
-        break
-    done
-    
-    # Validate ports are different
-    if [[ "$new_listen_port" == "$new_remote_port" ]]; then
-        print_error "Receive and send ports must be different!"
-        press_any_key
-        return
-    fi
-
-    # Secret configuration
-    echo
-    print_info "--- Secret ---"
-    if [[ -n "$secret" ]]; then
-        if confirm_action "Keep current secret?" "y"; then
-            new_secret="$secret"
-        else
-            new_secret="backhaul-watcher-naxon"
-            print_info "New secret: $new_secret"
-        fi
-    else
-        new_secret="backhaul-watcher-naxon"
-        print_info "Generated secret: $new_secret"
-    fi
-
-    # Update config file
-        sed -i '/^restart_watcher_secret/d' "$config_file"
-        sed -i '/^restart_watcher_listen_port/d' "$config_file"
-        sed -i '/^restart_watcher_remote_port/d' "$config_file"
-    sed -i '/^restart_watcher_pid/d' "$config_file"
-        echo "restart_watcher_secret = \"$new_secret\"" >> "$config_file"
-        echo "restart_watcher_listen_port = $new_listen_port" >> "$config_file"
-        echo "restart_watcher_remote_port = $new_remote_port" >> "$config_file"
-    echo "restart_watcher_pid = $watcher_pid" >> "$config_file"
-    
-        print_success "Watcher config updated."
-    press_any_key
-}
-
-test_watcher() {
-    local service="$1"
-    local suffix="$2"
-    local config_file="$3"
-    local role remote_host remote_port listen_port secret
-    
-    # Determine role and extract config
-    if grep -q '^\[server\]' "$config_file"; then
-        role="server"
-        # For server, we need to get the client IP from the user since it's not in config
-        print_info "This is a SERVER tunnel. You need to provide the client IP for testing."
-        read -p "Enter client IP address for testing: " remote_host
-        if [[ -z "$remote_host" ]]; then
-            print_error "Client IP is required for testing."
-            press_any_key
-            return
-        fi
-    else
-        role="client"
-        remote_host=$(grep '^remote_addr' "$config_file" | cut -d'"' -f2 | cut -d':' -f1)
-        if [[ -z "$remote_host" ]]; then
-            print_error "Could not determine remote host from config."
-            press_any_key
-            return
-        fi
-    fi
-    
-    remote_port=$(grep '^restart_watcher_remote_port' "$config_file" | awk -F'=' '{print $2}' | tr -d ' "')
-    listen_port=$(grep '^restart_watcher_listen_port' "$config_file" | awk -F'=' '{print $2}' | tr -d ' "')
-    secret=$(grep '^restart_watcher_secret' "$config_file" | cut -d'"' -f2)
-    remote_port=${remote_port:-45680}
-    listen_port=${listen_port:-45679}
-    secret=${secret:-backhaul-watcher-naxon}
-
-    clear
-    print_info "--- Watcher Test ---"
-    echo "Remote host: $remote_host"
-    echo "Remote port: $remote_port"
-    echo "Listen port: $listen_port"
-    echo "Role: $role"
-    echo
-    echo "1. Send test restart signal to remote"
-    echo "2. Listen for test restart signal (manual receive)"
-    echo "0. Back"
-    read -p "Select [0-2]: " testopt
-    case $testopt in
-        1)
-            print_info "Sending test RESTART_REQUEST to $remote_host:$remote_port ..."
-            echo "RESTART_REQUEST:$secret:$role" | nc "$remote_host" "$remote_port" -w 2
-            if [[ $? -eq 0 ]]; then
-                print_success "Signal sent successfully."
-            else
-                print_error "Failed to send signal. Check network connectivity and firewall."
-            fi
-            press_any_key
-            ;;
-        2)
-            print_info "Listening for test RESTART_REQUEST on port $listen_port ..."
-            print_info "Press Ctrl+C to cancel"
-            echo
-            cancelled=0
-            trap 'cancelled=1' SIGINT
-            msg=$(nc -l -p "$listen_port" -w 30 2>/dev/null)
-            trap - SIGINT
-            if [[ $cancelled -eq 1 ]]; then
-                echo
-                print_info "Listen cancelled by user."
-                press_any_key
-                return
-            fi
-            if [[ "$msg" =~ ^RESTART_REQUEST:$secret: ]]; then
-                local sender_role=${msg##*:}
-                print_success "Received RESTART_REQUEST from $sender_role. Sending ACK back."
-                echo "RESTART_ACK:$secret:$role" | nc "$remote_host" "$remote_port" -w 2
-                print_info "ACK sent."
-            else
-                print_error "No valid RESTART_REQUEST received or timeout."
-            fi
-            press_any_key
-            ;;
-        0|*)
-            return
-            ;;
-    esac
-}
-
-show_watcher_status() {
-    local service="$1"
-    local suffix="$2"
-    local config_file="$3"
-    local watcher_script="/tmp/backhaul-watcher-${suffix}.sh"
-    local watcher_pid_file="/tmp/backhaul-watcher-${suffix}.pid"
-    local watcher_log="/tmp/backhaul-watcher-${suffix}.log"
-    
-    clear
-    print_info "=== Watcher Status ==="
-    echo
-    
-    # Check if watcher is enabled in config
-    local enabled=$(grep '^restart_watcher_enabled' "$config_file" | cut -d'"' -f2 2>/dev/null)
-    if [[ "$enabled" == "y" ]]; then
-        print_success "Watcher is enabled in configuration"
-    else
-        print_warning "Watcher is not enabled in configuration"
-    fi
-    
-    # Check if watcher script exists
-    if [[ -f "$watcher_script" ]]; then
-        print_success "Watcher script exists: $watcher_script"
-    else
-        print_warning "Watcher script not found"
-    fi
-    
-    # Check if watcher process is running
-    if [[ -f "$watcher_pid_file" ]]; then
-        local watcher_pid=$(cat "$watcher_pid_file")
-        if [[ -n "$watcher_pid" ]] && kill -0 "$watcher_pid" 2>/dev/null; then
-            print_success "Watcher process is running (PID: $watcher_pid)"
-        else
-            print_error "Watcher process is not running (PID file exists but process dead)"
-        fi
-    else
-        print_warning "Watcher process not found"
-    fi
-    
-    # Show configuration
-    echo
-    print_info "--- Configuration ---"
-    local secret listen_port remote_port
-    secret=$(grep '^restart_watcher_secret' "$config_file" | cut -d'"' -f2)
-    listen_port=$(grep '^restart_watcher_listen_port' "$config_file" | awk -F'=' '{print $2}' | tr -d ' "')
-    remote_port=$(grep '^restart_watcher_remote_port' "$config_file" | awk -F'=' '{print $2}' | tr -d ' "')
-    
-    echo "Secret: ${secret:-not set}"
-    echo "Listen port: ${listen_port:-not set}"
-    echo "Remote port: ${remote_port:-not set}"
-    
-    # Show recent logs if available
-    if [[ -f "$watcher_log" ]]; then
-        echo
-        print_info "--- Recent Logs ---"
-        tail -n 5 "$watcher_log" 2>/dev/null || echo "No logs available"
-    fi
-    
-    press_any_key
-}
-
-show_watcher_logs() {
-    local service="$1"
-    local suffix="$2"
-    local config_file="$3"
-    local watcher_log="/tmp/backhaul-watcher-${suffix}.log"
-    clear
-    print_info "=== Watcher Logs ==="
-    if [[ -f "$watcher_log" ]]; then
-    print_info "Last 20 lines of watcher logs:"
-        tail -n 20 "$watcher_log"
-    echo
-        read -p "View full log? (y/n) [n]: " viewfull
-        viewfull=${viewfull:-n}
-    if [[ "${viewfull,,}" == "y" ]]; then
-            less "$watcher_log"
-        fi
-    else
-        print_warning "The watcher may not be running or has not generated any logs yet."
-    fi
-    press_any_key
-}
-
 # --- Watcher Submenu Help ---
 watcher_submenu_help() {
     clear
-    print_info "================= Coordinated Restart Watcher Help ================="
-    echo "This submenu lets you manage the coordinated restart watcher for this tunnel."
+    print_info "=== Watcher Help ==="
     echo
-    print_info "What the watcher does:"
-    echo "• Monitors tunnel logs for error patterns (e.g., ERROR|FATAL)"
-    echo "• When an error is detected, coordinates a restart with the remote side"
-    echo "• Uses a secure netcat-based protocol for communication"
-    echo "• Automatically restarts both sides in a coordinated manner"
+    print_info "The Coordinated Restart Watcher monitors tunnel services and"
+    print_info "coordinates restarts between client and server sides."
     echo
-    print_info "Configuration requirements:"
-    echo "• Listen port: Where this side receives restart requests from remote"
-    echo "• Remote port: Where this side sends restart requests to remote"
-    echo "• Secret: Must be identical on both sides (client and server)"
-    echo "• Error pattern: Regex pattern to trigger restarts (default: ERROR|FATAL)"
-    echo "• Delays: Time to wait before restarting each side"
+    print_info "Features:"
+    echo "  • Automatic error detection in service logs"
+    echo "  • Coordinated restart between both sides"
+    echo "  • Configurable restart delays and retry limits"
+    echo "  • Secure communication with shared secrets"
+    echo "  • Port conflict detection and resolution"
     echo
-    print_warning "IMPORTANT: Port configuration must be opposite on both sides!"
-    echo "  If this side listens on 45679, remote must send to 45679"
-    echo "  If this side sends to 45680, remote must listen on 45680"
+    print_info "Setup Process:"
+    echo "  1. Server generates a shared secret"
+    echo "  2. Client enters the same secret"
+    echo "  3. Both sides configure ports and delays"
+    echo "  4. Watcher starts monitoring automatically"
     echo
-    echo "Menu options:"
-    echo " 1. Enable watcher: Set up and start the watcher background process."
-    echo " 2. Disable watcher: Stop and remove the watcher background process."
-    echo " 3. Edit watcher config: Change error pattern, delays, secret, and ports."
-    echo " 4. Show watcher status: View watcher script content."
-    echo " 5. Show watcher logs: View recent logs for the watcher."
-    echo " 6. Test watcher: Send or receive a test restart signal."
-    echo " 0. Back: Return to tunnel management."
+    print_info "Communication:"
+    echo "  • Uses netcat for simple TCP communication"
+    echo "  • Authenticates with shared secret"
+    echo "  • Sends restart requests and acknowledgments"
+    echo "  • Handles network failures gracefully"
+    echo
     press_any_key
 }
 
@@ -5389,12 +4859,12 @@ show_tunnel_health_and_performance() {
                     local status="${BASH_REMATCH[3]}"
                     local status_icon
                     case "$status" in
-                        "running") status_icon="✓" ;;
-                        "dead") status_icon="✗" ;;
-                        "not_started") status_icon="⚠" ;;
-                        *) status_icon="?" ;;
+                        "running") status_icon="Running" ;;
+                        "dead") status_icon="Dead" ;;
+                        "not_started") status_icon="Not Started" ;;
+                        *) status_icon="Unknown" ;;
                     esac
-                    echo "  $status_icon $timestamp: $status"
+                    print_status_with_icon "$status" "$timestamp"
                 fi
             done
         else
@@ -5460,10 +4930,10 @@ graceful_restart_with_ui() {
     echo
     print_info "--- Restart Summary ---"
     if [[ $restart_result -eq 0 && "$post_health" == "running" ]]; then
-        print_success "\u2713 Graceful restart completed successfully"
+        print_success "Graceful restart completed successfully"
         print_info "Tunnel is healthy and running"
     else
-        print_error "\u2717 Graceful restart failed or tunnel is unhealthy"
+        print_error "Graceful restart failed or tunnel is unhealthy"
         print_info "Current status: $post_health"
         
         if confirm_action "Would you like to attempt recovery?" "y"; then
@@ -5490,7 +4960,7 @@ create_tunnel() {
     fi
     
     echo "=== Create New Tunnel ==="
-    echo "💡 Tip: Use descriptive names like 'office-vpn' or 'home-connection'"
+    print_info "Tip: Use descriptive names like 'office-vpn' or 'home-connection'"
     
     # Input validation with sanitization
     tunnel_name=$(validate_tunnel_name "check_exists")
@@ -5501,7 +4971,7 @@ create_tunnel() {
     echo "Select protocol:"
     echo "1) TCP"
     echo "2) UDP"
-    read -p "Enter choice (1-2): " protocol_choice
+            read -p "Select an option [1-2, ? for help]: " protocol_choice
     
     case $protocol_choice in
         1) protocol="tcp" ;;
@@ -5586,8 +5056,8 @@ EOF
     # Update main config
     update_config_file "$tunnel_name" "$server_ip" "$server_port" "$local_port" "$protocol"
     print_success "Tunnel '$tunnel_name' created successfully"
-    echo "📁 Location: $tunnel_dir"
-    echo "🔒 Permissions hardened for security"
+    print_info "Location: $tunnel_dir"
+    print_success "Permissions hardened for security"
     
     # Security audit
     audit_security
@@ -5670,11 +5140,11 @@ start_tunnel_impl() {
     # Secure logging
     secure_log_message "INFO" "Started tunnel $tunnel_name (PID: $pid)"
     print_success "Tunnel '$tunnel_name' started successfully"
-    echo "📊 PID: $pid"
-    echo "📝 Logs: $tunnel_dir/tunnel.log"
+    print_info "PID: $pid"
+    print_info "Logs: $tunnel_dir/tunnel.log"
     
     # Performance monitoring
-    echo "💻 System resources: $(get_system_resources)"
+    print_info "System resources: $(get_system_resources)"
 }
 
 stop_tunnel() {
@@ -5737,144 +5207,6 @@ stop_tunnel_impl() {
     # Performance optimization
     optimize_memory_usage
 } 
-# --- MODULE: modules/restart_watcher.sh ---
-#!/bin/bash
-# restart_watcher.sh - Per-tunnel coordinated restart watcher for EasyBackhaul
-# This script is intended to be sourced or built into the main script, or run as a systemd service.
-
-# WARNING: This script requires a version of netcat (nc) that supports '-l -p'.
-#          Some distributions (e.g., Debian/Ubuntu) may require installing netcat-openbsd.
-
-# Required environment/config variables (set by main script or systemd):
-#   SERVICE_NAME         - systemd service name (e.g. backhaul-client-xxx.service)
-#   LOG_PATTERN          - regex for error detection (e.g. 'ERROR|FATAL')
-#   REMOTE_HOST          - IP or hostname of the remote side
-#   REMOTE_PORT          - netcat port on remote (default: 45678)
-#   RESTART_SECRET       - shared secret for authentication
-#   RESTART_DELAY_LOCAL  - seconds to wait before local restart (default: 10)
-#   RESTART_DELAY_REMOTE - seconds to wait before remote restart (default: 10)
-#   MAX_RETRIES          - max restart request attempts (default: 3)
-#   ROLE                 - 'client' or 'server' (for logging)
-#   LISTEN_PORT          - local port to listen for restart requests (default: 45678)
-
-# --- Defaults ---
-RESTART_DELAY_LOCAL=${RESTART_DELAY_LOCAL:-10}
-RESTART_DELAY_REMOTE=${RESTART_DELAY_REMOTE:-10}
-MAX_RETRIES=${MAX_RETRIES:-3}
-LISTEN_PORT=${LISTEN_PORT:-45679}
-REMOTE_PORT=${REMOTE_PORT:-45680}
-RESTART_SECRET=${RESTART_SECRET:-$RESTART_WATCHER_SECRET}
-ROLE=${ROLE:-unknown}
-
-# --- Helper: Log ---
-log() { echo "[RestartWatcher][$ROLE][$(date +'%F %T')] $1"; }
-
-# --- Main Entrypoint ---
-restart_watcher_main() {
-    # Set defaults if not provided
-    RESTART_DELAY_LOCAL=${RESTART_DELAY_LOCAL:-10}
-    RESTART_DELAY_REMOTE=${RESTART_DELAY_REMOTE:-10}
-    MAX_RETRIES=${MAX_RETRIES:-3}
-    LISTEN_PORT=${LISTEN_PORT:-45679}
-    REMOTE_PORT=${REMOTE_PORT:-45680}
-    RESTART_SECRET=${RESTART_SECRET:-$RESTART_WATCHER_SECRET}
-    ROLE=${ROLE:-unknown}
-    
-    # Validate required environment variables
-    if [[ -z "$SERVICE_NAME" ]]; then
-        log "ERROR: SERVICE_NAME environment variable is required"
-        exit 1
-    fi
-    
-    if [[ -z "$REMOTE_HOST" || "$REMOTE_HOST" == "0.0.0.0" ]]; then
-        log "ERROR: REMOTE_HOST environment variable is required and cannot be 0.0.0.0"
-        exit 1
-    fi
-    
-    log "Starting restart watcher for service: $SERVICE_NAME"
-    log "Remote host: $REMOTE_HOST:$REMOTE_PORT"
-    log "Listen port: $LISTEN_PORT"
-    log "Role: $ROLE"
-    
-    # Start listener in background
-    restart_listener &
-    LISTENER_PID=$!
-    
-    # Set up signal handlers for clean shutdown
-    trap 'log "Received shutdown signal. Cleaning up..."; kill $LISTENER_PID 2>/dev/null; exit 0' SIGTERM SIGINT
-    
-    # Start log monitor
-    monitor_and_restart
-    
-    # Cleanup
-    kill $LISTENER_PID 2>/dev/null
-}
-
-# --- Function: Listen for restart requests (in background) ---
-restart_listener() {
-    while true; do
-        # Listen for a single line (timeout 60s to allow clean exit)
-        local msg
-        msg=$(nc -l -p "$LISTEN_PORT" -w 60 2>/dev/null)
-        if [[ "$msg" =~ ^RESTART_REQUEST:(.+):(.+)$ ]]; then
-            local secret=${BASH_REMATCH[1]}
-            local sender_role=${BASH_REMATCH[2]}
-            if [[ "$secret" == "$RESTART_SECRET" ]]; then
-                log "Received RESTART_REQUEST from $sender_role. Sending ACK and scheduling restart."
-                # Send ACK back to sender
-                echo "RESTART_ACK:$RESTART_SECRET:$ROLE" | nc "$REMOTE_HOST" "$REMOTE_PORT" -w 2
-                # Schedule restart after delay
-                (sleep "$RESTART_DELAY_REMOTE"; systemctl restart "$SERVICE_NAME"; log "Service restarted (listener)") &
-            else
-                log "Received RESTART_REQUEST with invalid secret. Ignoring."
-            fi
-        elif [[ "$msg" =~ ^RESTART_ACK:(.+):(.+)$ ]]; then
-            # This is an ACK for a request we sent
-            local secret=${BASH_REMATCH[1]}
-            local ack_role=${BASH_REMATCH[2]}
-            if [[ "$secret" == "$RESTART_SECRET" ]]; then
-                log "Received RESTART_ACK from $ack_role."
-                # Touch a file to signal ACK received
-                touch "/tmp/restart_ack_${SERVICE_NAME}"
-            fi
-        fi
-    done
-}
-
-# --- Function: Monitor logs and trigger coordinated restart ---
-monitor_and_restart() {
-    log "Starting log monitor for $SERVICE_NAME (pattern: $LOG_PATTERN)"
-    journalctl -u "$SERVICE_NAME" -f --no-pager | while read -r line; do
-        if [[ "$line" =~ $LOG_PATTERN ]]; then
-            log "Error detected in logs. Initiating coordinated restart."
-            # Try to send restart request and wait for ACK
-            local attempt=1
-            while (( attempt <= MAX_RETRIES )); do
-                log "Sending RESTART_REQUEST to $REMOTE_HOST:$REMOTE_PORT (attempt $attempt)"
-                echo "RESTART_REQUEST:$RESTART_SECRET:$ROLE" | nc "$REMOTE_HOST" "$REMOTE_PORT" -w 2
-                # Wait for ACK (up to 10s)
-                for i in {1..10}; do
-                    if [ -f "/tmp/restart_ack_${SERVICE_NAME}" ]; then
-                        rm -f "/tmp/restart_ack_${SERVICE_NAME}"
-                        log "ACK received. Scheduling local restart in $RESTART_DELAY_LOCAL seconds."
-                        sleep "$RESTART_DELAY_LOCAL"
-                        systemctl restart "$SERVICE_NAME"
-                        log "Service restarted (initiator)"
-                        return
-                    fi
-                    sleep 1
-                done
-                log "No ACK received. Retrying..."
-                ((attempt++))
-            done
-            log "Failed to coordinate restart after $MAX_RETRIES attempts. Local restart only."
-            sleep "$RESTART_DELAY_LOCAL"
-            systemctl restart "$SERVICE_NAME"
-            log "Service restarted (local only)"
-            return
-        fi
-    done
-} 
 # --- MODULE: modules/menu.sh ---
 # menu.sh
 # Main menu logic and script entrypoint 
@@ -5883,7 +5215,7 @@ monitor_and_restart() {
 installation_wizard() {
     clear
     print_server_info_banner
-    print_menu_header "EasyBackhaul Installation Wizard (v13.0-beta)" "Core by Musixal  |  Installer by @N4Xon"
+    print_primary_menu_header "EasyBackhaul Installation Wizard (v13.0-beta)" "Core by Musixal  |  Installer by @N4Xon"
     echo
     print_info "Welcome to EasyBackhaul! This wizard will help you install the Backhaul binary."
     echo
@@ -5911,14 +5243,14 @@ installation_wizard() {
     echo
     print_menu_footer
     while true; do
-        read -p "Please select an option [0-5, ? for help]: " install_choice
+        read -p "Select an option [0-5, ? for help]: " install_choice
         case $install_choice in
             1)
                 print_info "Starting automatic GitHub download..."
                 if download_backhaul; then
                     return 0
                 else
-                    print_warning "⚠ Installation failed or was cancelled."
+                    print_warning "Installation failed or was cancelled."
                     press_any_key
                     return 1
                 fi
@@ -5930,12 +5262,12 @@ installation_wizard() {
                 case $arch in
                     x86_64) arch="amd64" ;;
                     aarch64) arch="arm64" ;;
-                    *) print_error "✗ Unsupported architecture: $arch"; press_any_key; return 1 ;;
+                    *) print_error "Unsupported architecture: $arch"; press_any_key; return 1 ;;
                 esac
                 if download_from_local_file "$os" "$arch"; then
                     return 0
                 else
-                    print_warning "⚠ Local installation failed or was cancelled."
+                    print_warning "Local installation failed or was cancelled."
                     press_any_key
                     return 1
                 fi
@@ -5947,23 +5279,23 @@ installation_wizard() {
                 case $arch in
                     x86_64) arch="amd64" ;;
                     aarch64) arch="arm64" ;;
-                    *) print_error "✗ Unsupported architecture: $arch"; press_any_key; return 1 ;;
+                    *) print_error "Unsupported architecture: $arch"; press_any_key; return 1 ;;
                 esac
                 if download_from_alternative_source "$os" "$arch"; then
                     return 0
                 else
-                    print_warning "⚠ Alternative installation failed or was cancelled."
+                    print_warning "Alternative installation failed or was cancelled."
                     press_any_key
                     return 1
                 fi
                 ;;
             4)
-                test_network_connectivity
+                run_network_diagnostics_menu
                 installation_wizard
                 return 0
                 ;;
             5)
-                print_warning "⚠ Skipping binary installation."
+                print_warning "Skipping binary installation."
                 print_info "You can install the binary manually later using option 3 in the main menu."
                 print_info "Make sure to place it at: $BIN_PATH"
                 press_any_key
@@ -6055,35 +5387,35 @@ show_system_health_monitor() {
             health_status=$(check_tunnel_health "$tunnel")
             ((total_count++))
             
-            case "$health_status" in
-                "running")
-                    print_success "✓ $tunnel: Running"
-                    ((healthy_count++))
-                    ;;
-                "dead")
-                    print_error "✗ $tunnel: Dead"
-                    ;;
-                "not_started")
-                    print_warning "⚠ $tunnel: Not Started"
-                    ;;
-                *)
-                    print_warning "? $tunnel: Unknown"
-                    ;;
-            esac
+                    case "$health_status" in
+            "running")
+                print_status_running "$tunnel"
+                ((healthy_count++))
+                ;;
+            "dead")
+                print_status_dead "$tunnel"
+                ;;
+            "not_started")
+                print_status_not_started "$tunnel"
+                ;;
+            *)
+                print_status_warning "$tunnel" "Unknown"
+                ;;
+        esac
         done
         
         echo
         print_info "Health Summary: $healthy_count/$total_count tunnels healthy"
         
         if [[ $healthy_count -eq $total_count ]]; then
-            print_success "✓ All tunnels are healthy!"
+            print_success "All tunnels are healthy!"
         elif [[ $healthy_count -eq 0 ]]; then
-            print_error "✗ No tunnels are healthy!"
+            print_error "No tunnels are healthy!"
         else
-            print_warning "⚠ Some tunnels need attention"
+            print_warning "Some tunnels need attention"
         fi
     else
-        print_warning "⚠ No tunnels found"
+        print_warning "No tunnels found"
     fi
     
     # Show performance metrics
@@ -6121,14 +5453,14 @@ show_system_health_monitor() {
     
     if [[ -n "$backhaul_services" ]]; then
         for service in $backhaul_services; do
-            if systemctl is-active --quiet "$service"; then
-                print_success "✓ $service: Active"
-            else
-                print_error "✗ $service: Inactive"
-            fi
+                    if systemctl is-active --quiet "$service"; then
+            print_status_active "$service"
+        else
+            print_status_inactive "$service"
+        fi
         done
     else
-        print_warning "⚠ No Backhaul services found"
+        print_warning "No Backhaul services found"
     fi
     
     # Show watcher status
@@ -6144,14 +5476,14 @@ show_system_health_monitor() {
             local pid
             pid=$(cat "$pid_file" 2>/dev/null)
             
-            if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-                print_success "✓ Watcher for $tunnel_name: Running (PID: $pid)"
-            else
-                print_error "✗ Watcher for $tunnel_name: Dead"
-            fi
+                    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            print_success "Watcher for $tunnel_name: Running (PID: $pid)"
+        else
+            print_status_dead "Watcher for $tunnel_name"
+        fi
         done
     else
-        print_warning "⚠ No watchers found"
+        print_warning "No watchers found"
     fi
     
     # Show disk usage
@@ -6163,11 +5495,11 @@ show_system_health_monitor() {
     usage_percent=$(echo "$disk_usage" | sed 's/%//')
     
     if [[ $usage_percent -gt 90 ]]; then
-        print_error "✗ Critical disk usage: $disk_usage"
+        print_error "Critical disk usage: $disk_usage"
     elif [[ $usage_percent -gt 80 ]]; then
-        print_warning "⚠ High disk usage: $disk_usage"
+        print_warning "High disk usage: $disk_usage"
     else
-        print_success "✓ Disk usage: $disk_usage"
+        print_success "Disk usage: $disk_usage"
     fi
     
     # Show log file sizes
@@ -6209,7 +5541,7 @@ show_system_health_monitor() {
                 ;;
             2)
                 cleanup_zombie_processes
-                print_success "✓ Zombie processes cleaned up"
+                print_success "Zombie processes cleaned up"
                 press_any_key
                 show_system_health_monitor
                 ;;
@@ -6252,11 +5584,11 @@ show_system_health_monitor() {
                             fi
                         done
                     else
-                        print_warning "⚠ No log files found"
+                        print_warning "No log files found"
                         press_any_key
                     fi
                 else
-                    print_warning "⚠ Log directory not found"
+                    print_warning "Log directory not found"
                     press_any_key
                 fi
                 show_system_health_monitor
@@ -6264,7 +5596,7 @@ show_system_health_monitor() {
             4)
                 print_info "Optimizing all tunnel processes..."
                 optimize_all_tunnel_processes
-                print_success "✓ All tunnel processes optimized"
+                print_success "All tunnel processes optimized"
                 press_any_key
                 show_system_health_monitor
                 ;;
@@ -6281,12 +5613,12 @@ show_system_health_monitor() {
 # --- Main Menu Logic & Entrypoint ---
 main_menu() {
     clear
-    print_main_menu_header "EasyBackhaul Management Menu" "Core by Musixal  |  Installer by @N4Xon"
+    print_primary_menu_header "EasyBackhaul Management Menu" "Core by Musixal  |  Installer by @N4Xon"
     
     # Check binary status
     if [ -f "$BIN_PATH" ]; then
         if [[ ! -x "$BIN_PATH" ]]; then
-            print_warning "⚠ Binary Status: Found but not executable"
+            print_warning "Binary Status: Found but not executable"
         else
             # Try to get version, but don't fail if it doesn't work
             local version_output=""
@@ -6313,7 +5645,7 @@ main_menu() {
             fi
         fi
     else
-        print_error "✗ Binary Status: Not installed"
+        print_error "Binary Status: Not installed"
     fi
     echo
     
@@ -6326,7 +5658,7 @@ main_menu() {
     echo " 7. Clean Up Zombie/Orphaned Processes"
     echo " 8. Uninstall EasyBackhaul (Removes binary and ALL configs)"
     echo
-    print_menu_footer_unified "true" "false" "true"
+    print_menu_footer "true" "false" "true"
     
     # Help function for main menu
     main_menu_help() {
@@ -6352,7 +5684,7 @@ main_menu() {
         press_any_key
     }
     
-    menu_loop 0 8 "?" "main_menu_help" "Please select an option [0-8, ? for help]"
+    menu_loop 0 8 "?" "main_menu_help" "Select an option [0-8, ? for help]"
     
     case $choice in
         1) configure_new_tunnel; press_any_key; main_menu ;;
@@ -6365,7 +5697,7 @@ main_menu() {
                BIN_PATH="$new_bin_path"
                print_success "Backhaul binary path set to: $BIN_PATH (for this session)"
            else
-               print_warning "⚠ No path entered. Keeping current: $BIN_PATH"
+               print_warning "No path entered. Keeping current: $BIN_PATH"
            fi
            press_any_key
            main_menu
@@ -6384,7 +5716,11 @@ main_menu() {
            main_menu
            ;;
         8)
-           read -p "This will REMOVE the binary and ALL configs/services. This is irreversible. Are you sure? [y/N]: " confirm
+           if confirm_action "This will REMOVE the binary and ALL configs/services. This is irreversible. Are you sure?" "n"; then
+        confirm="y"
+    else
+        confirm="n"
+    fi
            if [[ "${confirm,,}" == "y" ]]; then
                 echo
                 print_warning "Summary of what will be deleted:"
@@ -6447,7 +5783,11 @@ main_menu() {
                 systemctl daemon-reload
                 local CERT_DIR="/etc/backhaul/certs"
                 if [ -d "$CERT_DIR" ] && compgen -G "$CERT_DIR/*.crt" > /dev/null; then
-                    read -p "Do you also want to delete all TLS certificates in $CERT_DIR? (y/n): " delcerts
+                    if confirm_action "Do you also want to delete all TLS certificates in $CERT_DIR?" "n"; then
+        delcerts="y"
+    else
+        delcerts="n"
+    fi
                     if [[ "${delcerts,,}" == "y" ]]; then
                         rm -rf "$CERT_DIR"
                         print_success "All certificates in $CERT_DIR have been deleted."
@@ -6479,7 +5819,7 @@ init_logging
 # Check if binary exists, if not run installation wizard
 if [ ! -f "$BIN_PATH" ]; then
     echo
-    print_warning "⚠ Backhaul binary not found at: $BIN_PATH"
+    print_warning "Backhaul binary not found at: $BIN_PATH"
     echo
     print_info "The Backhaul binary is required to create and manage tunnels."
     print_info "Please complete the installation to continue."
@@ -6493,7 +5833,7 @@ if [ ! -f "$BIN_PATH" ]; then
     # Check if installation was successful
     if [ ! -f "$BIN_PATH" ]; then
         echo
-        print_warning "⚠ Binary installation was not completed."
+        print_warning "Binary installation was not completed."
         print_info "You can still use the script to manage existing tunnels or install later."
         echo
         print_info "To install the binary later, use option 3 in the main menu."
