@@ -1,9 +1,11 @@
 # validation.sh
 # Comprehensive configuration validation for all Backhaul protocols
 
+# WARNING: Do not use a global CONFIG_FILE variable. Always pass config file paths explicitly to functions.
+
 # --- Configuration Validation ---
 # Validate configuration file with protocol-specific checks
-validate_config() {
+validate_tunnel_config() {
     local config_file="$1"
     local errors=0
     local warnings=0

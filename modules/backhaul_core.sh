@@ -21,11 +21,7 @@ get_server_info() {
     SERVER_ISP=$(echo "$response" | jq -r '.isp // "N/A"')
 }
 
-print_server_info_banner() {
-    print_info "================================================================"
-    print_info " Server IP: $SERVER_IP | Location: $SERVER_COUNTRY | ISP: $SERVER_ISP"
-    print_info "================================================================"
-}
+# Note: Banner functions are now defined in helpers.sh to avoid duplication
 
 # Verify binary installation
 verify_binary_installation() {
@@ -61,8 +57,9 @@ verify_binary_installation() {
 
 # Test network connectivity to various sources
 test_network_connectivity() {
-    print_info "--- Network Connectivity Test ---"
-    echo
+    clear
+    print_submenu_header "Network Connectivity Test"
+    
     print_info "Testing connectivity to various sources..."
     echo
     
@@ -80,6 +77,9 @@ test_network_connectivity() {
         "Cloudflare (CDN)"
     )
     
+    local accessible_count=0
+    local total_count=${#test_urls[@]}
+    
     for i in "${!test_urls[@]}"; do
         local url="${test_urls[$i]}"
         local name="${test_names[$i]}"
@@ -87,24 +87,44 @@ test_network_connectivity() {
         print_info "Testing $name ($url)..."
         if curl -s --connect-timeout 5 --max-time 10 "$url" >/dev/null 2>&1; then
             print_success "✓ $name is accessible"
+            ((accessible_count++))
         else
             print_error "✗ $name is not accessible"
         fi
     done
     
     echo
-    print_info "If GitHub is not accessible but other sites are, this might indicate:"
-    echo "- GitHub is blocked in your region"
-    echo "- Your VPS provider has restrictions"
-    echo "- DNS resolution issues for GitHub"
-    echo "- Firewall rules blocking GitHub"
+    print_info "--- Test Results ---"
+    print_info "Accessible: $accessible_count/$total_count sources"
+    
+    if [[ $accessible_count -eq 0 ]]; then
+        print_error "No sources are accessible. Check your VPS network configuration."
+    elif [[ $accessible_count -lt $total_count ]]; then
+        print_warning "Some sources are not accessible."
+        echo
+        print_info "If GitHub is not accessible but other sites are, this might indicate:"
+        echo "- GitHub is blocked in your region"
+        echo "- Your VPS provider has restrictions"
+        echo "- DNS resolution issues for GitHub"
+        echo "- Firewall rules blocking GitHub"
+    else
+        print_success "All sources are accessible!"
+    fi
+    
     echo
-    print_info "If all sites are inaccessible, check your VPS network configuration."
-    echo
+    print_menu_footer
     press_any_key
 }
 
 download_backhaul() {
+    clear
+    print_menu_header "Backhaul Binary Installation"
+    
+    # Show server info banner
+    get_server_info
+    print_info "📍 Server: $SERVER_IP | 🌍 $SERVER_COUNTRY | 🏢 $SERVER_ISP"
+    echo
+    
     print_info "--> Identifying system architecture..."
     local ARCH
     ARCH=$(uname -m)
@@ -114,8 +134,15 @@ download_backhaul() {
     case $ARCH in
         x86_64) ARCH="amd64" ;;
         aarch64) ARCH="arm64" ;;
-        *) print_error_and_exit "Unsupported architecture: $ARCH" ;;
+        *) 
+            print_error "Unsupported architecture: $ARCH"
+            press_any_key
+            return 1
+            ;;
     esac
+    
+    print_success "✓ Detected: $OS/$ARCH"
+    echo
 
     # Try to fetch latest version from GitHub
     print_info "--> Fetching latest version from GitHub..."
@@ -142,14 +169,19 @@ download_backhaul() {
         echo
         print_info "GitHub access issues detected. Please choose an alternative method:"
         echo
-        echo "1. Use local binary file (if you have downloaded it manually)"
-        echo "2. Use alternative download source"
-        echo "3. Use fallback version (v0.6.6) and try GitHub again"
-        echo "4. Show alternative download sources and tips"
-        echo "5. Test network connectivity"
-        echo "6. Cancel installation"
+        
+        # Standardized menu structure
+        echo " 1. Use local binary file (if you have downloaded it manually)"
+        echo " 2. Use alternative download source"
+        echo " 3. Use fallback version (v0.6.6) and try GitHub again"
+        echo " 4. Show alternative download sources and tips"
+        echo " 5. Test network connectivity"
+        echo " 0. Cancel installation"
+        echo " ?. Show help"
         echo
-        read -p "Select option [1-6]: " download_choice
+        
+        # Standardized menu loop with validation
+        menu_loop "Select installation method" "0" "5" "?" download_installation_choice
         
         case $download_choice in
             1) download_from_local_file "$OS" "$ARCH" ;;
@@ -170,7 +202,7 @@ download_backhaul() {
                 download_backhaul
                 return 0
                 ;;
-            6) 
+            0) 
                 print_info "Installation cancelled."
                 return 1
                 ;;
@@ -184,6 +216,18 @@ download_backhaul() {
 
     # If we got here, GitHub is accessible
     download_from_github "$LATEST_VERSION" "$OS" "$ARCH"
+}
+
+# Helper function for installation menu choice
+download_installation_choice() {
+    local choice="$1"
+    download_choice="$choice"
+}
+
+# Helper function for fallback menu choice
+download_fallback_choice() {
+    local choice="$1"
+    fallback_choice="$choice"
 }
 
 download_from_github() {
@@ -200,16 +244,21 @@ download_from_github() {
         echo
         print_info "GitHub download failed. Please choose an alternative method:"
         echo
-        echo "1. Use local binary file (if you have downloaded it manually)"
-        echo "2. Use alternative download source"
-        echo "3. Cancel installation"
+        
+        # Standardized menu structure
+        echo " 1. Use local binary file (if you have downloaded it manually)"
+        echo " 2. Use alternative download source"
+        echo " 0. Cancel installation"
+        echo " ?. Show help"
         echo
-        read -p "Select option [1-3]: " fallback_choice
+        
+        # Standardized menu loop with validation
+        menu_loop "Select alternative method" "0" "2" "?" download_fallback_choice
         
         case $fallback_choice in
             1) download_from_local_file "$os" "$arch" ;;
             2) download_from_alternative_source "$os" "$arch" ;;
-            3) 
+            0) 
                 print_info "Installation cancelled."
                 return 1
                 ;;
@@ -228,24 +277,38 @@ download_from_local_file() {
     local os="$1"
     local arch="$2"
     
-    print_info "--> Local file installation mode"
-    echo
+    clear
+    print_submenu_header "Local File Installation"
+    
     print_info "Please provide the path to your local Backhaul binary file."
     print_info "Supported formats: .tar.gz, .zip, or direct binary file"
     echo
     print_info "Expected filename pattern: backhaul_${os}_${arch}.tar.gz"
     echo
-    read -e -p "Enter path to local file: " local_file_path
     
-    if [[ -z "$local_file_path" ]]; then
-        print_error "No file path provided. Installation cancelled."
-        return 1
-    fi
-    
-    if [[ ! -f "$local_file_path" ]]; then
-        print_error "File not found: $local_file_path"
-        return 1
-    fi
+    # Standardized input loop with validation
+    while true; do
+        read -e -p "Enter path to local file: " local_file_path
+        
+        if [[ -z "$local_file_path" ]]; then
+            print_warning "No file path provided."
+            if confirm_action "Would you like to cancel installation?" "y"; then
+                return 1
+            fi
+            continue
+        fi
+        
+        if [[ ! -f "$local_file_path" ]]; then
+            print_error "File not found: $local_file_path"
+            if confirm_action "Would you like to try again?" "y"; then
+                continue
+            else
+                return 1
+            fi
+        fi
+        
+        break
+    done
     
     # Determine file type and handle accordingly
     local file_extension
@@ -298,8 +361,9 @@ download_from_alternative_source() {
     local os="$1"
     local arch="$2"
     
-    print_info "--> Alternative download source mode"
-    echo
+    clear
+    print_submenu_header "Alternative Download Source"
+    
     print_info "Please provide an alternative download URL for the Backhaul binary."
     print_info "The URL should point to a .tar.gz file containing the binary."
     echo
@@ -310,12 +374,31 @@ download_from_alternative_source() {
     echo "- Alternative CDN: https://cdn.example.com/backhaul_${os}_${arch}.tar.gz"
     echo "- Direct file server: http://files.example.com/backhaul_${os}_${arch}.tar.gz"
     echo
-    read -p "Enter alternative download URL: " alt_url
     
-    if [[ -z "$alt_url" ]]; then
-        print_error "No URL provided. Installation cancelled."
-        return 1
-    fi
+    # Standardized input loop with validation
+    while true; do
+        read -p "Enter alternative download URL: " alt_url
+        
+        if [[ -z "$alt_url" ]]; then
+            print_warning "No URL provided."
+            if confirm_action "Would you like to cancel installation?" "y"; then
+                return 1
+            fi
+            continue
+        fi
+        
+        # Basic URL validation
+        if [[ ! "$alt_url" =~ ^https?:// ]]; then
+            print_error "Invalid URL format. Please include http:// or https://"
+            if confirm_action "Would you like to try again?" "y"; then
+                continue
+            else
+                return 1
+            fi
+        fi
+        
+        break
+    done
     
     print_info "--> Downloading from alternative source..."
     wget -q --show-progress --connect-timeout=15 --tries=3 --retry-connrefused -O /tmp/backhaul.tar.gz "$alt_url"
@@ -354,9 +437,18 @@ install_downloaded_binary() {
     # Verify the binary works
     if verify_binary_installation; then
         print_success "Backhaul binary installation completed successfully!"
+        echo
+        print_info "Installation Summary:"
+        print_info "  📁 Binary location: $BIN_PATH"
+        print_info "  🔒 Permissions: $(ls -l "$BIN_PATH" | awk '{print $1}')"
+        print_info "  📊 Size: $(du -h "$BIN_PATH" | cut -f1)"
+        echo
+        print_menu_footer
     else
         print_warning "Binary installation completed but verification failed."
         print_info "The binary might be incompatible or corrupted."
         print_info "You can still try to use it, but some features might not work correctly."
+        echo
+        print_menu_footer
     fi
 } 

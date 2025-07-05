@@ -1,6 +1,8 @@
 # helpers.sh
 # Utility and print functions (color output, error handling, etc.) 
 
+# WARNING: Do not use a global CONFIG_FILE variable. Always pass config file paths explicitly to functions.
+
 # --- Helper Functions ---
 # Standardized print functions with consistent color coding
 print_info() { echo -e "\e[34m$1\e[0m"; }
@@ -24,6 +26,8 @@ init_logging() {
     if command -v logrotate &>/dev/null; then
         setup_log_rotation
     fi
+    
+    check_nc_compatibility
 }
 
 # Setup log rotation
@@ -134,16 +138,29 @@ check_tunnel_health() {
     echo "$health_status"
 }
 
-# Monitor all tunnels health
+# Monitor all tunnels health with resource limits
 monitor_all_tunnels() {
     local tunnels
     tunnels=$(find "$CONFIG_DIR" -name "*.conf" -exec basename {} .conf \; 2>/dev/null)
+    local max_concurrent="${MAX_CONCURRENT_OPERATIONS:-3}"
+    local running_jobs=0
     
     for tunnel in $tunnels; do
+        # Limit concurrent background jobs to prevent resource exhaustion
+        if [[ $running_jobs -ge $max_concurrent ]]; then
+            wait -n  # Wait for any job to complete
+            ((running_jobs--))
+        fi
+        
         check_tunnel_health "$tunnel" &
+        ((running_jobs++))
     done
     
+    # Wait for all remaining jobs
     wait
+    
+    # Clean up any zombie processes
+    cleanup_zombie_processes
 }
 
 # --- Performance Tracking ---
@@ -327,36 +344,77 @@ handle_error() {
     local error_msg="$1"
     local return_code="${2:-1}"
     local operation="${3:-unknown}"
+    local tunnel_name="${4:-}"
     
     log_error "Error in $operation: $error_msg"
     print_error "$error_msg"
     
+    # Check for resource exhaustion
+    if check_resource_exhaustion; then
+        log_warn "Resource exhaustion detected during $operation"
+        optimize_memory_usage
+        cleanup_temp_files
+    fi
+    
     # Attempt recovery if enabled
     if [[ "$ERROR_RECOVERY_ENABLED" == "true" ]]; then
-        attempt_error_recovery "$operation" "$error_msg"
+        attempt_error_recovery "$operation" "$error_msg" "$tunnel_name"
     fi
     
     return "$return_code"
 }
 
-# Error recovery attempts
+# Enhanced error recovery attempts
 attempt_error_recovery() {
     local operation="$1"
     local error_msg="$2"
+    local tunnel_name="$3"
+    
+    log_info "Attempting error recovery for operation: $operation"
     
     case "$operation" in
         "tunnel_start")
             log_info "Attempting tunnel recovery..."
             cleanup_zombie_processes
+            
+            # Try to restart the specific tunnel
+            if [[ -n "$tunnel_name" ]]; then
+                local service_name="backhaul-$tunnel_name"
+                if systemctl list-unit-files | grep -q "$service_name"; then
+                    log_info "Attempting to restart service: $service_name"
+                    systemctl restart "$service_name" 2>/dev/null
+                    sleep 2
+                    
+                    # Check if restart was successful
+                    if systemctl is-active --quiet "$service_name" 2>/dev/null; then
+                        log_success "Tunnel recovery successful"
+                        return 0
+                    else
+                        log_error "Tunnel recovery failed"
+                    fi
+                fi
+            fi
             ;;
         "config_validation")
             log_info "Attempting config recovery..."
-            restore_config_backup
+            if [[ -n "$tunnel_name" ]]; then
+                restore_config_backup "$tunnel_name"
+            fi
+            ;;
+        "systemd_service")
+            log_info "Attempting systemd service recovery..."
+            systemctl daemon-reload 2>/dev/null
+            ;;
+        "ufw_rules")
+            log_info "Attempting UFW rules recovery..."
+            ufw reload 2>/dev/null
             ;;
         *)
             log_info "No specific recovery for operation: $operation"
             ;;
     esac
+    
+    return 1
 }
 
 # Restore configuration backup
@@ -395,14 +453,124 @@ get_default_value() {
     fi
 }
 
-# --- Unified Yes/No Prompt Handling ---
+# --- Standardized User Interaction Functions ---
+
+# Standardized yes/no prompt with consistent format
 confirm_action() {
     local prompt="$1"
-    local default="${2:-y}"
-    local user_input
-    read -p "$prompt (y/n) [$default]: " user_input
-    user_input=$(get_default_value "$user_input" "$default")
-    [[ "${user_input,,}" == "y" ]]
+    local default="${2:-n}"
+    local default_upper=$(echo "$default" | tr '[:lower:]' '[:upper:]')
+    local default_lower=$(echo "$default" | tr '[:upper:]' '[:lower:]')
+    
+    if [[ "$default_upper" == "Y" ]]; then
+        local format="[Y/n]"
+    else
+        local format="[y/N]"
+    fi
+    
+    while true; do
+        read -p "$prompt $format: " user_input
+        user_input=$(echo "$user_input" | tr '[:upper:]' '[:lower:]')
+        
+        if [[ -z "$user_input" ]]; then
+            user_input="$default_lower"
+        fi
+        
+        case "$user_input" in
+            y|yes) return 0 ;;
+            n|no) return 1 ;;
+            *) 
+                print_warning "Please enter 'y' or 'n'"
+                continue
+                ;;
+        esac
+    done
+}
+
+# Standardized menu choice validation
+validate_menu_choice() {
+    local choice="$1"
+    local min="$2"
+    local max="$3"
+    local help_option="${4:-?}"
+    
+    # Check for help option
+    if [[ "$choice" == "$help_option" ]]; then
+        return 2  # Special return code for help
+    fi
+    
+    # Check if choice is a number
+    if [[ ! "$choice" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+    
+    # Check if choice is in range
+    if [[ $choice -ge $min && $choice -le $max ]]; then
+        return 0
+    fi
+    
+    return 1
+}
+
+# Standardized invalid choice message
+print_invalid_choice() {
+    local min="$1"
+    local max="$2"
+    local help_option="${3:-?}"
+    print_warning "❌ Invalid option. Please enter $min-$max or $help_option for help."
+}
+
+# Standardized menu loop with validation
+menu_loop() {
+    local min="$1"
+    local max="$2"
+    local help_option="${3:-?}"
+    local help_function="$4"
+    local prompt="$5"
+    
+    while true; do
+        read -p "$prompt: " choice
+        validate_menu_choice "$choice" "$min" "$max" "$help_option"
+        local result=$?
+        
+        case $result in
+            0) return 0 ;;  # Valid choice
+            1) 
+                print_invalid_choice "$min" "$max" "$help_option"
+                press_any_key
+                ;;
+            2)  # Help requested
+                if [[ -n "$help_function" ]]; then
+                    $help_function
+                fi
+                ;;
+        esac
+    done
+}
+
+# Standardized submenu header
+print_submenu_header() {
+    local title="$1"
+    local service="$2"
+    local status="$3"
+    
+    clear
+    print_server_info_banner_minimal
+    print_info "--- $title ---"
+    if [[ -n "$service" ]]; then
+        print_info "Service: $service"
+    fi
+    if [[ -n "$status" ]]; then
+        print_info "Status: $status"
+    fi
+    print_info "Tip: Press '?' for help about available options."
+    echo
+}
+
+# Standardized menu footer
+print_menu_footer() {
+    echo " ?. Help"
+    echo " 0. Back"
 }
 
 # --- Unified Configuration File Update Function ---
@@ -464,7 +632,7 @@ print_menu_header() {
 }
 
 # --- Unified Menu Footer Function ---
-print_menu_footer() {
+print_menu_footer_old() {
     print_info "----------------------------------------------------------------"
 }
 
@@ -802,11 +970,21 @@ validate_ip() {
     return 1
 }
 
-# Secure file operations
+# Secure file operations with locking
 secure_write() {
     local file="$1"
     local content="$2"
     local temp_file
+    local lock_file="${file}.lock"
+    
+    # Create lock file to prevent race conditions
+    if ! (set -C; echo $$ > "$lock_file") 2>/dev/null; then
+        log_warn "File $file is locked by another process"
+        return 1
+    fi
+    
+    # Ensure lock file is cleaned up on exit
+    trap 'rm -f "$lock_file"' EXIT
     
     temp_file=$(mktemp)
     echo "$content" > "$temp_file"
@@ -815,16 +993,13 @@ secure_write() {
     chmod 600 "$temp_file"
     mv "$temp_file" "$file"
     chmod 600 "$file"
+    
+    # Remove lock file
+    rm -f "$lock_file"
+    trap - EXIT
 }
 
-secure_delete() {
-    local file="$1"
-    if [ -f "$file" ]; then
-        # Overwrite with random data before deletion
-        dd if=/dev/urandom of="$file" bs=1M count=1 2>/dev/null
-        shred -u "$file" 2>/dev/null || rm -f "$file"
-    fi
-}
+# Note: secure_delete() is already defined earlier in this file
 
 # Permission hardening
 harden_permissions() {
@@ -872,14 +1047,74 @@ monitor_performance() {
     return $exit_code
 }
 
-# Resource optimization
+# Resource optimization and protection
 optimize_memory_usage() {
-    # Clear unnecessary caches
-    sync
-    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+    # Check current memory usage
+    local mem_usage
+    mem_usage=$(free | awk '/^Mem:/ {printf "%.1f", $3/$2 * 100.0}')
     
-    # Log memory optimization
-    log_message "PERFORMANCE" "Memory optimization completed"
+    # Only optimize if memory usage is high
+    if [[ $(echo "$mem_usage > 80" | bc -l 2>/dev/null) -eq 1 ]]; then
+        log_warn "High memory usage detected (${mem_usage}%). Optimizing..."
+        
+        # Clear unnecessary caches (only if running as root)
+        if [[ $(id -u) -eq 0 ]]; then
+            sync
+            echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+        fi
+        
+        # Force garbage collection if possible
+        if command -v python3 &>/dev/null; then
+            python3 -c "import gc; gc.collect()" 2>/dev/null || true
+        fi
+        
+        log_success "Memory optimization completed"
+    else
+        log_debug "Memory usage is normal (${mem_usage}%). No optimization needed."
+    fi
+}
+
+# Check for resource exhaustion
+check_resource_exhaustion() {
+    local issues=()
+    
+    # Check memory usage
+    local mem_usage
+    mem_usage=$(free | awk '/^Mem:/ {printf "%.1f", $3/$2 * 100.0}')
+    if [[ $(echo "$mem_usage > 90" | bc -l 2>/dev/null) -eq 1 ]]; then
+        issues+=("Critical memory usage: ${mem_usage}%")
+    fi
+    
+    # Check disk usage
+    local disk_usage
+    disk_usage=$(df / | awk 'NR==2 {print $5}' | sed 's/%//')
+    if [[ $disk_usage -gt 90 ]]; then
+        issues+=("Critical disk usage: ${disk_usage}%")
+    fi
+    
+    # Check for too many open files
+    local open_files
+    open_files=$(lsof 2>/dev/null | wc -l)
+    if [[ $open_files -gt 1000 ]]; then
+        issues+=("High number of open files: $open_files")
+    fi
+    
+    # Check for zombie processes
+    local zombies
+    zombies=$(ps aux | grep -E 'Z.*<defunct>' | grep -v grep | wc -l)
+    if [[ $zombies -gt 5 ]]; then
+        issues+=("Multiple zombie processes: $zombies")
+    fi
+    
+    if [[ ${#issues[@]} -gt 0 ]]; then
+        log_warn "Resource exhaustion detected:"
+        for issue in "${issues[@]}"; do
+            log_warn "  - $issue"
+        done
+        return 1
+    fi
+    
+    return 0
 }
 
 cleanup_temp_files() {
@@ -951,4 +1186,72 @@ secure_log_message() {
     local ip=$(who am i | awk '{print $NF}' | sed 's/[()]//g' 2>/dev/null || echo "unknown")
     
     log_message "$level" "[$user@$ip] $message"
+}
+
+# --- Netcat Compatibility Check ---
+check_nc_compatibility() {
+    # Test for OpenBSD netcat compatibility
+    if echo | nc -l -p 0 -w 1 2>&1 | grep -qi 'usage\|invalid\|unknown option'; then
+        print_warning "Your version of netcat (nc) does not support '-l -p'. Restart watcher and some features may not work."
+        print_info "To fix this, install netcat-openbsd:"
+        print_info "  Ubuntu/Debian: sudo apt install netcat-openbsd"
+        print_info "  CentOS/RHEL: sudo yum install nc"
+        print_info "  Arch: sudo pacman -S openbsd-netcat"
+        
+        # Check if alternative netcat is available
+        if command -v ncat &>/dev/null; then
+            print_info "Found ncat (nmap netcat) - this may work as an alternative"
+        fi
+        return 1
+    fi
+    print_success "Netcat compatibility check passed"
+    return 0
+}
+
+# --- Port Availability Check ---
+check_port_availability() {
+    local port="$1"
+    
+    # Check if port is a valid number
+    if ! validate_port "$port"; then
+        return 1
+    fi
+    
+    # Check if port is already in use
+    if netstat -tuln 2>/dev/null | grep -q ":$port "; then
+        return 1
+    fi
+    
+    # Alternative check using ss
+    if ss -tuln 2>/dev/null | grep -q ":$port "; then
+        return 1
+    fi
+    
+    # Alternative check using lsof
+    if lsof -i ":$port" 2>/dev/null | grep -q LISTEN; then
+        return 1
+    fi
+    
+    return 0
+}
+
+# --- Configuration Backup ---
+backup_config() {
+    local config_file="$1"
+    
+    if [ ! -f "$config_file" ]; then
+        return 1
+    fi
+    
+    local backup_path="$BACKUP_DIR/$(basename "$config_file").bak.$(date +%F_%T)"
+    mkdir -p "$BACKUP_DIR"
+    
+    if cp "$config_file" "$backup_path" 2>/dev/null; then
+        chmod 600 "$backup_path"
+        log_debug "Configuration backed up to: $backup_path"
+        return 0
+    else
+        print_warning "Failed to backup $config_file to $backup_path. Please check permissions."
+        return 1
+    fi
 } 

@@ -5,43 +5,365 @@
 # Note: When built into easybackhaul.sh, all modules are concatenated together
 # No need to source separate files as they're already included
 
+# WARNING: Do not use a global CONFIG_FILE variable. Always pass config file paths explicitly to functions.
+
 # --- Tunnel Management ---
 manage_tunnels() {
-    while true; do
-        clear
-        print_server_info_banner
-        print_info "--- Available Backhaul Services ---"
-        mapfile -t services < <(systemctl list-unit-files --type=service 'backhaul-*.service' --no-legend | awk '{print $1}' | grep -v 'backhaul-watcher-')
+    # Help function for tunnel list
+    tunnel_list_help() {
+        print_info "================= Tunnel Management Help ================="
+        echo "This menu lets you manage your Backhaul tunnels."
+        echo
+        echo "Options:"
+        echo "- Select a tunnel number to manage that specific tunnel"
+        echo "- Each tunnel shows its current status (Running/Stopped)"
+        echo "- From the tunnel menu, you can start, stop, restart, view logs, etc."
+        echo "- Use 0 to return to the main menu"
+        echo "- For more details, see the main help from the main menu."
+        echo "================================================================"
+        press_any_key
+    }
 
-        if [ ${#services[@]} -eq 0 ]; then
-            print_warning "No Backhaul services found. Use 'Configure a New Tunnel' first."
+    while true; do
+        print_submenu_header "Available Backhaul Tunnels"
+        
+        mapfile -t services < <(systemctl list-unit-files --type=service 'backhaul-*.service' --no-legend | awk '{print $1}' | grep -v 'backhaul-watcher-')
+        
+        if [[ ${#services[@]} -eq 0 ]]; then
+            print_warning "⚠ No Backhaul tunnels found. Use 'Configure a New Tunnel' first."
             press_any_key
             return
         fi
-
+        
         local i=1
-        for s in "${services[@]}"; do
-            if systemctl is-active --quiet "$s"; then
-                echo -e " $i. \e[32m$s (Active)\e[0m"
+        for service in "${services[@]}"; do
+            local status
+            if systemctl is-active --quiet "$service"; then
+                status="✓ Running"
             else
-                echo -e " $i. \e[31m$s (Inactive)\e[0m"
+                status="✗ Stopped"
             fi
+            echo " $i. $service ($status)"
             ((i++))
         done
-        echo " 0. Back to Main Menu"
         
-        local choice
-        read -p "Select a service to manage [0-$((${#services[@]}))]: " choice
+        print_menu_footer
+        
+        menu_loop 0 $((i-1)) "?" "tunnel_list_help" "Select tunnel to manage [0-$((i-1)), ? for help]"
+        
+        case $choice in
+            0) return ;;
+            *)
+                local selected_service="${services[$((choice-1))]}"
+                local suffix=$(echo "$selected_service" | sed 's/backhaul-\(.*\)\.service/\1/')
+                manage_specific_tunnel "$selected_service" "$suffix"
+                ;;
+        esac
+    done
+}
 
-        if [[ "$choice" == "0" ]]; then
-            return
-        elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#services[@]} ]; then
-            local service_name=${services[$((choice-1))]}
-            manage_single_tunnel "$service_name"
+manage_specific_tunnel() {
+    local service=$1 suffix=$2
+    local config_file="$CONFIG_DIR/config-${suffix}.toml"
+    
+    # Help function for specific tunnel management
+    tunnel_management_help() {
+        print_info "================= Tunnel Management Help ================="
+        echo "This menu lets you manage a specific Backhaul tunnel/service."
+        echo
+        echo " 1. Start: Start the selected tunnel service."
+        echo " 2. Stop: Stop the tunnel service."
+        echo " 3. Restart: Restart the tunnel service."
+        echo " 4. View Live Logs: View real-time tunnel logs."
+        echo " 5. View Configuration: View the TOML config (press q to exit)."
+        echo " 6. Edit Configuration: Edit config in nano, then optionally restart."
+        echo " 7. Change Log Level: Adjust log verbosity (debug/info/warn/error)."
+        echo " 8. Test Connection: Test if the tunnel is reachable."
+        echo " 9. Manage Restart Watcher: Set up automatic restart on errors."
+        echo "10. Validate Configuration: Check config syntax and validate settings."
+        echo "11. Show Tunnel Info: Display tunnel details and status."
+        echo "12. Health Check & Performance: Monitor tunnel health and performance."
+        echo "13. Delete Tunnel: Permanently remove this tunnel and all its data."
+        echo " 0. Back to Tunnel List: Return to the previous menu."
+        echo
+        echo "Tips:"
+        echo "- Use Ctrl+C to exit log views and return to this menu."
+        echo "- Use 'q' to exit configuration view."
+        echo "- For more details, see the main help from the main menu."
+        echo "================================================================"
+        press_any_key
+    }
+
+    while true; do
+        # Show tunnel status
+        local status
+        if systemctl is-active --quiet "$service"; then
+            status="✓ Running"
         else
-            print_warning "Invalid selection."
-            press_any_key
+            status="✗ Stopped"
         fi
+        
+        print_submenu_header "Managing Tunnel: $suffix" "$service" "$status"
+        
+        # Show tunnel info
+        if [ -f "$config_file" ]; then
+            local cert_path=$(grep '^tls_cert' "$config_file" | cut -d'"' -f2)
+            local key_path=$(grep '^tls_key' "$config_file" | cut -d'"' -f2)
+            if [[ -n "$cert_path" && -n "$key_path" ]]; then
+                print_info "TLS: ✓ Configured"
+            else
+                print_info "TLS: ⚠ Not configured"
+            fi
+        fi
+        
+        echo
+        print_info "Select an option:"
+        echo " 1. Start Tunnel"
+        echo " 2. Stop Tunnel"
+        echo " 3. Restart Tunnel"
+        echo " 4. View Live Logs"
+        echo " 5. View Configuration"
+        echo " 6. Edit Configuration"
+        echo " 7. Change Log Level"
+        echo " 8. Test Connection"
+        echo " 9. Manage Restart Watcher"
+        echo "10. Validate Configuration"
+        echo "11. Show Tunnel Info"
+        echo "12. Health Check & Performance"
+        echo "13. Delete Tunnel"
+        print_menu_footer
+        
+        menu_loop 0 13 "?" "tunnel_management_help" "Enter choice [0-13, ? for help]"
+        case $choice in
+            1) 
+                with_spinner "Starting tunnel" systemctl start "$service"
+                if [ $? -eq 0 ]; then
+                    print_success "✅ Tunnel started successfully. You can now connect to this tunnel."
+                else
+                    print_error "❌ Failed to start tunnel. Check logs for details."
+                fi
+                press_any_key
+                ;;
+            2) 
+                with_spinner "Stopping tunnel" systemctl stop "$service"
+                if [ $? -eq 0 ]; then
+                    print_success "✅ Tunnel stopped. Connections will be refused until restarted."
+                else
+                    print_error "❌ Failed to stop tunnel. Check logs for details."
+                fi
+                press_any_key
+                ;;
+            3) 
+                with_spinner "Restarting tunnel" systemctl restart "$service"
+                if [ $? -eq 0 ]; then
+                    print_success "✅ Tunnel restarted. Check logs if you encounter issues."
+                else
+                    print_error "❌ Failed to restart tunnel. Check logs for details."
+                fi
+                press_any_key
+                ;;
+            4)
+                print_info "--- Live Logs for Tunnel: $suffix ---"
+                echo
+                echo "Select log viewing mode:"
+                echo " 1) Live follow (Ctrl+C to exit log view and return to menu)"
+                echo " 2) Interactive (scroll/search, press q to quit, F to follow live, Ctrl+C to exit log view and return to menu)"
+                echo " 0) Cancel"
+                echo
+                while true; do
+                    read -p "Select [1-2, 0 to cancel, default 2]: " log_mode
+                    log_mode=${log_mode:-2}
+                    
+                    case $log_mode in
+                        0) break ;;
+                        1|2) 
+                            if [[ "$log_mode" == "1" ]]; then
+                                print_warning "⚠ You are about to enter live log view. Press Ctrl+C to exit log view and return to the menu."
+                            else
+                                print_warning "⚠ You are about to enter interactive log view. Use arrow keys to navigate, / to search, F to follow live, q to quit. Press Ctrl+C to exit log view and return to the menu."
+                            fi
+                            press_any_key
+                            
+                            if [[ "$log_mode" == "1" ]]; then
+                                # Run log viewer in subshell with default SIGINT
+                                (journalctl -u "$service" -f --no-pager)
+                            else
+                                (journalctl -u "$service" --no-pager | less -R)
+                            fi
+                            break
+                            ;;
+                        *) 
+                            print_warning "❌ Invalid option. Please enter 1, 2, or 0."
+                            press_any_key
+                            ;;
+                    esac
+                done
+                ;;
+            5)
+                print_info "--- Configuration for Tunnel: $suffix ---"
+                echo
+                print_info "Viewing configuration. Press 'q' to exit and return to the menu."
+                sleep 1
+                less "$config_file"
+                ;;
+            6)
+                if [ ! -f "$config_file" ]; then 
+                    print_error "❌ Config file not found for this tunnel. Please check your configuration and try again."
+                    press_any_key
+                    continue
+                fi
+                
+                backup_config "$config_file"
+                nano "$config_file"
+                if confirm_action "Restart tunnel to apply changes?" "y"; then
+                    with_spinner "Restarting tunnel" systemctl restart "$service"
+                    if [ $? -eq 0 ]; then
+                        print_success "✅ Tunnel restarted with new configuration."
+                    else
+                        print_error "❌ Failed to restart tunnel. Check logs for details."
+                    fi
+                fi
+                press_any_key
+                ;;
+            7)
+                print_info "--- Change Log Level for Tunnel: $suffix ---"
+                echo
+                local current_level=$(grep -E '^\s*log_level\s*=\s*"' "$config_file" | head -n1 | cut -d'"' -f2)
+                print_info "Current log level: ${current_level:-info}"
+                echo
+                echo "Available log levels:"
+                echo "  debug: Detailed debugging information."
+                echo "  info:  Normal operation messages (default)."
+                echo "  warn:  Warning messages only."
+                echo "  error: Error messages only."
+                echo "  cancel: Cancel log level change."
+                echo
+                select new_level in debug info warn error cancel; do
+                    case $new_level in
+                        debug|info|warn|error)
+                            update_config_value "$config_file" "log_level" "$new_level"
+                            print_success "✅ Log level updated to $new_level."
+                            if confirm_action "Restart tunnel to apply new log level?" "y"; then
+                                with_spinner "Restarting tunnel" systemctl restart "$service"
+                                if [ $? -eq 0 ]; then
+                                    print_success "✅ Tunnel restarted with new log level."
+                                else
+                                    print_error "❌ Failed to restart tunnel. Check logs for details."
+                                fi
+                            fi
+                            break
+                            ;;
+                        cancel)
+                            print_info "Log level change cancelled."
+                            break
+                            ;;
+                        *)
+                            print_warning "❌ Invalid selection."
+                            ;;
+                    esac
+                done
+                press_any_key
+                ;;
+            8) test_connection "$config_file"; press_any_key;;
+            9) manage_watcher_submenu "$service" "$suffix" "$config_file" ;;
+            10) validate_tunnel_config "$config_file" ;;
+            11)
+                clear
+                print_info "--- Tunnel Information: $suffix ---"
+                echo
+                echo "  - Service: $service"
+                echo "  - Config: $config_file"
+                echo "  - Status: $(systemctl is-active "$service" 2>/dev/null || echo "inactive")"
+                echo "  - Enabled: $(systemctl is-enabled "$service" 2>/dev/null || echo "disabled")"
+                press_any_key
+                ;;
+            12) show_tunnel_health_and_performance "$service" "$suffix" ;;
+            13)
+                print_info "--- Delete Tunnel: $suffix ---"
+                echo
+                print_warning "⚠ WARNING: This will permanently delete the tunnel and all its data!"
+                echo
+                echo "The following will be deleted:"
+                echo "  - Service: $service"
+                echo "  - Configuration: $config_file"
+                echo "  - Logs and temporary files"
+                echo "  - UFW rules (if any)"
+                echo
+                if confirm_action "Are you sure you want to PERMANENTLY delete this tunnel?" "n"; then
+                    print_warning "Deleting tunnel $suffix..."
+                    
+                    # Stop and disable service
+                    with_spinner "Stopping and disabling service" systemctl stop "$service" 2>/dev/null && systemctl disable "$service" 2>/dev/null
+                    
+                    # Remove service file
+                    local service_file="$SERVICE_DIR/$service"
+                    rm -f "$service_file"
+                    
+                    # Remove config file
+                    rm -f "$config_file"
+                    
+                    # Clean up watcher if exists
+                    local watcher_script="/tmp/backhaul-watcher-${suffix}.sh"
+                    local watcher_pid_file="/tmp/backhaul-watcher-${suffix}.pid"
+                    local watcher_log="/tmp/backhaul-watcher-${suffix}.log"
+                    
+                    if [[ -f "$watcher_pid_file" ]]; then
+                        local watcher_pid=$(cat "$watcher_pid_file")
+                        if [[ -n "$watcher_pid" ]]; then
+                            kill "$watcher_pid" 2>/dev/null
+                        fi
+                        rm -f "$watcher_pid_file"
+                    fi
+                    
+                    rm -f "$watcher_script" "$watcher_log"
+                    pkill -f "backhaul-watcher-${suffix}" 2>/dev/null
+                    
+                    # Remove UFW rules
+                    manage_ufw_delete "$suffix"
+                    
+                    # Reload systemd
+                    systemctl daemon-reload
+                    
+                    print_success "✅ Tunnel $suffix has been completely deleted. You may now create a new tunnel or exit."
+                    press_any_key
+                    return
+                else
+                    print_info "Tunnel deletion cancelled."
+                    press_any_key
+                fi
+                ;;
+            \?)
+                clear
+                print_info "================= Tunnel Management Help ================="
+                echo "This menu lets you manage a specific Backhaul tunnel."
+                echo
+                echo "Options:"
+                echo " 1. Start Tunnel: Start the tunnel service"
+                echo " 2. Stop Tunnel: Stop the tunnel service"
+                echo " 3. Restart Tunnel: Restart the tunnel service"
+                echo " 4. View Live Logs: View real-time tunnel logs"
+                echo " 5. View Configuration: View the TOML config (press q to exit)."
+                echo " 6. Edit Configuration: Edit the TOML config in nano editor"
+                echo " 7. Change Log Level: Set logging verbosity (debug, info, warn, error)"
+                echo " 8. Test Connection: Test if the tunnel can connect to its remote"
+                echo " 9. Manage Restart Watcher: Configure automatic restart on errors"
+                echo "10. Validate Configuration: Check config syntax and settings"
+                echo "11. Show Tunnel Info: Display tunnel details and status"
+                echo "12. Health Check & Performance: Monitor tunnel health, resource usage, and performance metrics."
+                echo "13. Delete Tunnel: Permanently remove this tunnel and all its data"
+                echo " 0. Back to Tunnel List: Return to the previous menu."
+                echo
+                echo "- Use Ctrl+C to exit log views and return to this menu."
+                echo "- Configuration changes require a restart to take effect."
+                echo "- The restart watcher can automatically restart tunnels on errors."
+                press_any_key
+                ;;
+            0) return ;;
+            *)
+                print_warning "❌ Invalid option. Please enter 0-13 or ? for help."
+                press_any_key
+                ;;
+        esac
     done
 }
 

@@ -2,6 +2,9 @@
 # restart_watcher.sh - Per-tunnel coordinated restart watcher for EasyBackhaul
 # This script is intended to be sourced or built into the main script, or run as a systemd service.
 
+# WARNING: This script requires a version of netcat (nc) that supports '-l -p'.
+#          Some distributions (e.g., Debian/Ubuntu) may require installing netcat-openbsd.
+
 # Required environment/config variables (set by main script or systemd):
 #   SERVICE_NAME         - systemd service name (e.g. backhaul-client-xxx.service)
 #   LOG_PATTERN          - regex for error detection (e.g. 'ERROR|FATAL')
