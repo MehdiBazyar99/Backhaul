@@ -46,10 +46,12 @@ manage_cron_job_for_service() {
         "5. Set/Update: Custom Interval (minutes)"
         "6. Remove Auto-Restart Cron Job"
     )
-    local cron_exit_details=("0" "Back to Tunnel Management") # Array: [key, text]
+    # local cron_exit_details=("0" "Back to Tunnel Management") # No longer needed
     local user_choice menu_rc
+    local action_taken=false
 
     while true; do
+        action_taken=false # Reset for each loop iteration
         print_menu_header "secondary" "Cron Auto-Restart Management" "Service: $service_name"
         
         current_cron_job=$(crontab -l 2>/dev/null | grep -F "$service_name" | grep -F "# $CRON_COMMENT_TAG")
@@ -60,54 +62,63 @@ manage_cron_job_for_service() {
         fi
         echo
 
-        # Pass service_name to the help function for context
-        menu_loop "Select option" cron_menu_options cron_exit_details "_manage_cron_menu_help \"$service_name\""
-        user_choice="$MENU_CHOICE" # menu_loop sets MENU_CHOICE
-        menu_rc=$?                # menu_loop returns status code
+        menu_loop "Select option" cron_menu_options "_manage_cron_menu_help \"$service_name\""
+        user_choice="$MENU_CHOICE"
+        menu_rc=$?
         
-        # Handle universal navigation keys based on menu_rc
         case "$menu_rc" in
-            3) go_to_main_menu; return 0 ;; # m -> main menu
-            4) request_script_exit; return 0 ;; # e -> exit script
-            5) return_from_menu; return 0 ;; # r -> return/back (to previous menu)
-            2) continue ;; # ? -> help was shown, re-loop current menu
-            0) # Numeric choice or default exit "0"
-               # Proceed to specific choice handling below
-               ;;
-            *) handle_error "ERROR" "Unhandled menu_loop code $menu_rc in manage_cron_job_for_service"; press_any_key; continue;;
-        esac
-
-        # Handle numeric choices and the specific default exit ("0")
-        case "$user_choice" in
-            "1") _set_service_cron_job "*/15 * * * *" "$service_name"; break ;;
-            "2") _set_service_cron_job "0 * * * *" "$service_name"; break ;;
-            "3") _set_service_cron_job "0 */6 * * *" "$service_name"; break ;;
-            "4") _set_service_cron_job "0 0 * * *" "$service_name"; break ;;
-            "5")
-                local custom_interval
-                print_info "Enter custom interval in minutes (1-1440, or 0 to cancel)."
-                while true; do
-                    read -r -p "Interval (minutes): " custom_interval
-                    if [[ "$custom_interval" == "0" ]]; then
-                        print_info "Custom interval setup cancelled."
-                        break # Breaks inner loop, will re-show cron menu
-                    elif [[ "$custom_interval" =~ ^[0-9]+$ ]] && (( custom_interval >= 1 && custom_interval <= 1440 )); then
-                        _set_service_cron_job "*/${custom_interval} * * * *" "$service_name"
-                        break 2 # Breaks both loops, exiting manage_cron_job_for_service after success
-                    else
-                        print_warning "Invalid interval. Please enter a number between 1 and 1440, or 0 to cancel."
-                    fi
-                done
-                # If inner loop broken by '0', outer loop continues. If broken by valid custom interval, outer loop also breaks.
-                if [[ "$custom_interval" != "0" ]]; then break; fi
+            0) # Numeric choice
+                action_taken=true
+                case "$user_choice" in
+                    "1") _set_service_cron_job "*/15 * * * *" "$service_name" ;;
+                    "2") _set_service_cron_job "0 * * * *" "$service_name" ;;
+                    "3") _set_service_cron_job "0 */6 * * *" "$service_name" ;;
+                    "4") _set_service_cron_job "0 0 * * *" "$service_name" ;;
+                    "5")
+                        local custom_interval
+                        print_info "Enter custom interval in minutes (1-1440, or 'c' to cancel this step)."
+                        while true; do
+                            read -r -p "Interval (minutes) or 'c': " custom_interval
+                            custom_interval=$(echo "$custom_interval" | tr '[:upper:]' '[:lower:]')
+                            if [[ "$custom_interval" == "c" ]]; then
+                                print_info "Custom interval setup cancelled."
+                                action_taken=false # Not a full action if cancelled here
+                                break
+                            elif [[ "$custom_interval" =~ ^[0-9]+$ ]] && (( custom_interval >= 1 && custom_interval <= 1440 )); then
+                                _set_service_cron_job "*/${custom_interval} * * * *" "$service_name"
+                                break
+                            else
+                                print_warning "Invalid interval. Please enter 1-1440, or 'c' to cancel."
+                            fi
+                        done
+                        ;;
+                    "6") _remove_service_cron_job "$service_name" ;;
+                    *)
+                        print_warning "Invalid option: $user_choice"; press_any_key
+                        action_taken=false # Invalid choice is not an action
+                        ;;
+                esac
+                if $action_taken; then break; fi # Break while true if a valid action was taken
                 ;;
-            "6") _remove_service_cron_job "$service_name"; break ;;
-            "0") return_from_menu; return 0 ;;
-            *) print_warning "Invalid option. Please try again."; press_any_key ;;
+            2) # '?' Help shown
+                continue ;;
+            3) # 'm' Main Menu
+                go_to_main_menu; return 0 ;;
+            4) # 'x' Exit script
+                request_script_exit; return 0 ;;
+            5) # 'r' Return/Back (to tunnel management)
+                return_from_menu; return 0 ;;
+            6) # 'c' Cancel (acts like 'r' here)
+                return_from_menu; return 0 ;;
+            *)
+                handle_error "ERROR" "Unhandled menu_loop code $menu_rc in manage_cron_job_for_service"; press_any_key; continue;;
         esac
     done
-    press_any_key # After a cron job action
-    return_from_menu # Return to the calling menu (likely tunnel management)
+
+    if $action_taken; then
+        press_any_key # After a cron job action
+    fi
+    return_from_menu
 }
 
 # Internal function to set a cron job for a specific service

@@ -42,30 +42,33 @@ manage_tunnels_menu() {
             print_warning "No Backhaul tunnels configured yet."
             print_info "Use 'Configure a New Tunnel' from the main menu to create one."
 
-            local no_tunnel_exit_options=("0. Back to Main Menu") # Only one sensible option
+            # local no_tunnel_exit_options=("0. Back to Main Menu") # No longer needed
             local no_tunnel_choice no_tunnel_rc
 
             # Prompt is empty as options are self-explanatory or covered by footer
-            menu_loop "" tunnel_options no_tunnel_exit_options "_manage_tunnels_menu_help"
-            no_tunnel_choice="$MENU_CHOICE"
+            # Pass empty options array, menu_loop handles it.
+            menu_loop "" tunnel_options "_manage_tunnels_menu_help"
+            no_tunnel_choice="$MENU_CHOICE" # Will be a nav key
             no_tunnel_rc=$?
 
             case "$no_tunnel_rc" in
-                0) # User selected "0. Back to Main Menu"
-                    if [[ "$no_tunnel_choice" == "0" ]]; then return_from_menu; return 0; fi
-                    ;; # Should not happen if only "0" is an option.
-                1) # User selected a numeric choice - not possible here.
-                    print_warning "Unexpected choice: $no_tunnel_choice"; press_any_key; continue ;;
-                2) # Help
+                # Case 0 (numeric choice) is not possible if tunnel_options is empty.
+                # menu_loop will only return nav key codes.
+                2) # '?' Help shown
                     continue ;;
-                3) # Main Menu
+                3) # 'm' Main Menu
                     go_to_main_menu; return 0 ;;
-                4) # Exit
+                4) # 'x' Exit script
                     request_script_exit; return 0 ;;
-                *) # Default (e.g. Enter with no input) - treat as back
+                5) # 'r' Return/Back (to main menu)
                     return_from_menu; return 0 ;;
+                6) # 'c' Cancel (to main menu)
+                    return_from_menu; return 0 ;;
+                *)
+                    print_warning "Unexpected choice/return code: $no_tunnel_rc / $no_tunnel_choice"; press_any_key; continue ;;
             esac
-            continue # Re-loop if help was shown or unexpected case.
+            #This continue should not be reached if all nav keys are handled properly above.
+            # continue
         fi
         
         print_menu_header "primary" "Manage Tunnels" "Select a Tunnel"
@@ -101,39 +104,38 @@ manage_tunnels_menu() {
             ((idx++))
         done
 
-        local exit_options=("0. Back to Main Menu")
+        # local exit_options=("0. Back to Main Menu") # No longer needed
         local user_choice menu_rc
 
-        menu_loop "Select tunnel to manage" tunnel_options exit_options "_manage_tunnels_menu_help"
+        menu_loop "Select tunnel to manage" tunnel_options "_manage_tunnels_menu_help"
         user_choice="$MENU_CHOICE"
         menu_rc=$?
 
         case "$menu_rc" in
-            0) # Numeric choice or "0"
-                if [[ "$user_choice" == "0" ]]; then
-                    return_from_menu; return 0;
-                elif [[ -n "${service_name_map[$user_choice]}" ]]; then
+            0) # Numeric choice
+                if [[ -n "${service_name_map[$user_choice]}" ]]; then
                     local selected_service="${service_name_map[$user_choice]}"
                     local selected_suffix="${tunnel_suffix_map[$user_choice]}"
                     navigate_to_menu "manage_specific_tunnel_menu \"$selected_service\" \"$selected_suffix\""
                     return 0 # Let main loop call the new menu function
                 else
-                    print_warning "Invalid selection. Please try again."
+                    # This case should ideally not be reached if menu_loop validates numeric range
+                    print_warning "Invalid numeric selection: $user_choice. Please try again."
                     press_any_key
                 fi
                 ;;
-            1) # Default/Enter - Treat as invalid in this context or re-prompt
-                print_warning "Invalid selection. Please try again."
-                press_any_key
-                ;;
-            2) # Help
+            2) # '?' Help shown
                 continue ;;
-            3) # Main Menu
+            3) # 'm' Main Menu
                 go_to_main_menu; return 0 ;;
-            4) # Exit
+            4) # 'x' Exit script
                 request_script_exit; return 0 ;;
-            *) # Should not happen
-                print_warning "Unexpected menu_loop return. Please try again."
+            5) # 'r' Return/Back (to main menu)
+                return_from_menu; return 0 ;;
+            6) # 'c' Cancel (to main menu)
+                return_from_menu; return 0 ;;
+            *)
+                print_warning "Unexpected menu_loop return in manage_tunnels_menu: $menu_rc, choice: $user_choice"
                 press_any_key
                 ;;
         esac
@@ -178,7 +180,7 @@ manage_specific_tunnel_menu() {
         "11. Validate Configuration" # Updated
         "12. Delete Tunnel"
     )
-    local exit_options=("0. Back to Tunnel List")
+    # local exit_options=("0. Back to Tunnel List") # No longer needed
     local user_choice menu_rc
 
     while true; do
@@ -201,25 +203,31 @@ manage_specific_tunnel_menu() {
         
         print_menu_header "secondary" "Managing Tunnel: $tunnel_suffix" "Service: $service_name" "Status: ${current_status_color}${current_status_str}${COLOR_RESET}"
         
-        menu_loop "Select action" menu_options exit_options "_specific_tunnel_menu_help"
+        menu_loop "Select action" menu_options "_specific_tunnel_menu_help"
         user_choice="$MENU_CHOICE"
         menu_rc=$?
 
-        local action_performed_and_continue=false
+        # local action_performed_and_continue=false # May not be needed if all actions handle their own flow
 
         case "$menu_rc" in
-            0) # Numeric choice or "0"
+            0) # Numeric choice
                 case "$user_choice" in
                     "1") _mng_start_tunnel "$service_name" ;;
                     "2") _mng_stop_tunnel "$service_name" ;;
                     "3") _mng_restart_tunnel "$service_name" ;;
-                    "4") view_system_log "journalctl" "$service_name" "Logs for $tunnel_suffix" ;;
+                    "4")
+                        # view_system_log is a self-contained menu, use navigate_to_menu
+                        navigate_to_menu "view_system_log \"journalctl\" \"$service_name\" \"Logs for $tunnel_suffix\""
+                        return 0 ;;
                     "5") _mng_view_configuration "$config_file_path" "$tunnel_suffix" ;;
                     "6") _mng_edit_configuration "$config_file_path" "$service_name" ;;
-                    "7") _mng_change_log_level "$config_file_path" "$service_name" ;; # This function has its own menu loop
+                    "7")
+                        # _mng_change_log_level is a self-contained menu, use navigate_to_menu
+                        navigate_to_menu "_mng_change_log_level \"$config_file_path\" \"$service_name\""
+                        return 0 ;;
                     "8") _mng_hot_reload_service "$service_name" ;;
                     "9") _mng_test_connection "$config_file_path" ;;
-                    "10") # Manage Watcher
+                    "10")
                          if type manage_tunnel_watcher &>/dev/null; then
                             navigate_to_menu "manage_tunnel_watcher \"$service_name\" \"$tunnel_suffix\" \"$config_file_path\""
                             return 0
@@ -228,48 +236,40 @@ manage_specific_tunnel_menu() {
                             press_any_key
                          fi
                          ;;
-                    "11") # Validate Config
-                        if type validate_specific_tunnel_config &>/dev/null; then
-                            validate_specific_tunnel_config "$config_file_path"
+                    "11")
+                        if type validate_tunnel_config &>/dev/null; then # Assuming this is the correct validation function
+                            validate_tunnel_config "$config_file_path" # Or validate_specific_tunnel_config if it exists
                         else
-                             # This function might not exist yet, or might be in validation.sh
-                            handle_error "INFO" "Config validation function not yet available. (validate_specific_tunnel_config)"
+                            handle_error "INFO" "Config validation function not available."
                         fi
-                        press_any_key # Assume validation prints output then waits
+                        press_any_key
                         ;;
-                    "12") # Delete Tunnel
+                    "12")
                         if _mng_delete_tunnel "$service_name" "$tunnel_suffix" "$config_file_path"; then
-                            # Deletion successful, return to previous menu (tunnel list)
-                            return_from_menu
+                            return_from_menu # Deletion successful, return to tunnel list
                             return 0
                         fi
-                        # If deletion was cancelled, loop continues, press_any_key handled by _mng_delete_tunnel
-                        action_performed_and_continue=true # Prevent double press_any_key
+                        # If deletion cancelled, _mng_delete_tunnel handles press_any_key and returns 1
+                        # The loop will continue to re-display this menu.
                         ;;
-                    "0") return_from_menu; return 0 ;;
-                    *) print_warning "Invalid option."; press_any_key ;;
+                    *) print_warning "Invalid option: $user_choice"; press_any_key ;;
                 esac
                 ;;
-            1) # Default/Enter - Treat as invalid or re-prompt
-                print_warning "Invalid action. Please select a number or navigation key."
-                press_any_key
-                ;;
-            2) # Help
+            2) # '?' Help shown
                 continue ;;
-            3) # Main Menu
+            3) # 'm' Main Menu
                 go_to_main_menu; return 0 ;;
-            4) # Exit
+            4) # 'x' Exit script
                 request_script_exit; return 0 ;;
+            5) # 'r' Return/Back (to tunnel list)
+                return_from_menu; return 0 ;;
+            6) # 'c' Cancel (acts like 'r' here, back to tunnel list)
+                return_from_menu; return 0 ;;
             *)
-                print_warning "Unexpected menu_loop return. Please try again."
+                print_warning "Unexpected menu_loop return in manage_specific_tunnel_menu: $menu_rc, choice: $user_choice"
                 press_any_key
                 ;;
         esac
-        # Most _mng_ functions call press_any_key themselves.
-        # If an action was taken that didn't (e.g. validation that just prints), and it's not a nav action
-        # if [[ "$action_performed_and_continue" == "false" && "$menu_rc" -le 1 && "$user_choice" != "0" ]]; then
-        #    # This logic is getting complex. Simpler to ensure all action handlers use press_any_key if they don't navigate.
-        # fi
     done
 }
 
@@ -382,30 +382,36 @@ _mng_change_log_level() {
         print_info "Current log level in $(basename "$cfg_file"): ${COLOR_CYAN}$current_level${COLOR_RESET}"
 
         local log_level_options=("1. debug" "2. info" "3. warn" "4. error")
-        local log_level_exit_options=("0. Cancel and Back") # Changed for clarity
+        # local log_level_exit_options=("0. Cancel and Back") # No longer needed
         local user_choice menu_rc
 
-        menu_loop "Select new log level" log_level_options log_level_exit_options "_log_level_help"
+        menu_loop "Select new log level" log_level_options "_log_level_help"
         user_choice="$MENU_CHOICE"
         menu_rc=$?
 
         local new_level=""
         case "$menu_rc" in
-            0) # Numeric or "0"
+            0) # Numeric choice
                 case "$user_choice" in
                     "1") new_level="debug" ;;
                     "2") new_level="info" ;;
                     "3") new_level="warn" ;;
                     "4") new_level="error" ;;
-                    "0") print_info "Log level change cancelled."; press_any_key; return ;; # Return to specific tunnel menu
-                    *) print_warning "Invalid selection."; press_any_key; continue ;; # Re-loop this sub-menu
+                    *) print_warning "Invalid numeric selection: $user_choice"; press_any_key; continue ;;
                 esac
                 ;;
-            1) print_warning "Invalid selection."; press_any_key; continue ;; # Re-loop this sub-menu
-            2) continue ;; # Help shown, re-loop this sub-menu
-            3) go_to_main_menu; return ;; # Propagate main menu request
-            4) request_script_exit; return ;; # Propagate exit request
-            *) print_warning "Unexpected menu return."; press_any_key; continue ;; # Re-loop
+            2) # '?' Help shown
+                continue ;;
+            3) # 'm' Main Menu
+                go_to_main_menu; return ;;
+            4) # 'x' Exit script
+                request_script_exit; return ;;
+            5) # 'r' Return/Back
+                print_info "Log level change cancelled via 'r'."; press_any_key; return_from_menu; return ;;
+            6) # 'c' Cancel
+                print_info "Log level change cancelled via 'c'."; press_any_key; return_from_menu; return ;;
+            *)
+                print_warning "Unexpected menu return in log level: $menu_rc, choice: $user_choice"; press_any_key; continue ;;
         esac
 
         if [[ -n "$new_level" ]]; then

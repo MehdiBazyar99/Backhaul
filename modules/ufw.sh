@@ -136,43 +136,45 @@ manage_ufw_main_menu() {
         "4. Reset UFW (Deletes ALL rules)"
         "5. Clean Orphaned EasyBackhaul Rules"
     )
-    local ufw_exit_details=("0" "Back to Main Menu") # Array: [key, text]
+    # local ufw_exit_details=("0" "Back to Main Menu") # No longer needed
     local user_choice menu_rc
 
     while true; do
         local ufw_current_status="Inactive"
-        if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then # Added 2>/dev/null for ufw status
+        if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
             ufw_current_status="Active"
         elif ! command -v ufw &>/dev/null; then
             ufw_current_status="Not Installed"
         fi
         print_menu_header "primary" "UFW Firewall Management" "Status: $ufw_current_status"
         
-        menu_loop "Select UFW option" ufw_menu_options ufw_exit_details "_ufw_menu_help"
-        user_choice="$MENU_CHOICE" # menu_loop sets MENU_CHOICE
-        menu_rc=$?                # menu_loop returns status code
+        menu_loop "Select UFW option" ufw_menu_options "_ufw_menu_help"
+        user_choice="$MENU_CHOICE"
+        menu_rc=$?
         
-        # Handle universal navigation keys based on menu_rc
         case "$menu_rc" in
-            3) go_to_main_menu; return 0 ;; # m -> main menu
-            4) request_script_exit; return 0 ;; # e -> exit script
-            5) return_from_menu; return 0 ;; # r -> return/back (to previous menu)
-            2) continue ;; # ? -> help was shown, re-loop current menu
-            0) # Numeric choice or default exit "0"
-               # Proceed to specific choice handling below
-               ;;
-            *) handle_error "ERROR" "Unhandled menu_loop code $menu_rc in manage_ufw_main_menu"; press_any_key; continue ;;
-        esac
-
-        # Handle numeric choices and the specific default exit ("0")
-        case "$user_choice" in
-            "1") _enable_ufw_with_ssh_allow ;;
-            "2") _disable_ufw ;;
-            "3") _view_ufw_status ;;
-            "4") _reset_ufw ;;
-            "5") _clean_orphaned_ufw_rules ;;
-            "0") return_from_menu; return 0 ;; # Default exit for this menu
-            *) print_warning "Invalid option. Please try again."; press_any_key ;;
+            0) # Numeric choice
+                case "$user_choice" in
+                    "1") _enable_ufw_with_ssh_allow ;;
+                    "2") _disable_ufw ;;
+                    "3") _view_ufw_status ;;
+                    "4") _reset_ufw ;;
+                    "5") _clean_orphaned_ufw_rules ;;
+                    *) print_warning "Invalid option: $user_choice"; press_any_key ;;
+                esac
+                ;;
+            2) # '?' Help shown
+                continue ;;
+            3) # 'm' Main Menu
+                go_to_main_menu; return 0 ;;
+            4) # 'x' Exit script
+                request_script_exit; return 0 ;;
+            5) # 'r' Return/Back (to main menu)
+                return_from_menu; return 0 ;;
+            6) # 'c' Cancel (acts like 'r' here)
+                return_from_menu; return 0 ;;
+            *)
+                handle_error "ERROR" "Unhandled menu_loop code $menu_rc in manage_ufw_main_menu"; press_any_key; continue ;;
         esac
     done
 }

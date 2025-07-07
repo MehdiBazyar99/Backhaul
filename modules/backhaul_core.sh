@@ -236,72 +236,85 @@ download_backhaul_binary_workflow() {
         "4. Run Network Diagnostics"
         "5. Skip Installation (Advanced)"
     )
-    local current_exit_details=("0" "Cancel Installation") # Array: [key, text]
+    # local current_exit_details=("0" "Cancel Installation") # No longer needed
     local user_choice menu_rc
 
     while true; do
         print_menu_header "primary" "Backhaul Binary Installation" "Choose Installation Method"
-        # Pass arrays by name
-        menu_loop "Select option" menu_options current_exit_details "_download_menu_help"
-        user_choice="$MENU_CHOICE" # menu_loop sets MENU_CHOICE
-        menu_rc=$?                # menu_loop returns status code
+        menu_loop "Select option" menu_options "_download_menu_help"
+        user_choice="$MENU_CHOICE"
+        menu_rc=$?
         
-        # Handle universal navigation keys based on menu_rc
+        local install_attempted=false
+        local install_succeeded=false
+
         case "$menu_rc" in
-            3) go_to_main_menu; return 0 ;; # m -> main menu
-            4) request_script_exit; return 0 ;; # e -> exit script
-            5) # r -> return/back (for this top-level workflow, it's like cancelling)
+            0) # Numeric choice
+                install_attempted=true
+                case "$user_choice" in
+                    "1") # GitHub Download
+                        if _download_from_github "$system_os" "$detected_arch_suffix"; then install_succeeded=true; fi
+                        ;;
+                    "2") # Local File
+                        if _download_from_local_file "$system_os" "$detected_arch_suffix"; then install_succeeded=true; fi
+                        ;;
+                    "3") # Alternative URL
+                        if _download_from_alternative_source "$system_os" "$detected_arch_suffix"; then install_succeeded=true; fi
+                        ;;
+                    "4") # Network Diagnostics
+                        if type run_network_diagnostics_menu &>/dev/null; then
+                            navigate_to_menu "run_network_diagnostics_menu"
+                            return 0 # Let main loop call it; run_network_diagnostics_menu will return here
+                        else
+                            handle_error "ERROR" "Network diagnostics function not available."; press_any_key
+                        fi
+                        install_attempted=false # Not an install attempt
+                        ;;
+                    "5") # Skip
+                        print_warning "Skipping binary installation."
+                        print_info "You can install the binary later using the main menu."
+                        print_info "Ensure it's placed at: $BIN_PATH"
+                        press_any_key
+                        return 0 # Successfully skipped
+                        ;;
+                    *)
+                        print_warning "Invalid option selected in download workflow: $user_choice"; press_any_key
+                        install_attempted=false
+                        ;;
+                esac
+                ;;
+            2) # '?' Help shown
+                continue ;; # Re-loop current menu
+            3) # 'm' Main Menu
+                # If called from initial wizard, main menu isn't fully available.
+                # Treat 'm' like 'r' or 'c' here - cancel installation workflow.
+                print_info "Installation cancelled via 'm' key."
+                return 1 ;;
+            4) # 'x' Exit script
+                request_script_exit; return 0 ;;
+            5) # 'r' Return/Back (cancel installation workflow)
                print_info "Installation cancelled via 'r' key."
                return 1 ;;
-            2) continue ;; # ? -> help was shown, re-loop current menu
+            6) # 'c' Cancel (cancel installation workflow)
+               print_info "Installation cancelled via 'c' key."
+               return 1 ;;
+            *)
+                print_warning "Unexpected menu_loop return in download_backhaul_binary_workflow: $menu_rc"; press_any_key
+                ;;
         esac
 
-        # Handle numeric choices and the specific default exit ("0")
-        case "$user_choice" in
-            "1") # GitHub Download
-                _download_from_github "$system_os" "$detected_arch_suffix" # This function will return 0 on success, 1 on failure
-                # If successful, download_backhaul_binary_workflow should also return 0
-                # If _download_from_github was successful (which means install_downloaded_binary was successful),
-                # we can assume the workflow is complete.
-                if [[ $? -eq 0 ]]; then return 0; fi
-                # If it failed, the error message is handled in _download_from_github or install_downloaded_binary
+        if $install_attempted; then
+            if $install_succeeded; then
+                # install_downloaded_binary (called by _download_* helpers) already verifies.
+                # If it returns success, we assume verification passed.
+                return 0 # Overall success for download_backhaul_binary_workflow
+            else
+                # Error messages are handled within _download_* or install_downloaded_binary
                 # Loop will continue to re-prompt installation method.
-                ;;
-            "2") # Local File
-                _download_from_local_file "$system_os" "$detected_arch_suffix"
-                if [[ $? -eq 0 ]]; then return 0; fi
-                ;;
-            "3") # Alternative URL
-                _download_from_alternative_source "$system_os" "$detected_arch_suffix"
-                if [[ $? -eq 0 ]]; then return 0; fi
-                ;;
-            "4") # Network Diagnostics
-                # run_network_diagnostics_menu is a self-contained menu loop.
-                # It will handle its own navigation and return when the user exits it.
-                # We need to ensure it's called correctly.
-                # If run_network_diagnostics_menu itself needs to trigger main menu or exit script, it should use the nav helpers.
-                # For now, assume it returns to this loop.
-                if type run_network_diagnostics_menu &>/dev/null; then
-                    navigate_to_menu "run_network_diagnostics_menu"
-                    return 0 # Let main loop call it
-                else
-                    handle_error "ERROR" "Network diagnostics function not available."
-                fi
-                ;;
-            "5") # Skip
-                print_warning "Skipping binary installation."
-                print_info "You can install the binary later using the main menu."
-                print_info "Ensure it's placed at: $BIN_PATH"
-                press_any_key
-                return 0 # Successfully skipped
-                ;;
-            "0") # Cancel Installation (Matches current_exit_details[0])
-                print_info "Installation cancelled."
-                return 1 # Signify cancellation/failure
-                ;;
-            *) 
-                print_warning "Invalid option selected in download workflow."
-                ;;
+                press_any_key # Ensure user sees error before re-prompt
+            fi
+        fi
+        # If not an install attempt (like diagnostics or invalid option), loop continues.
         esac
         # If an option failed and didn't return, loop back to show menu again
         press_any_key
@@ -442,90 +455,98 @@ run_network_diagnostics_menu() {
     }
 
     local diag_menu_options=("1. Run All Network Tests")
-    local diag_exit_details=("0" "Back to Installation Options") # Array: [key, text]
+    # local diag_exit_details=("0" "Back to Installation Options") # No longer needed
     local user_choice diag_rc
 
     while true; do
         print_menu_header "secondary" "Network Connectivity Diagnostics"
-        menu_loop "Select option" diag_menu_options diag_exit_details "_network_diag_help"
+        menu_loop "Select option" diag_menu_options "_network_diag_help"
         user_choice="$MENU_CHOICE"
         diag_rc=$?
 
         case "$diag_rc" in
-            3) go_to_main_menu; return ;; # m -> main menu
-            4) request_script_exit; return ;; # e -> exit script
-            5) return_from_menu; return ;; # r -> return/back
-            2) continue ;; # ? -> help was shown
-        esac
-
-        case "$user_choice" in
-            "1")
-                print_info "--- Testing General Internet Connectivity ---"
-                check_basic_connectivity # Uses a few common hosts like 8.8.8.8, google.com
-                echo
-                print_info "--- Testing GitHub Connectivity ---"
-                local github_hosts=("github.com" "api.github.com" "objects.githubusercontent.com")
-                local gh_success_count=0
-                for gh_host in "${github_hosts[@]}"; do
-                    if run_with_spinner "Pinging $gh_host..." ping -c 1 -W 2 "$gh_host"; then
-                        ((gh_success_count++))
-                    fi
-                done
-                 if (( gh_success_count == ${#github_hosts[@]} )); then
-                    print_success "All GitHub hosts pingable."
-                elif (( gh_success_count > 0 )); then
-                    print_warning "Some GitHub hosts not pingable. Downloads might be affected."
-                else
-                    print_error "Cannot ping any GitHub hosts. Downloads from GitHub will likely fail."
-                fi
-                press_any_key
+            0) # Numeric choice
+                case "$user_choice" in
+                    "1")
+                        print_info "--- Testing General Internet Connectivity ---"
+                        check_basic_connectivity
+                        echo
+                        print_info "--- Testing GitHub Connectivity ---"
+                        local github_hosts=("github.com" "api.github.com" "objects.githubusercontent.com")
+                        local gh_success_count=0
+                        for gh_host in "${github_hosts[@]}"; do
+                            if run_with_spinner "Pinging $gh_host..." ping -c 1 -W 2 "$gh_host"; then
+                                ((gh_success_count++))
+                            fi
+                        done
+                        if (( gh_success_count == ${#github_hosts[@]} )); then
+                            print_success "All GitHub hosts pingable."
+                        elif (( gh_success_count > 0 )); then
+                            print_warning "Some GitHub hosts not pingable. Downloads might be affected."
+                        else
+                            print_error "Cannot ping any GitHub hosts. Downloads from GitHub will likely fail."
+                        fi
+                        press_any_key
+                        ;;
+                    *) print_warning "Invalid option in network diagnostics: $user_choice"; press_any_key;;
+                esac
                 ;;
-            "0") # Default exit for this menu
-                return_from_menu; return ;; # Return to previous menu (download_backhaul_binary_workflow)
-            *) print_warning "Invalid option in network diagnostics."; press_any_key;;
+            2) # '?' Help shown
+                continue ;;
+            3) # 'm' Main Menu
+                go_to_main_menu; return ;;
+            4) # 'x' Exit script
+                request_script_exit; return ;;
+            5) # 'r' Return/Back (to previous menu - download_backhaul_binary_workflow)
+                return_from_menu; return ;;
+            6) # 'c' Cancel (acts like 'r' here)
+                return_from_menu; return ;;
+            *)
+                print_warning "Unexpected menu_loop return in run_network_diagnostics_menu: $menu_rc"; press_any_key;;
         esac
     done
 }
 
 
 true # Ensure script is valid
-                handle_error "ERROR" "GitHub download and installation failed."
-                # If it fails, loop back to offer other options
-                ;;
-            "2") # Local File
-                _download_from_local_file "$system_os" "$detected_arch_suffix" && return 0 || \
-                handle_error "ERROR" "Local file installation failed."
-                ;;
-            "3") # Alternative URL
-                _download_from_alternative_source "$system_os" "$detected_arch_suffix" && return 0 || \
-                handle_error "ERROR" "Alternative URL installation failed."
-                ;;
-            "4") # Network Diagnostics
-                run_network_diagnostics_menu # This function is self-contained with its own menu loop
-                # After diagnostics, the user is returned here to re-choose.
-                ;;
-            "5") # Skip
-                print_warning "Skipping binary installation."
-                print_info "You can install the binary later using the main menu."
-                print_info "Ensure it's placed at: $BIN_PATH"
-                press_any_key
-                return 0 # Successfully skipped
-                ;;
-            "0") # Cancel
-                print_info "Installation cancelled."
-                return 1 # Signify cancellation/failure
-                ;;
-            *) # Should be handled by menu_loop, but as a fallback
-                print_warning "Invalid option selected."
-                press_any_key
-                ;;
-        esac
-        # If an option failed and didn't return, loop back to show menu again
-        press_any_key
-    done
-}
+# The following sections were part of a duplicate merge, removing them.
+#                handle_error "ERROR" "GitHub download and installation failed."
+#                # If it fails, loop back to offer other options
+#                ;;
+#            "2") # Local File
+#                _download_from_local_file "$system_os" "$detected_arch_suffix" && return 0 || \
+#                handle_error "ERROR" "Local file installation failed."
+#                ;;
+#            "3") # Alternative URL
+#                _download_from_alternative_source "$system_os" "$detected_arch_suffix" && return 0 || \
+#                handle_error "ERROR" "Alternative URL installation failed."
+#                ;;
+#            "4") # Network Diagnostics
+#                run_network_diagnostics_menu # This function is self-contained with its own menu loop
+#                # After diagnostics, the user is returned here to re-choose.
+#                ;;
+#            "5") # Skip
+#                print_warning "Skipping binary installation."
+#                print_info "You can install the binary later using the main menu."
+#                print_info "Ensure it's placed at: $BIN_PATH"
+#                press_any_key
+#                return 0 # Successfully skipped
+#                ;;
+#            "0") # Cancel
+#                print_info "Installation cancelled."
+#                return 1 # Signify cancellation/failure
+#                ;;
+#            *) # Should be handled by menu_loop, but as a fallback
+#                print_warning "Invalid option selected."
+#                press_any_key
+#                ;;
+#        esac
+#        # If an option failed and didn't return, loop back to show menu again
+#        press_any_key
+#    done
+#}
 
-_download_from_github() {
+#_download_from_github() {
     local os="$1"
     local arch_suffix="$2"
     local latest_version=""

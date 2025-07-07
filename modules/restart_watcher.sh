@@ -234,7 +234,7 @@ manage_tunnel_watcher() {
         "6. Test Watcher Communication (experimental)"
         "7. Manage Watcher Shared Secret"
     )
-    local current_exit_details=("0" "Back to Tunnel Management") # Array: [key, text]
+    # local current_exit_details=("0" "Back to Tunnel Management") # No longer needed
     local user_choice menu_rc
 
     while true; do
@@ -248,33 +248,41 @@ manage_tunnel_watcher() {
         fi
         print_menu_header "secondary" "Restart Watcher Management" "Tunnel: $tunnel_short_suffix" "Watcher: $watcher_status"
 
-        menu_loop "Select watcher option" menu_options current_exit_details "_tunnel_watcher_menu_help \"$tunnel_short_suffix\""
-        user_choice="$MENU_CHOICE" # menu_loop sets MENU_CHOICE
-        menu_rc=$?                # menu_loop returns status code
+        menu_loop "Select watcher option" menu_options "_tunnel_watcher_menu_help \"$tunnel_short_suffix\""
+        user_choice="$MENU_CHOICE"
+        menu_rc=$?
 
-        # Handle universal navigation keys based on menu_rc
         case "$menu_rc" in
-            3) go_to_main_menu; return 0 ;; # m -> main menu
-            4) request_script_exit; return 0 ;; # e -> exit script
-            5) return_from_menu; return 0 ;; # r -> return/back (to previous menu)
-            2) continue ;; # ? -> help was shown, re-loop current menu
-            0) # Numeric choice or default exit "0"
-               # Proceed to specific choice handling below
-               ;;
-            *) handle_error "ERROR" "Unhandled menu_loop code $menu_rc in manage_tunnel_watcher"; press_any_key; continue;;
-        esac
-
-        # Handle numeric choices and the specific default exit ("0")
-        case "$user_choice" in
-            "1") _enable_tunnel_watcher "$main_service_name" "$tunnel_short_suffix" "$tunnel_config_file" ;;
-            "2") _disable_tunnel_watcher "$tunnel_short_suffix" "$tunnel_config_file" ;;
-            "3") _show_tunnel_watcher_status "$tunnel_short_suffix" ;;
-            "4") _view_tunnel_watcher_log "$tunnel_short_suffix" ;;
-            "5") _edit_tunnel_watcher_config "$tunnel_short_suffix" "$tunnel_config_file" ;;
-            "6") _test_tunnel_watcher_comm "$tunnel_short_suffix" ;;
-            "7") _manage_watcher_shared_secret "$tunnel_config_file" ;;
-            "0") return_from_menu; return 0;;
-            *) print_warning "Invalid option."; press_any_key ;;
+            0) # Numeric choice
+                case "$user_choice" in
+                    "1") _enable_tunnel_watcher "$main_service_name" "$tunnel_short_suffix" "$tunnel_config_file" ;;
+                    "2") _disable_tunnel_watcher "$tunnel_short_suffix" "$tunnel_config_file" ;;
+                    "3") _show_tunnel_watcher_status "$tunnel_short_suffix" ;;
+                    "4")
+                        # _view_tunnel_watcher_log calls view_system_log which is a menu
+                        navigate_to_menu "_view_tunnel_watcher_log \"$tunnel_short_suffix\""
+                        return 0 ;;
+                    "5") _edit_tunnel_watcher_config "$tunnel_short_suffix" "$tunnel_config_file" ;;
+                    "6") _test_tunnel_watcher_comm "$tunnel_short_suffix" ;;
+                    "7")
+                        # _manage_watcher_shared_secret is a menu
+                        navigate_to_menu "_manage_watcher_shared_secret \"$tunnel_config_file\""
+                        return 0 ;;
+                    *) print_warning "Invalid option: $user_choice"; press_any_key ;;
+                esac
+                ;;
+            2) # '?' Help shown
+                continue ;;
+            3) # 'm' Main Menu
+                go_to_main_menu; return 0 ;;
+            4) # 'x' Exit script
+                request_script_exit; return 0 ;;
+            5) # 'r' Return/Back (to specific tunnel menu)
+                return_from_menu; return 0 ;;
+            6) # 'c' Cancel (acts like 'r' here)
+                return_from_menu; return 0 ;;
+            *)
+                handle_error "ERROR" "Unhandled menu_loop code $menu_rc in manage_tunnel_watcher"; press_any_key; continue;;
         esac
     done
 }
@@ -666,7 +674,7 @@ _manage_watcher_shared_secret() {
         "2. Set/Update Secret Manually"
         "3. Generate New Secret (Server Role Recommended)"
     )
-    local secret_exit_details=("0" "Back") # Array: [key, text]
+    # local secret_exit_details=("0" "Back") # No longer needed
     local user_choice menu_rc
 
     _secret_menu_help() {
@@ -679,62 +687,78 @@ _manage_watcher_shared_secret() {
         press_any_key
     }
 
-    menu_loop "Select secret option" secret_menu_options secret_exit_details "_secret_menu_help"
-    user_choice="$MENU_CHOICE" # menu_loop sets MENU_CHOICE
-    menu_rc=$?                # menu_loop returns status code
+    menu_loop "Select secret option" secret_menu_options "_secret_menu_help"
+    user_choice="$MENU_CHOICE"
+    menu_rc=$?
 
-    # Handle universal navigation keys based on menu_rc
     case "$menu_rc" in
-        3) go_to_main_menu; return 0 ;; # m -> main menu
-        4) request_script_exit; return 0 ;; # e -> exit script
-        5) return_from_menu; return 0 ;; # r -> return/back (to previous menu - manage_tunnel_watcher)
-        2) _manage_watcher_shared_secret "$main_tunnel_config_file"; return $? ;; # ? -> help shown, re-call current function
-        0) # Numeric choice or default exit "0"
-            # Proceed to specific choice handling below
+        0) # Numeric choice
+            case "$user_choice" in
+                "1") # View/Copy
+                    local secret_to_show
+                    secret_to_show=$(grep 'watcher_shared_secret' "$main_tunnel_config_file" | sed 's/.*=[[:space:]]*"\(.*\)"/\1/' 2>/dev/null || cat "$CONFIG_DIR/watcher_secret" 2>/dev/null || echo "${RESTART_WATCHER_SECRET}")
+                    if [[ -n "$secret_to_show" ]]; then
+                        print_info "Current Secret: $secret_to_show"
+                        if command -v xclip &>/dev/null; then
+                            echo -n "$secret_to_show" | xclip -selection clipboard
+                            print_success "Secret copied to clipboard (xclip)."
+                        elif command -v pbcopy &>/dev/null; then # macOS
+                            echo -n "$secret_to_show" | pbcopy
+                            print_success "Secret copied to clipboard (pbcopy)."
+                        fi
+                    else
+                        print_warning "No secret found to display/copy."
+                    fi
+                    ;;
+                "2") # Set manually
+                    local role_for_set="client"
+                    if grep -q 'mode[[:space:]]*=[[:space:]]*"server"' "$main_tunnel_config_file" 2>/dev/null; then role_for_set="server"; fi
+                    # _get_or_set_watcher_secret is interactive, call it and let it handle its flow.
+                    # It returns the secret or empty on failure/cancel.
+                    local new_secret_val
+                    new_secret_val=$(_get_or_set_watcher_secret "$main_tunnel_config_file" "$role_for_set")
+                    if [[ -n "$new_secret_val" ]]; then
+                        handle_success "Watcher secret process completed."
+                    else
+                        handle_warning "Watcher secret process cancelled or failed."
+                    fi
+                    # This will re-display the manage_watcher_shared_secret menu after.
+                    ;;
+                "3") # Generate new
+                     if prompt_yes_no "Generate a new random secret? This will overwrite existing." "n"; then
+                        local new_s
+                        new_s=$(generate_random_secret 32)
+                        print_info "New Generated Secret: $new_s"
+                        print_warning "You MUST update the other side of the tunnel with this secret."
+                        if prompt_yes_no "Use this new secret?" "y"; then
+                            # Save to global default (if RESTART_WATCHER_SECRET is not already set by env)
+                            if [[ -z "$RESTART_WATCHER_SECRET" && -n "$GLOBAL_WATCHER_SECRET_FILE" ]]; then
+                                echo "$new_s" > "$GLOBAL_WATCHER_SECRET_FILE"
+                                set_secure_file_permissions "$GLOBAL_WATCHER_SECRET_FILE"
+                            fi
+                            # Save to specific tunnel config
+                            update_toml_value "$main_tunnel_config_file" "watcher_shared_secret" "$new_s" "string"
+                            handle_success "New secret set and saved."
+                        else
+                            print_info "New secret generation cancelled."
+                        fi
+                    fi
+                    ;;
+                *) print_warning "Invalid option: $user_choice";;
+            esac
             ;;
-        *) handle_error "ERROR" "Unhandled menu_loop code $menu_rc in _manage_watcher_shared_secret"; press_any_key; return 1;;
-    esac
-
-    # Handle numeric choices and the specific default exit ("0")
-    case "$user_choice" in
-        "1") # View/Copy
-            local secret_to_show
-            secret_to_show=$(grep 'watcher_shared_secret' "$main_tunnel_config_file" | sed 's/.*=[[:space:]]*"\(.*\)"/\1/' 2>/dev/null || cat "$CONFIG_DIR/watcher_secret" 2>/dev/null)
-            if [[ -n "$secret_to_show" ]]; then
-                print_info "Current Secret: $secret_to_show"
-                if command -v xclip &>/dev/null; then
-                    echo -n "$secret_to_show" | xclip -selection clipboard
-                    print_success "Secret copied to clipboard (xclip)."
-                elif command -v pbcopy &>/dev/null; then # macOS
-                    echo -n "$secret_to_show" | pbcopy
-                    print_success "Secret copied to clipboard (pbcopy)."
-                fi
-            else
-                print_warning "No secret found to display/copy."
-            fi
-            ;;
-        "2") # Set manually
-            local role_for_set="client" # Assume client unless server mode is detected in main config
-            if grep -q 'mode[[:space:]]*=[[:space:]]*"server"' "$main_tunnel_config_file"; then role_for_set="server"; fi
-            _get_or_set_watcher_secret "$main_tunnel_config_file" "$role_for_set" > /dev/null # Re-prompt
-            ;;
-        "3") # Generate new
-             if prompt_yes_no "Generate a new random secret? This will overwrite existing." "n"; then
-                local new_s
-                new_s=$(generate_random_secret 32)
-                print_info "New Generated Secret: $new_s"
-                print_warning "You MUST update the other side of the tunnel with this secret."
-                if prompt_yes_no "Use this new secret?" "y"; then
-                    echo "$new_s" > "$CONFIG_DIR/watcher_secret" # Global default
-                    set_secure_file_permissions "$CONFIG_DIR/watcher_secret"
-                    update_toml_value "$main_tunnel_config_file" "watcher_shared_secret" "$new_s" "string"
-                    handle_success "New secret set and saved."
-                else
-                    print_info "New secret generation cancelled."
-                fi
-            fi
-            ;;
-        "0") return_from_menu; return;;
+        2) # '?' Help shown
+            _manage_watcher_shared_secret "$main_tunnel_config_file"; return $? ;; # Re-call current function
+        3) # 'm' Main Menu
+            go_to_main_menu; return 0 ;;
+        4) # 'x' Exit script
+            request_script_exit; return 0 ;;
+        5) # 'r' Return/Back (to manage_tunnel_watcher menu)
+            return_from_menu; return 0 ;;
+        6) # 'c' Cancel (acts like 'r' here)
+            return_from_menu; return 0 ;;
+        *)
+            handle_error "ERROR" "Unhandled menu_loop code $menu_rc in _manage_watcher_shared_secret"; press_any_key; return 1;;
     esac
     press_any_key
 }

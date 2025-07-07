@@ -695,16 +695,96 @@ print_menu_header() {
     echo
 }
 
-# Unified menu footer printing
-# Param $1: The primary numbered exit option for the current menu (e.g., "0. Back to Main Menu")
-print_menu_footer() {
-    local numbered_exit_option="$1" # e.g., "0. Back to Previous"
+# Helper function to prompt for a port with validation and optional availability check
+# Usage: prompt_for_port "Description for port" "default_port" true port_variable_name
+# Returns: 0 on success, 1 on failure/cancel (e.g., user enters 'c' if read supported it, or empty + no to retry)
+prompt_for_port() {
+    local desc="$1"
+    local default_val="$2"
+    local check_avail="$3" # true or false
+    local -n port_ref=$4   # Nameref for the output variable
 
+    local input_val
+    while true; do
+        read -r -p "Enter $desc (e.g., 443, 8080) [${default_val}]: " input_val
+        input_val=${input_val:-$default_val}
+
+        # Allow 'c' or 'cancel' to break out, though read doesn't have built-in cancel for this.
+        # This is more a conceptual cancel for the user if they just hit enter on an empty prompt
+        # or if we enhance read with a timeout or specific cancel key handling in future.
+        # For now, an empty input (after default is applied or not) will be caught by validate_port.
+        # A more robust cancel would require changes to how `read` is used or a different input loop.
+
+        if ! validate_port "$input_val"; then
+            print_warning "Invalid port number. Must be 1-65535."
+            if ! prompt_yes_no "Try again?" "y"; then port_ref=""; return 1; fi
+            continue
+        fi
+
+        if [[ "$check_avail" == "true" ]]; then
+            if ! check_port_availability "$input_val"; then
+                print_warning "Port $input_val is currently in use on this server."
+                _get_port_process_info "$input_val" # Assumes _get_port_process_info is available if needed
+                if ! prompt_yes_no "Use this port anyway (if the process is temporary or will be stopped)?" "n"; then
+                    if ! prompt_yes_no "Try a different port?" "y"; then port_ref=""; return 1; fi
+                    continue
+                fi
+            else
+                print_success "Port $input_val is available."
+            fi
+        fi
+        port_ref="$input_val"
+        return 0
+    done
+}
+
+# Helper function to prompt for an IP address with validation and optional ping
+# Usage: prompt_for_ip "Description for IP" "default_ip_optional" true ip_variable_name
+# Returns: 0 on success, 1 on failure/cancel
+prompt_for_ip() {
+    local desc="$1"
+    local default_val="$2" # Can be empty
+    local do_ping="$3"     # true or false
+    local -n ip_ref=$4     # Nameref for the output variable
+
+    local input_val
+    while true; do
+        local prompt_str="Enter $desc"
+        if [[ -n "$default_val" ]]; then
+            prompt_str+=" [${default_val}]"
+        fi
+        prompt_str+=": "
+        read -r -p "$prompt_str" input_val
+        input_val=${input_val:-$default_val}
+
+        if [[ -z "$input_val" ]]; then # Handle case where default is empty and user enters nothing
+            print_warning "IP address cannot be empty."
+            if ! prompt_yes_no "Try again?" "y"; then ip_ref=""; return 1; fi
+            continue
+        fi
+
+        if ! validate_ip "$input_val"; then
+            print_warning "Invalid IP address format."
+            if ! prompt_yes_no "Try again?" "y"; then ip_ref=""; return 1; fi
+            continue
+        fi
+
+        if [[ "$do_ping" == "true" ]]; then
+            if prompt_yes_no "Ping $input_val to check reachability?" "y"; then
+                run_with_spinner "Pinging $input_val..." ping -c 2 -W 2 "$input_val"
+                # We don't fail based on ping result, just inform user.
+            fi
+        fi
+        ip_ref="$input_val"
+        return 0
+    done
+}
+
+
+# Unified menu footer printing
+print_menu_footer() {
     echo "----------------------------------------------------------------"
-    if [[ -n "$numbered_exit_option" ]]; then
-        echo " $numbered_exit_option"
-    fi
-    echo " [?] Help  |  [r] Return/Back  |  [m] Main Menu  |  [e] Exit Script"
+    echo " [?] Help | [c] Cancel Op | [r] Return/Back | [m] Main Menu | [x] Exit Script"
 }
 
 prompt_yes_no() {
@@ -733,45 +813,57 @@ prompt_yes_no() {
 MENU_CHOICE="" # Global variable to store the result of menu_loop
 
 # Standardized menu loop.
-# Usage: menu_loop "Prompt Message" "options_array_name" "default_exit_option_details_array_name" ["custom_help_function_name"]
-#   options_array: ("1. Option A" "2. Option B")
-#   default_exit_option_details_array: ("0" "Back to Previous Menu") -> Number and Text for the default exit.
-# Sets MENU_CHOICE to the selected number/char.
+# Usage: menu_loop "Prompt Message" "options_array_name" ["custom_help_function_name"]
+#   options_array: ("1. Option A" "2. Option B") - These are the numbered options.
+# Sets MENU_CHOICE to the selected number (as a string) or one of the navigation characters.
 # Returns:
-#   0: Valid numeric choice from options_ref OR the default_exit_num_char was chosen.
-#   2: '?' (Help) was pressed.
-#   3: 'm' (Main Menu) was pressed.
-#   4: 'e' (Exit Script) was pressed.
-#   5: 'r' (Return/Back) was pressed.
-#   1: Other error / invalid (should ideally be caught before this).
+#   0: Valid NUMERIC choice from options_ref was made. MENU_CHOICE holds the number.
+#   2: '?' (Help) was pressed. MENU_CHOICE holds '?'.
+#   3: 'm' (Main Menu) was pressed. MENU_CHOICE holds 'm'.
+#   4: 'x' (Exit Script) was pressed. MENU_CHOICE holds 'x'.
+#   5: 'r' (Return/Back) was pressed. MENU_CHOICE holds 'r'.
+#   6: 'c' (Cancel Operation) was pressed. MENU_CHOICE holds 'c'.
+#   Any other non-zero return indicates an issue, though the loop should prevent this.
 menu_loop() {
     local prompt_msg="$1"
-    local -n options_ref=$2          # Array of menu options like "1. Do X"
-    local -n exit_option_details_ref=$3 # Array like ("0" "Back to Main")
-    local custom_help_function_name="${4:-}"
+    local -n options_ref=$2 # Array of menu options like "1. Do X"
+    # Third argument is now custom_help_function_name, removed exit_option_details_ref
+    local custom_help_function_name="${3:-}"
 
     local min_numeric_opt=1
     local max_numeric_opt=${#options_ref[@]}
     
-    local default_exit_key="${exit_option_details_ref[0]}" # e.g., "0"
-    local default_exit_text="${exit_option_details_ref[1]}" # e.g., "Back to Main Menu"
-
-    # Construct the choice part of the prompt string
-    local prompt_choices_str=""
+    # Construct the choice part of the prompt string for NUMERIC options
+    local prompt_numeric_choices_str=""
     if (( max_numeric_opt > 0 )); then
-        prompt_choices_str="${min_numeric_opt}-${max_numeric_opt}, "
+        if (( max_numeric_opt == 1 )); then
+            prompt_numeric_choices_str="1"
+        else
+            prompt_numeric_choices_str="${min_numeric_opt}-${max_numeric_opt}"
+        fi
     fi
-    prompt_choices_str+="${default_exit_key}"
     
     while true; do
         # Display options from the array
         for opt_str in "${options_ref[@]}"; do
             echo "  $opt_str"
         done
-        # Display the footer with the specific default exit option and universal nav keys
-        print_menu_footer "${default_exit_key}. ${default_exit_text}"
 
-        read -r -p "$prompt_msg [${prompt_choices_str}, ?, r, m, e]: " raw_choice
+        # Display the standardized footer (which now contains all nav keys)
+        print_menu_footer # No argument needed anymore
+
+        # Build the prompt string
+        local full_prompt_str="$prompt_msg"
+        local available_choices_display=""
+        if [[ -n "$prompt_numeric_choices_str" ]]; then
+            available_choices_display="$prompt_numeric_choices_str, "
+        fi
+        # Add standardized navigation keys to the prompt display
+        available_choices_display+="?, c, r, m, x" # Standard nav keys
+
+        full_prompt_str+=" [${available_choices_display}]: "
+
+        read -r -p "$full_prompt_str" raw_choice
         MENU_CHOICE=$(echo "$raw_choice" | tr '[:upper:]' '[:lower:]') # Normalize to lowercase
 
         case "$MENU_CHOICE" in
@@ -780,29 +872,37 @@ menu_loop() {
                     "$custom_help_function_name"
                 else
                     print_info "No specific help available for this menu."
-                    press_any_key
                 fi
-                return 2 # Help shown, caller should re-loop/re-render
+                press_any_key # Always press_any_key after help
+                return 2 # Help shown
                 ;;
             'm') return 3 ;; # Request Main Menu
-            'e') return 4 ;; # Request Exit Script
+            'x') return 4 ;; # Request Exit Script (changed from 'e')
             'r') return 5 ;; # Request Return/Back
+            'c') return 6 ;; # Request Cancel Operation
         esac
 
-        # Check if choice is the default exit key (e.g., "0")
-        if [[ "$MENU_CHOICE" == "$default_exit_key" ]]; then
-            return 0 # Valid default exit chosen
-        fi
-
         # Check if choice is a number within the options range
-        if [[ "$MENU_CHOICE" =~ ^[0-9]+$ ]] && \
-           (( MENU_CHOICE >= min_numeric_opt && MENU_CHOICE <= max_numeric_opt )); then
-            return 0 # Valid numeric option selected
+        if [[ "$MENU_CHOICE" =~ ^[0-9]+$ ]]; then
+            if (( max_numeric_opt == 0 )); then # No numbered options defined
+                 print_warning "Invalid option: '$MENU_CHOICE'. No numeric options available. Use navigation keys."
+            elif (( MENU_CHOICE >= min_numeric_opt && MENU_CHOICE <= max_numeric_opt )); then
+                return 0 # Valid numeric option selected
+            else
+                 print_warning "Invalid numeric option: '$MENU_CHOICE'. Choose from ${prompt_numeric_choices_str} or navigation keys."
+            fi
+        else
+            # Non-numeric input that wasn't a nav key (and not empty)
+            if [[ -n "$MENU_CHOICE" ]]; then # Only print warning if input was not empty
+                print_warning "Invalid option: '$MENU_CHOICE'. Please try again."
+            fi
         fi
 
-        print_warning "Invalid option. Please try again."
-        press_any_key
-        # Loop again to re-display menu and prompt (after print_menu_header in calling function)
+        # If input was empty or invalid, press_any_key only if it was not empty and invalid
+        if [[ -n "$MENU_CHOICE" ]]; then
+             press_any_key
+        fi
+        # Loop again to re-display menu and prompt
     done
 }
 
@@ -919,24 +1019,52 @@ run_with_spinner() {
     local pid=$!
     
     local i=0
+    local original_trap_INT
+    original_trap_INT=$(trap -p INT) # Save original INT trap
+
+    # Local trap for Ctrl+C during spinner
+    trap '_spinner_ctrl_c "$pid" "$log_file"; return 130' INT
+
     while ps -p $pid > /dev/null 2>&1; do
         printf "\b%s" "${spin_chars:i++%${#spin_chars}:1}"
         sleep 0.1
     done
-    printf "\b"
+    printf "\b" # Clear spinner char
     
+    # Restore original INT trap
+    eval "$original_trap_INT" 2>/dev/null || trap - INT
+
     wait $pid
     local exit_code=$?
     
     if [[ $exit_code -eq 0 ]]; then
         print_success "Done."
-        rm -f "$log_file" # Clean up successful log
+        rm -f "$log_file"
+    elif [[ $exit_code -eq 130 ]]; then # Interrupted by our trap
+        # Message already printed by _spinner_ctrl_c
+        :
     else
         print_error "Failed. (Exit code: $exit_code)"
         print_info "Details logged to: $log_file"
-        # Do not delete log_file on error so user can inspect it
     fi
     return $exit_code
+}
+
+# Helper for run_with_spinner's Ctrl+C trap
+_spinner_ctrl_c() {
+    local child_pid="$1"
+    local log_f="$2"
+    printf "\b" # Clear spinner character
+    print_warning "\nOperation interrupted by user (Ctrl+C)."
+    log_message "WARN" "Spinner operation interrupted by user for PID $child_pid."
+    # Attempt to kill the child process
+    if [[ -n "$child_pid" ]] && ps -p "$child_pid" > /dev/null 2>&1; then
+        kill "$child_pid" 2>/dev/null && sleep 0.2 && kill -9 "$child_pid" 2>/dev/null
+    fi
+    if [[ -f "$log_f" ]]; then
+        print_info "Partial logs (if any) at: $log_f"
+    fi
+    # The main run_with_spinner function will return 130
 }
 
 # --- Miscellaneous Utilities ---
@@ -1063,60 +1191,69 @@ view_system_log() {
         "3. View last 100 lines"
         "4. Search logs (grep -i)"
     )
-    local local_exit_options=("0. Back")
+    # Removed local_exit_options as menu_loop no longer uses numbered exit
     local user_choice
     local menu_return_code
 
     while true; do
         print_menu_header "secondary" "$log_title" "Source: $log_identifier"
-        menu_loop "Select log view option" local_menu_options local_exit_options "_view_log_help"
+        # Call menu_loop without the exit_option_details_array
+        menu_loop "Select log view option" local_menu_options "_view_log_help"
         user_choice="$MENU_CHOICE"
         menu_return_code=$?
 
-        if [[ "$menu_return_code" -eq 3 ]]; then go_to_main_menu; return; fi
-        if [[ "$menu_return_code" -eq 4 ]]; then request_script_exit; return; fi
-        # menu_return_code 2 (help shown) is handled by menu_loop continuing.
-
-        case "$user_choice" in
-            "1")
-                if [[ "$log_source_type" == "journalctl" ]]; then
-                    journalctl -u "$log_identifier" --no-pager | less
-                elif [[ -f "$log_identifier" ]]; then
-                    less "$log_identifier"
-                else print_error "Log source not found: $log_identifier"; press_any_key; fi
+        case "$menu_return_code" in
+            0) # Numeric choice
+                case "$user_choice" in
+                    "1")
+                        if [[ "$log_source_type" == "journalctl" ]]; then
+                            journalctl -u "$log_identifier" --no-pager | less
+                        elif [[ -f "$log_identifier" ]]; then
+                            less "$log_identifier"
+                        else print_error "Log source not found: $log_identifier"; press_any_key; fi
+                        ;;
+                    "2")
+                        print_info "Starting live log follow. Press Ctrl+C to stop."
+                        # Add trap for Ctrl+C specific to this operation
+                        trap 'print_info "Live log follow interrupted."; trap - INT; return_from_menu; return 130' INT
+                        if [[ "$log_source_type" == "journalctl" ]]; then
+                            journalctl -u "$log_identifier" -f
+                        elif [[ -f "$log_identifier" ]]; then
+                            tail -f "$log_identifier"
+                        else print_error "Log source not found: $log_identifier"; fi
+                        trap - INT # Clear trap
+                        print_info "Live log follow stopped."
+                        press_any_key
+                        ;;
+                    "3")
+                        if [[ "$log_source_type" == "journalctl" ]]; then
+                            journalctl -u "$log_identifier" --no-pager -n 100
+                        elif [[ -f "$log_identifier" ]]; then
+                            tail -n 100 "$log_identifier"
+                        else print_error "Log source not found: $log_identifier"; fi
+                        press_any_key
+                        ;;
+                    "4")
+                        read -r -p "Enter search term: " search_term
+                        if [[ -n "$search_term" ]]; then
+                            print_info "Searching for '$search_term' (last 200 matching lines)..."
+                            if [[ "$log_source_type" == "journalctl" ]]; then
+                                journalctl -u "$log_identifier" --no-pager | grep -i "$search_term" | tail -n 200
+                            elif [[ -f "$log_identifier" ]]; then
+                                grep -i "$search_term" "$log_identifier" | tail -n 200
+                            else print_error "Log source not found: $log_identifier"; fi
+                            press_any_key
+                        fi
+                        ;;
+                esac
                 ;;
-            "2")
-                print_info "Starting live log follow. Press Ctrl+C to stop."
-                if [[ "$log_source_type" == "journalctl" ]]; then
-                    journalctl -u "$log_identifier" -f
-                elif [[ -f "$log_identifier" ]]; then
-                    tail -f "$log_identifier"
-                else print_error "Log source not found: $log_identifier"; fi
-                print_info "Live log follow stopped." # This will show after Ctrl+C
-                press_any_key
-                ;;
-            "3")
-                if [[ "$log_source_type" == "journalctl" ]]; then
-                    journalctl -u "$log_identifier" --no-pager -n 100
-                elif [[ -f "$log_identifier" ]]; then
-                    tail -n 100 "$log_identifier"
-                else print_error "Log source not found: $log_identifier"; fi
-                press_any_key
-                ;;
-            "4")
-                read -r -p "Enter search term: " search_term
-                if [[ -n "$search_term" ]]; then
-                    print_info "Searching for '$search_term' (last 200 matching lines)..."
-                    if [[ "$log_source_type" == "journalctl" ]]; then
-                        journalctl -u "$log_identifier" --no-pager | grep -i "$search_term" | tail -n 200
-                    elif [[ -f "$log_identifier" ]]; then
-                        grep -i "$search_term" "$log_identifier" | tail -n 200
-                    else print_error "Log source not found: $log_identifier"; fi
-                    press_any_key
-                fi
-                ;;
-            "0")
-                return_from_menu; return ;;
+            2) # Help shown, menu_loop already handled press_any_key
+                continue ;;
+            3) go_to_main_menu; return ;;
+            4) request_script_exit; return ;;
+            5) return_from_menu; return ;; # 'r' Return/Back
+            6) return_from_menu; return ;; # 'c' Cancel (acts like 'r' here)
+            *) print_warning "Invalid option from log viewer menu_loop."; press_any_key ;;
         esac
     done
 }

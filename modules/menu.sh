@@ -3,106 +3,29 @@
 
 # --- Installation Wizard ---
 # This function guides the user through installing the Backhaul binary.
-# It calls functions from 'backhaul_core.sh' for the actual download/install steps.
+# It now directly calls 'download_backhaul_binary_workflow'.
 _initial_installation_wizard() {
-    _install_wizard_help() {
-        print_menu_header "secondary" "Installation Wizard Help"
-        echo "This wizard helps you install the Backhaul binary, which is required for EasyBackhaul to function."
-        print_info "Options:"
-        echo "  1. Automatic GitHub Download: Recommended. Fetches the latest release."
-        echo "  2. Local File Installation: If you have already downloaded the .tar.gz archive."
-        echo "  3. Alternative URL: Download from a custom URL you provide."
-        echo "  4. Network Diagnostics: Test connectivity if downloads are failing."
-        echo "  0. Exit Installer: You can try installing manually or run this wizard again later."
+    print_menu_header "primary" "EasyBackhaul Initial Setup" "Backhaul Binary Installation Required"
+    print_warning "The Backhaul binary is not found or is invalid at the configured path: $BIN_PATH"
+    print_info "The following workflow will guide you through the installation."
+    press_any_key
+
+    # Directly call the consolidated workflow function from backhaul_core.sh
+    # download_backhaul_binary_workflow will handle its own menu and logic.
+    # It returns 0 on success (binary installed and verified), 1 on failure/cancellation.
+    if download_backhaul_binary_workflow; then
+        # verify_binary_installation is called within install_downloaded_binary,
+        # which is called by the helpers in download_backhaul_binary_workflow.
+        # So, if download_backhaul_binary_workflow returns 0, it implies success.
+        handle_success "Backhaul binary installed and verified successfully!"
         press_any_key
-    }
-
-    local install_menu_options=(
-        "1. Automatic GitHub Download (Recommended)"
-        "2. Install from Local File"
-        "3. Install from Alternative URL"
-        "4. Run Network Diagnostics"
-    )
-    local install_exit_option_details=("0" "Exit Installer (EasyBackhaul may not function)") # Array: Key and Text
-    local user_choice menu_rc
-
-    while true; do
-        # Header is now more consistently part of menu_loop, but for initial clarity:
-        print_menu_header "primary" "EasyBackhaul Initial Setup" "Backhaul Binary Installation Required"
-        print_warning "Backhaul binary not found at the configured path: $BIN_PATH"
-        # print_info "Please choose an installation method:" # Covered by menu_loop prompt
-
-        menu_loop "Choose installation method" install_menu_options install_exit_option_details "_install_wizard_help"
-        user_choice="$MENU_CHOICE"
-        menu_rc=$?
-
-        local install_success=false # Reset for each loop iteration
-        case "$menu_rc" in
-            0) # Numeric choice or "0" (default exit)
-                case "$user_choice" in
-                    "1")
-                        if download_backhaul_binary_workflow; then install_success=true; fi
-                        ;;
-                    "2")
-                        local os_name arch_name
-                        os_name=$(uname -s | tr '[:upper:]' '[:lower:]'); arch_name=$(uname -m)
-                        case $arch_name in x86_64) arch_name="amd64";; aarch64) arch_name="arm64";; armv7l) arch_name="armv7";; esac
-                        if _download_from_local_file "$os_name" "$arch_name"; then install_success=true; fi
-                        ;;
-                    "3")
-                        local os_name arch_name
-                        os_name=$(uname -s | tr '[:upper:]' '[:lower:]'); arch_name=$(uname -m)
-                        case $arch_name in x86_64) arch_name="amd64";; aarch64) arch_name="arm64";; armv7l) arch_name="armv7";; esac
-                        if _download_from_alternative_source "$os_name" "$arch_name"; then install_success=true; fi
-                        ;;
-                    "4")
-                        if type run_network_diagnostics_menu &>/dev/null; then
-                           run_network_diagnostics_menu
-                        else
-                            handle_error "WARNING" "Network diagnostics function not available."
-                            press_any_key
-                        fi
-                        ;;
-                    "0")
-                        print_warning "Installation wizard exited. The Backhaul binary is required for EasyBackhaul to operate."
-                        press_any_key
-                        return 1
-                        ;;
-                    *)  print_warning "Invalid option selected in installation wizard."; press_any_key ;;
-                esac
-                ;;
-            1) # Default/Enter with no input - treat as invalid for this menu
-                print_warning "Invalid selection. Please choose a number or navigation key."
-                press_any_key
-                ;;
-            2) # Help shown
-                continue ;;
-            3) # Main menu ('m')
-                print_warning "Installation wizard exited. The Backhaul binary is required for EasyBackhaul to operate."
-                press_any_key
-                return 1 ;;
-            4) # Exit script ('e' or 'x')
-                request_script_exit; return 0 ;;
-            5) # Return/Back ('r')
-                print_warning "Installation wizard exited. The Backhaul binary is required for EasyBackhaul to operate."
-                press_any_key
-                return 1 ;;
-            *) # Should not happen
-                print_warning "Unexpected return from menu_loop in wizard."
-                press_any_key
-                ;;
-        esac
-
-        if $install_success && [[ -f "$BIN_PATH" ]] && verify_binary_installation; then
-            handle_success "Backhaul binary installed successfully!"
-            press_any_key
-            return 0 # Successful installation
-        elif $install_success; then
-             handle_error "ERROR" "Installation seemed to complete, but binary verification failed."
-             press_any_key # Allow user to see message then loop back to wizard options
-        fi
-        # If not install_success, loop continues to show wizard options again.
-    done
+        return 0 # Successful installation
+    else
+        handle_error "ERROR" "Backhaul binary installation was cancelled or failed."
+        print_warning "EasyBackhaul may not function correctly without the binary."
+        press_any_key
+        return 1 # Indicate failure/cancellation of initial setup step
+    fi
 }
 
 system_health_monitor_menu() {
@@ -122,7 +45,7 @@ system_health_monitor_menu() {
         "2. Clean Stale Processes & Temp Files"
         "3. View System Logs (e.g., easybackhaul.log, performance.log)"
     )
-    local health_exit_details=("0" "Back to Main Menu")
+    # local health_exit_details=("0" "Back to Main Menu") # No longer needed
     local user_choice menu_rc
 
     while true; do
@@ -312,36 +235,31 @@ main_menu_entry() {
         "7. Manage UFW Firewall (if installed)"
         "8. Uninstall EasyBackhaul"
     )
-    local main_exit_details=("0" "Exit EasyBackhaul")
+    # local main_exit_details=("0" "Exit EasyBackhaul") # No longer needed
     local user_choice menu_rc
 
-    # The help function "show_main_application_help" should be defined in helpers.sh or similar
-    # and passed by name to menu_loop.
     local help_func_name="show_main_application_help"
     if ! type "$help_func_name" &>/dev/null; then
-        # Fallback generic help if specific one isn't found
         _generic_main_menu_help() {
             print_menu_header "secondary" "Main Menu Help"
             echo "This is the main control panel for EasyBackhaul."
             echo "Use the number keys to select an option from the menu."
             echo "Follow prompts for each section."
-            echo "The footer shows navigation keys: [?] Help, [r] Back, [m] Main Menu, [e] Exit."
+            echo "The footer shows navigation keys: [?] Help | [c] Cancel Op | [r] Return/Back | [m] Main Menu | [x] Exit Script."
             press_any_key
         }
         help_func_name="_generic_main_menu_help"
     fi
 
-    menu_loop "Select option" main_menu_options main_exit_details "$help_func_name"
+    menu_loop "Select option" main_menu_options "$help_func_name"
     user_choice="$MENU_CHOICE"; menu_rc=$?
     
     case "$menu_rc" in
-        0) # Numeric or "0"
+        0) # Numeric choice
             case "$user_choice" in
                 "1") navigate_to_menu "configure_tunnel" ;;
                 "2") navigate_to_menu "manage_tunnels_menu" ;;
                 "3")
-                    # download_backhaul_binary_workflow is not a full menu, it's a procedure.
-                    # Call it directly. If it needs to be a menu, it should be structured like one.
                     if download_backhaul_binary_workflow; then
                         handle_success "Backhaul binary update/re-install process completed."
                     else
@@ -368,21 +286,48 @@ main_menu_entry() {
                     fi
                     ;;
                 "8")
-                    _perform_full_uninstall # This function exits the script on success
-                    # If uninstall is cancelled, _perform_full_uninstall returns, and we loop main menu.
+                    _perform_full_uninstall
+                    # If _perform_full_uninstall is cancelled, it returns 1.
+                    # If it completes, it exits the script.
+                    # If it returns 1, we want to re-display the main menu.
+                    if [[ $? -eq 1 ]]; then main_menu_entry; return 0; fi
                     ;;
-                "0") request_script_exit ;; # Default exit for main menu is full script exit
-                 *) print_warning "Invalid selection from main_menu_entry."; press_any_key ;;
+                 *) print_warning "Invalid selection from main_menu_entry: $user_choice"; press_any_key ;;
             esac
             ;;
-        1) print_warning "Invalid selection."; press_any_key ;; # Default/Enter
-        2) return 0 ;; # Help shown, re-render main menu by returning and letting loop call again
-        3) go_to_main_menu; return 0 ;; # 'm' (Main Menu) - effectively a refresh
-        4) request_script_exit; return 0 ;; # 'e' (Exit)
-        5) request_script_exit; return 0 ;; # 'r' (Back) from main menu also means exit
-        *) print_warning "Unexpected menu_loop return."; press_any_key ;;
+        2) # '?' Help shown
+            return 0 ;; # Re-render main menu
+        3) # 'm' Main Menu - effectively a refresh
+            go_to_main_menu; return 0 ;;
+        4) # 'x' Exit script
+            request_script_exit; return 0 ;;
+        5) # 'r' Return/Back from main menu also means exit
+            request_script_exit; return 0 ;;
+        6) # 'c' Cancel from main menu also means exit
+            request_script_exit; return 0;;
+        *)
+            print_warning "Unexpected menu_loop return in main_menu_entry: $menu_rc, choice: $user_choice"
+            press_any_key ;;
     esac
-    return 0 # Return 0 to allow the main script loop to call this function again
+    return 0 # Allow the main script loop to call this function again if not exited
+}
+
+main_script_entry_point() {
+# --- Global Ctrl+C Handler ---
+_global_ctrl_c_handler() {
+    print_error "\n\nCtrl+C pressed. Exiting EasyBackhaul script."
+    log_message "WARN" "Ctrl+C interrupt received. Exiting script."
+    # Perform any essential cleanup if needed here, though individual functions might have their own.
+    # For a clean exit via the menu system's exit path:
+    if type request_script_exit &>/dev/null; then
+        request_script_exit # This will clear MENU_STACK and CURRENT_MENU_FUNCTION
+    fi
+    # The main loop in main_script_entry_point will then terminate.
+    # Directly exiting here might bypass some cleanup or final messages from main loop.
+    # However, for an explicit Ctrl+C, immediate clean exit is often desired.
+    # Let's ensure the main loop's exit condition is met.
+    # Setting CURRENT_MENU_FUNCTION to empty should be sufficient if request_script_exit was called.
+    exit 130 # Standard exit code for Ctrl+C
 }
 
 main_script_entry_point() {
@@ -393,6 +338,9 @@ main_script_entry_point() {
         echo "FATAL ERROR: init_logging function not found. Cannot proceed." >&2
         exit 1
     fi
+
+    # Global Ctrl+C trap
+    trap '_global_ctrl_c_handler' INT
 
     log_message "INFO" "EasyBackhaul script started."
 
