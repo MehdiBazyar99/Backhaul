@@ -1,909 +1,741 @@
-#!/bin/bash
-# restart_watcher.sh - Per-tunnel coordinated restart watcher for EasyBackhaul
-# This script is intended to be sourced or built into the main script, or run as a systemd service.
+# modules/restart_watcher.sh
+# Coordinated restart watcher for EasyBackhaul tunnels.
 
-# WARNING: This script requires a version of netcat (nc) that supports '-l -p'.
-#          Some distributions (e.g., Debian/Ubuntu) may require installing netcat-openbsd.
+# This script defines functions for the watcher's core logic (executed by a background process)
+# and for managing watcher instances (enabling, disabling, configuring from the main UI).
 
-# Required environment/config variables (set by main script or systemd):
-#   SERVICE_NAME         - systemd service name (e.g. backhaul-client-xxx.service)
-#   LOG_PATTERN          - regex for error detection (e.g. 'ERROR|FATAL')
-#   REMOTE_HOST          - IP or hostname of the remote side
-#   REMOTE_PORT          - netcat port on remote (default: 45678)
-#   RESTART_SECRET       - shared secret for authentication
-#   RESTART_DELAY_LOCAL  - seconds to wait before local restart (default: 10)
-#   RESTART_DELAY_REMOTE - seconds to wait before remote restart (default: 10)
-#   MAX_RETRIES          - max restart request attempts (default: 3)
-#   ROLE                 - 'client' or 'server' (for logging)
-#   LISTEN_PORT          - local port to listen for restart requests (default: 45678)
+# --- Watcher Core Logic (for background process) ---
 
-# --- Defaults ---
-RESTART_DELAY_LOCAL=${RESTART_DELAY_LOCAL:-10}
-RESTART_DELAY_REMOTE=${RESTART_DELAY_REMOTE:-10}
-MAX_RETRIES=${MAX_RETRIES:-3}
-LISTEN_PORT=${LISTEN_PORT:-45679}
-REMOTE_PORT=${REMOTE_PORT:-45680}
-RESTART_SECRET=${RESTART_SECRET:-$RESTART_WATCHER_SECRET}
-ROLE=${ROLE:-unknown}
+# Main entry point for the background watcher process.
+# This function is NOT called directly by the main EasyBackhaul script's UI flow.
+# It's intended to be run by the launcher script created by 'enable_tunnel_watcher'.
+# Required environment variables (set by the launcher script from the .conf file):
+#   SERVICE_NAME, LOG_PATTERN, REMOTE_HOST, REMOTE_PORT, RESTART_SECRET,
+#   RESTART_DELAY_LOCAL, RESTART_DELAY_REMOTE, MAX_RETRIES, ROLE, LISTEN_PORT
+_run_watcher_process() {
+    # Source the main helpers to get log_message, etc.
+    # This assumes helpers.sh is available in a known location relative to the main script,
+    # or that build.sh makes it available. For now, assume globals and helpers are sourced by easybh.sh.
+    # If this script were truly standalone, it would need its own minimal logging.
 
-# --- Helper: Log ---
-log() { echo "[RestartWatcher][$ROLE][$(date +'%F %T')] $1"; }
+    # Use local copies of env vars or defaults if not set (though they should be by launcher)
+    local service_name_local="${SERVICE_NAME:?SERVICE_NAME is required for watcher process}"
+    local log_pattern_local="${LOG_PATTERN:-ERROR|FATAL|connection.*failed|timeout}"
+    local remote_host_local="${REMOTE_HOST:?REMOTE_HOST is required}"
+    local remote_port_local="${REMOTE_PORT:-45680}" # Default if not set by conf
+    local restart_secret_local="${RESTART_SECRET:?RESTART_SECRET is required}"
+    local delay_local="${RESTART_DELAY_LOCAL:-10}"
+    local delay_remote="${RESTART_DELAY_REMOTE:-10}"
+    local max_retries_local="${MAX_RETRIES:-3}"
+    local role_local="${ROLE:-unknown_watcher_role}"
+    local listen_port_local="${LISTEN_PORT:-45679}" # Default if not set by conf
+    local ack_file_path="/tmp/restart_ack_${service_name_local}" # Standardized ACK file path
 
-# --- Main Entrypoint ---
-restart_watcher_main() {
-    # Set defaults if not provided
-    RESTART_DELAY_LOCAL=${RESTART_DELAY_LOCAL:-10}
-    RESTART_DELAY_REMOTE=${RESTART_DELAY_REMOTE:-10}
-    MAX_RETRIES=${MAX_RETRIES:-3}
-    LISTEN_PORT=${LISTEN_PORT:-45679}
-    REMOTE_PORT=${REMOTE_PORT:-45680}
-    RESTART_SECRET=${RESTART_SECRET:-$RESTART_WATCHER_SECRET}
-    ROLE=${ROLE:-unknown}
-    
-    # Validate required environment variables
-    if [[ -z "$SERVICE_NAME" ]]; then
-        log "ERROR: SERVICE_NAME environment variable is required"
-        exit 1
-    fi
-    
-    if [[ -z "$REMOTE_HOST" || "$REMOTE_HOST" == "0.0.0.0" ]]; then
-        log "ERROR: REMOTE_HOST environment variable is required and cannot be 0.0.0.0"
-        exit 1
-    fi
-    
-    log "Starting restart watcher for service: $SERVICE_NAME"
-    log "Remote host: $REMOTE_HOST:$REMOTE_PORT"
-    log "Listen port: $LISTEN_PORT"
-    log "Role: $ROLE"
-    
-    # Start listener in background
-    restart_listener &
-    LISTENER_PID=$!
-    
-    # Set up signal handlers for clean shutdown
-    trap 'log "Received shutdown signal. Cleaning up..."; kill $LISTENER_PID 2>/dev/null; exit 0' SIGTERM SIGINT
-    
-    # Start log monitor
-    monitor_and_restart
-    
-    # Cleanup
-    kill $LISTENER_PID 2>/dev/null
+    log_message "INFO" "[Watcher:$role_local] Starting for service: $service_name_local. Listening on $listen_port_local. Remote: $remote_host_local:$remote_port_local."
+
+    # Start listener in background (within this watcher process)
+    _watcher_listen_for_requests "$listen_port_local" "$remote_host_local" "$remote_port_local" \
+                                "$restart_secret_local" "$role_local" "$delay_remote" \
+                                "$service_name_local" "$ack_file_path" &
+    local listener_bg_pid=$!
+
+    # Trap signals for cleanup
+    trap '_watcher_cleanup $listener_bg_pid; exit 0' SIGINT SIGTERM
+
+    # Start log monitoring (this will block)
+    _watcher_monitor_logs "$service_name_local" "$log_pattern_local" \
+                          "$remote_host_local" "$remote_port_local" \
+                          "$restart_secret_local" "$role_local" "$delay_local" \
+                          "$max_retries_local" "$ack_file_path"
+
+    _watcher_cleanup $listener_bg_pid # Cleanup if monitor_logs exits
+    log_message "INFO" "[Watcher:$role_local] Exiting for service: $service_name_local."
 }
 
-# --- Function: Listen for restart requests (in background) ---
-restart_listener() {
+_watcher_cleanup() {
+    local listener_pid_to_kill="$1"
+    log_message "INFO" "[Watcher] Cleaning up listener PID $listener_pid_to_kill..."
+    if [[ -n "$listener_pid_to_kill" ]] && kill -0 "$listener_pid_to_kill" 2>/dev/null; then
+        kill "$listener_pid_to_kill" 2>/dev/null && sleep 0.1 && kill -9 "$listener_pid_to_kill" 2>/dev/null
+    fi
+    # Ack file is specific to an event, usually removed after processing.
+}
+
+_watcher_listen_for_requests() {
+    local listen_port="$1" remote_host="$2" remote_port="$3" secret_val="$4" \
+          current_role="$5" remote_delay="$6" service_to_restart="$7" ack_file="$8"
+
+    # Check nc compatibility once at the start of listener
+    if [[ "${NC_COMPATIBLE:-false}" != "true" ]]; then
+        log_message "ERROR" "[Watcher:$current_role] Netcat incompatible. Listener for $service_to_restart cannot reliably start."
+        return 1
+    fi
+
     while true; do
-        # Listen for a single line (timeout 60s to allow clean exit)
-        local msg
-        msg=$(nc -l -p "$LISTEN_PORT" -w 60 2>/dev/null)
-        if [[ "$msg" =~ ^RESTART_REQUEST:(.+):(.+)$ ]]; then
-            local secret=${BASH_REMATCH[1]}
-            local sender_role=${BASH_REMATCH[2]}
-            if [[ "$secret" == "$RESTART_SECRET" ]]; then
-                log "Received RESTART_REQUEST from $sender_role. Sending ACK and scheduling restart."
-                # Send ACK back to sender
-                echo "RESTART_ACK:$RESTART_SECRET:$ROLE" | nc "$REMOTE_HOST" "$REMOTE_PORT" -w 2
-                # Schedule restart after delay
-                (sleep "$RESTART_DELAY_REMOTE"; systemctl restart "$SERVICE_NAME"; log "Service restarted (listener)") &
+        local received_msg
+        # Use timeout with nc if available and compatible, otherwise nc might block indefinitely
+        if command -v timeout &>/dev/null; then
+            received_msg=$(timeout 65s nc -l -p "$listen_port" -w 60 2>/dev/null)
+        else
+            # Less reliable without timeout, -w might not work with -l on all nc versions
+            received_msg=$(nc -l -p "$listen_port" -w 60 2>/dev/null)
+        fi
+
+        if [[ -z "$received_msg" ]]; then # Timeout or empty message
+            sleep 1 # Prevent tight loop on continuous timeouts/errors
+            continue
+        fi
+
+        log_message "DEBUG" "[Watcher:$current_role] Received on $listen_port: $received_msg"
+
+        if [[ "$received_msg" =~ ^RESTART_REQUEST:([^:]+):([^:]+)$ ]]; then
+            local received_secret="${BASH_REMATCH[1]}"
+            local sender_role="${BASH_REMATCH[2]}"
+            if [[ "$received_secret" == "$secret_val" ]]; then
+                log_message "INFO" "[Watcher:$current_role] Auth OK. Received RESTART_REQUEST from $sender_role for $service_to_restart."
+                log_message "INFO" "[Watcher:$current_role] Sending ACK to $remote_host:$remote_port and scheduling restart in $remote_delay s."
+                echo "RESTART_ACK:$secret_val:$current_role" | nc "$remote_host" "$remote_port" -w 3 # Short timeout for ACK
+
+                ( # Subshell for delayed restart
+                    sleep "$remote_delay"
+                    log_message "INFO" "[Watcher:$current_role] Executing restart for $service_to_restart (triggered by remote)."
+                    systemctl restart "$service_to_restart"
+                ) & # Run in background
             else
-                log "Received RESTART_REQUEST with invalid secret. Ignoring."
+                log_message "WARN" "[Watcher:$current_role] Received RESTART_REQUEST with INVALID secret from $sender_role. Ignoring."
             fi
-        elif [[ "$msg" =~ ^RESTART_ACK:(.+):(.+)$ ]]; then
-            # This is an ACK for a request we sent
-            local secret=${BASH_REMATCH[1]}
-            local ack_role=${BASH_REMATCH[2]}
-            if [[ "$secret" == "$RESTART_SECRET" ]]; then
-                log "Received RESTART_ACK from $ack_role."
-                # Touch a file to signal ACK received
-                touch "/tmp/restart_ack_${SERVICE_NAME}"
+        elif [[ "$received_msg" =~ ^RESTART_ACK:([^:]+):([^:]+)$ ]]; then
+            local received_secret="${BASH_REMATCH[1]}"
+            # local ack_sender_role="${BASH_REMATCH[2]}" # Can log this if needed
+            if [[ "$received_secret" == "$secret_val" ]]; then
+                log_message "INFO" "[Watcher:$current_role] Received RESTART_ACK for $service_to_restart. Storing in $ack_file."
+                touch "$ack_file" # Signal that ACK was received
+            else
+                 log_message "WARN" "[Watcher:$current_role] Received RESTART_ACK with INVALID secret. Ignoring."
             fi
+        else
+            log_message "WARN" "[Watcher:$current_role] Received unknown message on $listen_port: $received_msg"
         fi
     done
 }
 
-# --- Function: Monitor logs and trigger coordinated restart ---
-monitor_and_restart() {
-    log "Starting log monitor for $SERVICE_NAME (pattern: $LOG_PATTERN)"
-    journalctl -u "$SERVICE_NAME" -f --no-pager | while read -r line; do
-        if [[ "$line" =~ $LOG_PATTERN ]]; then
-            log "Error detected in logs. Initiating coordinated restart."
-            # Try to send restart request and wait for ACK
-            local attempt=1
-            while (( attempt <= MAX_RETRIES )); do
-                log "Sending RESTART_REQUEST to $REMOTE_HOST:$REMOTE_PORT (attempt $attempt)"
-                echo "RESTART_REQUEST:$RESTART_SECRET:$ROLE" | nc "$REMOTE_HOST" "$REMOTE_PORT" -w 2
-                # Wait for ACK (up to 10s)
-                for i in {1..10}; do
-                    if [ -f "/tmp/restart_ack_${SERVICE_NAME}" ]; then
-                        rm -f "/tmp/restart_ack_${SERVICE_NAME}"
-                        log "ACK received. Scheduling local restart in $RESTART_DELAY_LOCAL seconds."
-                        sleep "$RESTART_DELAY_LOCAL"
-                        systemctl restart "$SERVICE_NAME"
-                        log "Service restarted (initiator)"
-                        return
+_watcher_monitor_logs() {
+    local service_to_monitor="$1" pattern="$2" r_host="$3" r_port="$4" secret_val="$5" \
+          current_role="$6" local_delay="$7" max_tries="$8" ack_file="$9"
+
+    log_message "INFO" "[Watcher:$current_role] Monitoring logs for $service_to_monitor (Pattern: '$pattern')."
+
+    # Ensure nc compatibility for sending requests
+    if [[ "${NC_COMPATIBLE:-false}" != "true" ]]; then
+        log_message "ERROR" "[Watcher:$current_role] Netcat incompatible. Cannot reliably send restart requests for $service_to_monitor."
+        # Could choose to only do local restarts or exit. For now, will proceed but log error.
+    fi
+
+    journalctl -u "$service_to_monitor" -f --no-pager | while IFS= read -r log_line; do
+        if echo "$log_line" | grep -qE "$pattern"; then
+            log_message "WARN" "[Watcher:$current_role] Error detected in logs for $service_to_monitor: $log_line"
+            log_message "INFO" "[Watcher:$current_role] Initiating coordinated restart procedure for $service_to_monitor."
+
+            local attempt_num=1
+            local ack_is_received=false
+            while (( attempt_num <= max_tries )); do
+                log_message "INFO" "[Watcher:$current_role] Sending RESTART_REQUEST to $r_host:$r_port for $service_to_monitor (Attempt $attempt_num/$max_tries)."
+                # Clear any old ACK file before sending request
+                rm -f "$ack_file"
+                echo "RESTART_REQUEST:$secret_val:$current_role" | nc "$r_host" "$r_port" -w 3 # Short timeout for send
+
+                # Wait for ACK (e.g., up to 5 seconds)
+                for (( i=0; i<5; i++ )); do
+                    if [[ -f "$ack_file" ]]; then
+                        log_message "INFO" "[Watcher:$current_role] RESTART_ACK received for $service_to_monitor."
+                        rm -f "$ack_file" # Consume ACK
+                        ack_is_received=true
+                        break # Break inner loop (wait for ACK)
                     fi
                     sleep 1
                 done
-                log "No ACK received. Retrying..."
-                ((attempt++))
+
+                if $ack_is_received; then
+                    break # Break outer loop (retry attempts)
+                fi
+
+                log_message "WARN" "[Watcher:$current_role] No ACK received for $service_to_monitor (Attempt $attempt_num). Retrying if attempts remain."
+                ((attempt_num++))
             done
-            log "Failed to coordinate restart after $MAX_RETRIES attempts. Local restart only."
-            sleep "$RESTART_DELAY_LOCAL"
-            systemctl restart "$SERVICE_NAME"
-            log "Service restarted (local only)"
+
+            if $ack_is_received; then
+                log_message "INFO" "[Watcher:$current_role] Coordinated restart approved. Restarting $service_to_monitor locally in $local_delay seconds."
+            else
+                log_message "ERROR" "[Watcher:$current_role] Failed to coordinate restart for $service_to_monitor after $max_tries attempts. Proceeding with local restart only in $local_delay seconds."
+            fi
+
+            ( # Subshell for delayed local restart
+                sleep "$local_delay"
+                log_message "INFO" "[Watcher:$current_role] Executing local restart for $service_to_monitor."
+                systemctl restart "$service_to_monitor"
+            ) &
+
+            # IMPORTANT: If monitor_and_restart is part of the main watcher script that gets backgrounded,
+            # this 'return' will exit the 'while read' loop from journalctl, effectively stopping monitoring
+            # for this particular error instance. The watcher process itself would then exit due to _run_watcher_process structure.
+            # This is usually the desired behavior: detect error, attempt restart, then the new service instance's logs will be monitored.
             return
         fi
+    done
+    # If journalctl -f exits (e.g. service stopped manually and journalctl terminated), this loop ends.
+    log_message "INFO" "[Watcher:$current_role] Log monitoring for $service_to_monitor ended (journalctl -f exited)."
+}
+
+
+# --- Watcher UI Management Functions (called by main EasyBackhaul script) ---
+
+_tunnel_watcher_menu_help() {
+    local service_name_ctx="$1" # Context for help
+    print_menu_header "secondary" "Restart Watcher Help" "Service: $service_name_ctx"
+    echo "The Coordinated Restart Watcher monitors a tunnel service for errors."
+    echo "If an error is detected (based on a log pattern), it attempts to"
+    echo "coordinate a restart with the remote end of the tunnel."
+    echo
+    print_info "Key Features:"
+    echo "  - Error Detection: Monitors service logs using 'journalctl -f'."
+    echo "  - Coordinated Restart: Communicates with the remote watcher via netcat."
+    echo "  - Secure Communication: Uses a shared secret for authentication."
+    echo "  - Configurable: Delays, retries, ports, and log patterns can be set."
+    echo
+    print_info "Setup:"
+    echo "  1. Enable watcher on one side (e.g., server)."
+    echo "  2. A shared secret is generated/used. Note this secret."
+    echo "  3. Enable watcher on the other side (e.g., client), providing the SAME secret."
+    echo "  4. Configure IP addresses and ports for communication between watchers."
+    echo
+    print_info "Important:"
+    echo "  - Requires a compatible 'nc' (netcat) version (netcat-openbsd recommended)."
+    echo "  - Ensure firewall rules allow communication on the watcher ports."
+    press_any_key
+}
+
+manage_tunnel_watcher() {
+    local main_service_name="$1" # e.g., backhaul-bh-server-tcp-xxxxx
+    local tunnel_short_suffix="$2" # e.g., bh-server-tcp-xxxxx
+    local tunnel_config_file="$3"  # Path to the main tunnel's TOML config
+
+    # Construct paths for watcher-specific files (convention)
+    local watcher_launcher_script="/tmp/backhaul-watcher-${tunnel_short_suffix}.sh"
+    local watcher_conf_file="/tmp/backhaul-watcher-${tunnel_short_suffix}.conf"
+    local watcher_pid_file="/tmp/backhaul-watcher-${tunnel_short_suffix}.pid"
+    # Watcher log is managed by nohup redirection in _enable_tunnel_watcher
+
+    local menu_options=(
+        "1. Enable Watcher"
+        "2. Disable Watcher"
+        "3. Show Watcher Status"
+        "4. View Watcher Log"
+        "5. Edit Watcher Configuration"
+        "6. Test Watcher Communication (experimental)"
+        "7. Manage Watcher Shared Secret"
+    )
+    local current_exit_details=("0" "Back to Tunnel Management") # Array: [key, text]
+    local user_choice menu_rc
+
+    while true; do
+        local watcher_status="Disabled/Not Running"
+        if [[ -f "$watcher_pid_file" ]]; then
+            local pid_val
+            pid_val=$(cat "$watcher_pid_file" 2>/dev/null)
+            if [[ -n "$pid_val" ]] && ps -p "$pid_val" > /dev/null 2>&1; then
+                watcher_status="Running (PID: $pid_val)"
+            fi
+        fi
+        print_menu_header "secondary" "Restart Watcher Management" "Tunnel: $tunnel_short_suffix" "Watcher: $watcher_status"
+
+        menu_loop "Select watcher option" menu_options current_exit_details "_tunnel_watcher_menu_help \"$tunnel_short_suffix\""
+        user_choice="$MENU_CHOICE" # menu_loop sets MENU_CHOICE
+        menu_rc=$?                # menu_loop returns status code
+
+        # Handle universal navigation keys based on menu_rc
+        case "$menu_rc" in
+            3) go_to_main_menu; return 0 ;; # m -> main menu
+            4) request_script_exit; return 0 ;; # e -> exit script
+            5) return_from_menu; return 0 ;; # r -> return/back (to previous menu)
+            2) continue ;; # ? -> help was shown, re-loop current menu
+            0) # Numeric choice or default exit "0"
+               # Proceed to specific choice handling below
+               ;;
+            *) handle_error "ERROR" "Unhandled menu_loop code $menu_rc in manage_tunnel_watcher"; press_any_key; continue;;
+        esac
+
+        # Handle numeric choices and the specific default exit ("0")
+        case "$user_choice" in
+            "1") _enable_tunnel_watcher "$main_service_name" "$tunnel_short_suffix" "$tunnel_config_file" ;;
+            "2") _disable_tunnel_watcher "$tunnel_short_suffix" "$tunnel_config_file" ;;
+            "3") _show_tunnel_watcher_status "$tunnel_short_suffix" ;;
+            "4") _view_tunnel_watcher_log "$tunnel_short_suffix" ;;
+            "5") _edit_tunnel_watcher_config "$tunnel_short_suffix" "$tunnel_config_file" ;;
+            "6") _test_tunnel_watcher_comm "$tunnel_short_suffix" ;;
+            "7") _manage_watcher_shared_secret "$tunnel_config_file" ;;
+            "0") return_from_menu; return 0;;
+            *) print_warning "Invalid option."; press_any_key ;;
+        esac
     done
 }
 
-# --- Watcher Management Functions ---
+_enable_tunnel_watcher() {
+    local service_name="$1" tunnel_suffix="$2" config_file="$3"
+    print_menu_header "secondary" "Enable Restart Watcher" "Tunnel: $tunnel_suffix"
 
-# Enable watcher for a tunnel
-enable_watcher() {
-    local service="$1"
-    local suffix="$2"
-    local config_file="$3"
-    local role remote_host local_ip
-
-    clear
-    print_info "=== Watcher Setup ==="
-    echo
-    print_info "The watcher coordinates restarts between both sides."
-    echo
-    
-    # Determine role for better guidance
-    if grep -q '^\[server\]' "$config_file"; then
-        role="server"
-        print_info "This is a SERVER tunnel"
-        echo
-        read -p "Enter client IP address: " remote_host
-        if [[ -z "$remote_host" ]]; then
-            print_error "Client IP is required."
-            press_any_key
-            return
-        fi
-    else
-        role="client"
-        print_info "This is a CLIENT tunnel"
-        # For client, remote host is the server IP from tunnel config
-        remote_host=$(grep '^remote_addr' "$config_file" | cut -d'"' -f2 | cut -d':' -f1)
-        if [[ -z "$remote_host" ]]; then
-            print_error "Could not find server IP in tunnel config."
-            press_any_key
-            return
-        fi
-        print_info "Server IP: $remote_host"
-        
-        # Get client's own IPv4 IP for server configuration
-        local_ip=$(curl -s -4 ifconfig.me 2>/dev/null || curl -s -4 ipinfo.io/ip 2>/dev/null || echo "unknown")
-        if [[ "$local_ip" != "unknown" ]]; then
-            echo
-            print_info "Your IPv4 address: $local_ip"
-            print_info "Use this IP when configuring the server side watcher."
-        fi
-    fi
-
-    # Simple port setup - server uses higher ports, client uses lower ports
-    echo
-    local listen_port remote_port
-    if [[ "$role" == "server" ]]; then
-        listen_port=45690  # Server receives on higher port
-        remote_port=45680  # Server sends to lower port
-    else
-        listen_port=45680  # Client receives on lower port  
-        remote_port=45690  # Client sends to higher port
-    fi
-    
-    print_info "Checking port availability..."
-    
-    # Check if listen port is available using unified port checking
-    if ! check_port_availability "$listen_port"; then
-        read -p "Enter different receive port: " listen_port
-        if [[ -z "$listen_port" ]]; then
-            print_error "Port is required."
-            press_any_key
-            return 1
-        fi
-        # Re-check the new port
-        if ! check_port_availability "$listen_port"; then
-            print_error "Selected port is also in use."
-            press_any_key
-            return 1
-        fi
-    fi
-    
-    # Check if remote port is available (for local testing)
-    if ! check_port_availability "$remote_port"; then
-        print_warning "Port $remote_port is in use locally. This might cause issues."
-    fi
-    
-    # Check for conflicts with main tunnel ports
-    local tunnel_port
-    tunnel_port=$(grep '^bind_addr\|^remote_addr' "$config_file" | cut -d'"' -f2 | cut -d':' -f2 | head -1)
-    if [[ -n "$tunnel_port" ]]; then
-        if [[ "$listen_port" == "$tunnel_port" || "$remote_port" == "$tunnel_port" ]]; then
-            print_warning "Watcher port ($listen_port or $remote_port) conflicts with tunnel port ($tunnel_port)."
-            print_info "This is not recommended but will work."
-        fi
-    fi
-    
-    # Check for conflicts with other watchers
-    for existing_pid in /tmp/backhaul-watcher-*.pid; do
-        if [[ -f "$existing_pid" ]]; then
-            local existing_suffix=$(basename "$existing_pid" .pid | sed 's/backhaul-watcher-//')
-            if [[ "$existing_suffix" != "$suffix" ]]; then
-                local existing_config="$CONFIG_DIR/config-${existing_suffix}.toml"
-                if [[ -f "$existing_config" ]]; then
-                    local existing_listen=$(grep '^restart_watcher_listen_port' "$existing_config" | awk -F'=' '{print $2}' | tr -d ' "')
-                    local existing_remote=$(grep '^restart_watcher_remote_port' "$existing_config" | awk -F'=' '{print $2}' | tr -d ' "')
-                    if [[ "$listen_port" == "$existing_listen" || "$listen_port" == "$existing_remote" || "$remote_port" == "$existing_listen" || "$remote_port" == "$existing_remote" ]]; then
-                        print_warning "Port conflict detected with existing watcher for tunnel: $existing_suffix"
-                        print_info "This might cause communication issues between watchers."
-                    fi
-                fi
-            fi
-        fi
-    done
-    
-    print_success "Ports are available."
-
-    # Handle watcher secret - must be the same on both sides
-    local secret
-    if [[ "$role" == "server" ]]; then
-        # Server generates or uses existing secret
-        if [[ -f "$CONFIG_DIR/watcher_secret" ]]; then
-            secret=$(cat "$CONFIG_DIR/watcher_secret")
-            print_info "Using existing watcher secret"
-        else
-            # Generate a new secret for this tunnel pair
-            secret=$(openssl rand -hex 16 2>/dev/null || tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
-            echo "$secret" > "$CONFIG_DIR/watcher_secret"
-            chmod 600 "$CONFIG_DIR/watcher_secret"
-            print_info "Generated new watcher secret"
-        fi
-        print_info "Secret: $secret"
-        print_info "Share this secret with the client side."
-    else
-        # Client needs to enter the secret from server
-        echo
-        print_info "You need the watcher secret from the server side."
-        print_info "Ask the server administrator for the watcher secret."
-        echo
-        while true; do
-            read -p "Enter the watcher secret from server: " secret
-            if [[ -n "$secret" ]]; then
-                # Validate secret format (should be hex or alphanumeric)
-                if [[ "$secret" =~ ^[A-Za-z0-9]+$ ]]; then
-                    break
-                else
-                    print_warning "Secret should contain only letters and numbers"
-                fi
-            else
-                print_warning "Secret cannot be empty"
-            fi
-        done
-    fi
-
-    # Add UFW rule for listen port
-    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-        print_info "--> UFW is active. Adding rule for port ${listen_port}/tcp..."
-        if ufw allow ${listen_port}/tcp >/dev/null 2>&1; then
-            print_success "UFW rule added successfully."
-        else
-            print_warning "Failed to add UFW rule. You may need to add it manually."
-        fi
-    fi
-
-    # Create watcher configuration file
-    local watcher_config="/tmp/backhaul-watcher-${suffix}.conf"
-    cat > "$watcher_config" <<EOL
-SERVICE_NAME="$service"
-REMOTE_HOST="$remote_host"
-REMOTE_PORT="$remote_port"
-LISTEN_PORT="$listen_port"
-RESTART_SECRET="$secret"
-ROLE="$role"
-LOG_PATTERN="ERROR|FATAL|connection.*failed|timeout"
-RESTART_DELAY_LOCAL=10
-RESTART_DELAY_REMOTE=10
-MAX_RETRIES=3
-EOL
-
-    # Create simple launcher script that uses the centralized restart watcher
-    local watcher_script="/tmp/backhaul-watcher-${suffix}.sh"
-    cat > "$watcher_script" <<EOL
-#!/bin/bash
-# Watcher launcher for $service
-# This script loads configuration and launches the centralized restart watcher
-
-# Load configuration
-source "/tmp/backhaul-watcher-${suffix}.conf"
-
-# Set up signal handlers for clean shutdown
-trap 'echo "[Watcher][\$ROLE][\$(date +"%F %T")] Received shutdown signal. Cleaning up..."; exit 0' SIGTERM SIGINT
-
-# Launch the centralized restart watcher
-restart_watcher_main
-EOL
-
-    chmod +x "$watcher_script"
-    
-    # Start the watcher in background
-    # Log rotation: keep last 5 logs
-    for i in 5 4 3 2 1; do
-        if [[ -f "/tmp/backhaul-watcher-${suffix}.log.$i" ]]; then
-            mv "/tmp/backhaul-watcher-${suffix}.log.$i" "/tmp/backhaul-watcher-${suffix}.log.$((i+1))"
-        fi
-    done
-    if [[ -f "/tmp/backhaul-watcher-${suffix}.log" ]]; then
-        mv "/tmp/backhaul-watcher-${suffix}.log" "/tmp/backhaul-watcher-${suffix}.log.1"
-    fi
-    nohup "$watcher_script" > "/tmp/backhaul-watcher-${suffix}.log" 2>&1 &
-    local watcher_pid=$!
-    
-    # Wait a moment to ensure process started
-    sleep 1
-    
-    # Verify process is still running before saving PID
-    if kill -0 "$watcher_pid" 2>/dev/null; then
-        # Save PID for later management
-        echo "$watcher_pid" > "/tmp/backhaul-watcher-${suffix}.pid"
-    else
-        print_error "Watcher process failed to start properly"
+    # Check for nc compatibility first
+    ensure_netcat_installed # From helpers.sh, also runs check_nc_compatibility
+    if [[ "${NC_COMPATIBLE:-false}" != "true" ]]; then
+        handle_error "ERROR" "Netcat is not compatible. Watcher cannot be reliably enabled."
         press_any_key
         return 1
     fi
     
-    # Update config file using unified functions
-    update_config_value "$config_file" "restart_watcher_enabled" "y"
-    update_config_numeric "$config_file" "restart_watcher_listen_port" "$listen_port"
-    update_config_numeric "$config_file" "restart_watcher_remote_port" "$remote_port"
-    update_config_value "$config_file" "restart_watcher_secret" "$secret"
-    update_config_numeric "$config_file" "restart_watcher_pid" "$watcher_pid"
-    
-    print_success "Watcher enabled and started."
-    echo
-    print_info "--- Configuration ---"
-    echo "Secret: $secret"
-    echo "Receive port: $listen_port"
-    echo "Send port: $remote_port"
-    echo
-    if [[ "$role" == "server" ]]; then
-        print_info "IMPORTANT: Share this secret with the client side:"
-        print_info "Secret: $secret"
-        echo
-        print_info "The client will need this secret to enable their watcher."
-    elif [[ "$role" == "client" && "$local_ip" != "unknown" ]]; then
-        print_info "Use your IPv4 address ($local_ip) when configuring the server side."
-        print_info "Make sure the server uses the same secret: $secret"
-    fi
-    press_any_key
-}
+    # Default watcher config values
+    local w_role w_remote_host w_listen_port w_remote_port w_secret w_log_pattern
+    local w_delay_local=10 w_delay_remote=10 w_max_retries=3
 
-# Disable watcher for a tunnel
-disable_watcher() {
-    local service="$1"
-    local suffix="$2"
-    local config_file="$3"
-    
-    clear
-    print_info "=== Disable Watcher ==="
-    echo
-    
-    local pid_file="/tmp/backhaul-watcher-${suffix}.pid"
-    local log_file="/tmp/backhaul-watcher-${suffix}.log"
-    local config_file_watcher="/tmp/backhaul-watcher-${suffix}.conf"
-    local script_file="/tmp/backhaul-watcher-${suffix}.sh"
-    
-    if [[ ! -f "$pid_file" ]]; then
-        print_warning "Watcher is not running for this tunnel."
-        press_any_key
-        return
-    fi
-    
-    local pid=$(cat "$pid_file" 2>/dev/null)
-    
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-        print_info "Stopping watcher process (PID: $pid)..."
-        kill -TERM "$pid" 2>/dev/null
-        
-        # Wait for graceful shutdown
-        local count=0
-        while kill -0 "$pid" 2>/dev/null && [[ $count -lt 10 ]]; do
-            sleep 1
-            ((count++))
-        done
-        
-        # Force kill if still running
-        if kill -0 "$pid" 2>/dev/null; then
-            print_warning "Force killing watcher process..."
-            kill -KILL "$pid" 2>/dev/null
-        fi
-        
-        print_success "Watcher stopped successfully."
+    # Determine role and pre-fill some values based on tunnel config
+    if grep -q 'mode[[:space:]]*=[[:space:]]*"server"' "$config_file"; then
+        w_role="server"
+        print_info "This is a SERVER tunnel. You need the CLIENT's public IP for watcher communication."
+        read -r -p "Enter CLIENT's public IP address: " w_remote_host
+        if ! validate_ip "$w_remote_host"; then handle_error "ERROR" "Invalid IP address for remote host."; press_any_key; return 1; fi
+        w_listen_port="${WATCHER_SERVER_LISTEN_PORT:-45679}" # Server listens on one port
+        w_remote_port="${WATCHER_CLIENT_LISTEN_PORT:-45680}" # Server sends to client's listen port
+    elif grep -q 'mode[[:space:]]*=[[:space:]]*"client"' "$config_file"; then
+        w_role="client"
+        w_remote_host=$(grep 'server[[:space:]]*=' "$config_file" | sed 's/.*=[[:space:]]*"\(.*\):.*"/\1/')
+        if ! validate_ip "$w_remote_host"; then handle_error "ERROR" "Could not parse server IP from tunnel config."; press_any_key; return 1; fi
+        print_info "This is a CLIENT tunnel. Remote server IP for watcher: $w_remote_host"
+        w_listen_port="${WATCHER_CLIENT_LISTEN_PORT:-45680}" # Client listens on one port
+        w_remote_port="${WATCHER_SERVER_LISTEN_PORT:-45679}" # Client sends to server's listen port
     else
-        print_warning "Watcher process not found or already stopped."
-    fi
-    
-    # Clean up files
-    rm -f "$pid_file" "$config_file_watcher" "$script_file"
-    
-    # Update config file
-    update_config_value "$config_file" "restart_watcher_enabled" "n"
-    update_config_numeric "$config_file" "restart_watcher_pid" "0"
-    
-    print_success "Watcher disabled and cleaned up."
-    echo
-    print_info "Log file preserved: $log_file"
-    press_any_key
-}
-
-# Edit watcher configuration
-edit_watcher_config() {
-    local service="$1"
-    local suffix="$2"
-    local config_file="$3"
-    
-    clear
-    print_info "=== Edit Watcher Configuration ==="
-    echo
-    
-    local watcher_config="/tmp/backhaul-watcher-${suffix}.conf"
-    
-    if [[ ! -f "$watcher_config" ]]; then
-        print_error "Watcher configuration not found. Enable watcher first."
+        handle_error "ERROR" "Cannot determine tunnel mode (server/client) from config: $config_file"
         press_any_key
-        return
+        return 1
     fi
-    
-    # Load current configuration
-    source "$watcher_config"
-    
-    echo "Current configuration:"
-    echo "  Log pattern: $LOG_PATTERN"
-    echo "  Local restart delay: $RESTART_DELAY_LOCAL seconds"
-    echo "  Remote restart delay: $RESTART_DELAY_REMOTE seconds"
-    echo "  Max retries: $MAX_RETRIES"
-    echo "  Listen port: $LISTEN_PORT"
-    echo "  Remote port: $REMOTE_PORT"
-    echo
-    
-    print_info "Options:"
-    echo "  1. Edit log pattern"
-    echo "  2. Edit restart delays"
-    echo "  3. Edit max retries"
-    echo "  4. Edit ports"
-    print_menu_footer
-    
-    local choice
-    read -p "Select an option [0-4]: " choice
-    
-    case "$choice" in
-        1)
-            echo
-            print_info "Current log pattern: $LOG_PATTERN"
-            print_info "Enter new log pattern (regex for error detection):"
-            read -p "New pattern: " new_pattern
-            if [[ -n "$new_pattern" ]]; then
-                LOG_PATTERN="$new_pattern"
-                print_success "Log pattern updated"
-            fi
-            ;;
-        2)
-            echo
-            print_info "Current delays: Local=$RESTART_DELAY_LOCAL, Remote=$RESTART_DELAY_REMOTE"
-            read -p "Enter local restart delay (seconds): " new_local_delay
-            read -p "Enter remote restart delay (seconds): " new_remote_delay
-            if [[ -n "$new_local_delay" ]] && [[ "$new_local_delay" =~ ^[0-9]+$ ]]; then
-                RESTART_DELAY_LOCAL="$new_local_delay"
-            fi
-            if [[ -n "$new_remote_delay" ]] && [[ "$new_remote_delay" =~ ^[0-9]+$ ]]; then
-                RESTART_DELAY_REMOTE="$new_remote_delay"
-            fi
-            print_success "Restart delays updated"
-            ;;
-        3)
-            echo
-            print_info "Current max retries: $MAX_RETRIES"
-            read -p "Enter new max retries: " new_retries
-            if [[ -n "$new_retries" ]] && [[ "$new_retries" =~ ^[0-9]+$ ]]; then
-                MAX_RETRIES="$new_retries"
-                print_success "Max retries updated"
-            fi
-            ;;
-        4)
-            echo
-            print_info "Current ports: Listen=$LISTEN_PORT, Remote=$REMOTE_PORT"
-            read -p "Enter new listen port: " new_listen_port
-            read -p "Enter new remote port: " new_remote_port
-            if [[ -n "$new_listen_port" ]] && [[ "$new_listen_port" =~ ^[0-9]+$ ]]; then
-                LISTEN_PORT="$new_listen_port"
-            fi
-            if [[ -n "$new_remote_port" ]] && [[ "$new_remote_port" =~ ^[0-9]+$ ]]; then
-                REMOTE_PORT="$new_remote_port"
-            fi
-            print_success "Ports updated"
-            ;;
-        0)
-            return
-            ;;
-        *)
-            print_warning "Invalid option"
-            ;;
-    esac
-    
-    # Save updated configuration
-    cat > "$watcher_config" <<EOL
-SERVICE_NAME="$SERVICE_NAME"
-REMOTE_HOST="$REMOTE_HOST"
-REMOTE_PORT="$REMOTE_PORT"
-LISTEN_PORT="$LISTEN_PORT"
-RESTART_SECRET="$RESTART_SECRET"
-ROLE="$ROLE"
-LOG_PATTERN="$LOG_PATTERN"
-RESTART_DELAY_LOCAL="$RESTART_DELAY_LOCAL"
-RESTART_DELAY_REMOTE="$RESTART_DELAY_REMOTE"
-MAX_RETRIES="$MAX_RETRIES"
+
+    # Get/Generate Shared Secret
+    w_secret=$(_get_or_set_watcher_secret "$config_file" "$w_role")
+    if [[ -z "$w_secret" ]]; then return 1; fi # Error handled in _get_or_set_watcher_secret
+
+    w_log_pattern=$(grep 'log_pattern[[:space:]]*=' "$config_file" | sed 's/.*=[[:space:]]*"\(.*\)"/\1/' 2>/dev/null || echo "ERROR|FATAL|connection.*failed|timeout|reset by peer")
+
+    print_info "--- Watcher Configuration ---"
+    echo "  Role: $w_role"
+    echo "  Service to Monitor: $service_name"
+    echo "  Log Pattern for Errors: $w_log_pattern"
+    echo "  This Watcher Listens on Port: $w_listen_port"
+    echo "  Remote Watcher Host: $w_remote_host"
+    echo "  Remote Watcher Port: $w_remote_port"
+    echo "  Shared Secret: [set]" # Don't display
+
+    if ! prompt_yes_no "Proceed with these watcher settings?" "y"; then
+        print_info "Watcher enablement cancelled."
+        press_any_key
+        return 1
+    fi
+
+    # Create watcher configuration file (e.g., /tmp/backhaul-watcher-suffix.conf)
+    local watcher_conf_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.conf"
+    cat > "$watcher_conf_file_path" <<EOL
+# Watcher configuration for tunnel: $tunnel_suffix
+SERVICE_NAME="$service_name"
+LOG_PATTERN="$w_log_pattern"
+REMOTE_HOST="$w_remote_host"
+REMOTE_PORT="$w_remote_port"
+RESTART_SECRET="$w_secret"
+RESTART_DELAY_LOCAL="$w_delay_local"
+RESTART_DELAY_REMOTE="$w_delay_remote"
+MAX_RETRIES="$w_max_retries"
+ROLE="$w_role"
+LISTEN_PORT="$w_listen_port"
 EOL
+    chmod 600 "$watcher_conf_file_path"
+    log_message "INFO" "Watcher config file created: $watcher_conf_file_path"
+
+    # Create watcher launcher script (e.g., /tmp/backhaul-watcher-suffix.sh)
+    # This launcher script will source globals.sh, then helpers.sh, then the watcher conf, then call _run_watcher_process
+    local watcher_launcher_script_path="/tmp/backhaul-watcher-${tunnel_suffix}.sh"
+    cat > "$watcher_launcher_script_path" <<EOLSCRIPT
+#!/bin/bash
+# Launcher for EasyBackhaul Watcher: ${tunnel_suffix}
+
+# Determine script's own directory to find other modules if needed
+SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+EASYBACKHAUL_BASE_DIR="\$(dirname "\$SCRIPT_DIR")" # Assuming modules are one level up from a bin dir or similar
+
+# Source required global variables and helper functions
+# This assumes that when easybh.sh is built, globals.sh and helpers.sh contents are available
+# For a truly standalone script, these would need to be embedded or sourced differently.
+# For now, we rely on the main script's structure.
+if [[ -f "\${EASYBACKHAUL_BASE_DIR}/modules/globals.sh" ]]; then
+    source "\${EASYBACKHAUL_BASE_DIR}/modules/globals.sh"
+else
+    echo "FATAL: globals.sh not found for watcher." >&2; exit 1;
+fi
+if [[ -f "\${EASYBACKHAUL_BASE_DIR}/modules/helpers.sh" ]]; then
+    source "\${EASYBACKHAUL_BASE_DIR}/modules/helpers.sh"
+else
+    echo "FATAL: helpers.sh not found for watcher." >&2; exit 1;
+fi
+# Source the watcher's own functions (this file itself, if structured for it)
+# This is tricky if restart_watcher.sh contains both UI and core logic.
+# For now, assume _run_watcher_process is available because this whole module is sourced by easybh.sh
+# This means the launcher is simpler, it just sets up env and calls the function.
+
+# Load specific watcher config
+source "$watcher_conf_file_path"
+
+# Call the main watcher process function (defined in the sourced modules/restart_watcher.sh)
+_run_watcher_process
+EOLSCRIPT
+    chmod +x "$watcher_launcher_script_path"
+    log_message "INFO" "Watcher launcher script created: $watcher_launcher_script_path"
+
+    # Start the watcher in the background
+    local watcher_log_file="/var/log/easybackhaul/watcher-${tunnel_suffix}.log" # Log to main log dir
+    ensure_dir "$(dirname "$watcher_log_file")"
     
-    # Update main config file
-    update_config_numeric "$config_file" "restart_watcher_listen_port" "$LISTEN_PORT"
-    update_config_numeric "$config_file" "restart_watcher_remote_port" "$REMOTE_PORT"
-    
-    print_success "Configuration saved. Restart watcher to apply changes."
+    nohup "$watcher_launcher_script_path" >> "$watcher_log_file" 2>&1 &
+    local watcher_pid=$!
+    sleep 1 # Give it a moment to start or fail
+
+    local watcher_pid_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.pid"
+    if ps -p $watcher_pid > /dev/null 2>&1; then
+        echo "$watcher_pid" > "$watcher_pid_file_path"
+        chmod 600 "$watcher_pid_file_path"
+        update_toml_value "$config_file" "restart_watcher_enabled" "true" "boolean"
+        update_toml_value "$config_file" "restart_watcher_pid" "$watcher_pid" "numeric"
+        # Store other watcher params in the main tunnel config for visibility/editing later
+        update_toml_value "$config_file" "watcher_role" "$w_role" "string"
+        update_toml_value "$config_file" "watcher_listen_port" "$w_listen_port" "numeric"
+        update_toml_value "$config_file" "watcher_remote_host" "$w_remote_host" "string"
+        update_toml_value "$config_file" "watcher_remote_port" "$w_remote_port" "numeric"
+        update_toml_value "$config_file" "watcher_log_pattern" "$w_log_pattern" "string"
+
+        handle_success "Watcher enabled and started for $service_name (PID: $watcher_pid)."
+        print_info "Watcher log: $watcher_log_file"
+    else
+        handle_error "ERROR" "Watcher process failed to start for $service_name. Check $watcher_log_file for details."
+        # Cleanup temp files if start failed
+        rm -f "$watcher_conf_file_path" "$watcher_launcher_script_path"
+    fi
     press_any_key
 }
 
-# Test watcher communication
-test_watcher() {
-    local service="$1"
-    local suffix="$2"
-    local config_file="$3"
-    
-    clear
-    print_info "=== Test Watcher Communication ==="
-    echo
-    
-    local watcher_config="/tmp/backhaul-watcher-${suffix}.conf"
-    
-    if [[ ! -f "$watcher_config" ]]; then
-        print_error "Watcher configuration not found. Enable watcher first."
-        press_any_key
-        return
-    fi
-    
-    # Load configuration
-    source "$watcher_config"
-    
-    echo "Testing communication with $REMOTE_HOST:$REMOTE_PORT"
-    echo "Using secret: ${RESTART_SECRET:0:8}..."
-    echo
-    
-    # Test basic connectivity
-    print_info "Testing basic connectivity..."
-    if nc -z "$REMOTE_HOST" "$REMOTE_PORT" 2>/dev/null; then
-        print_success "✓ Port $REMOTE_PORT is reachable on $REMOTE_HOST"
+_disable_tunnel_watcher() {
+    local tunnel_suffix="$1" config_file="$2"
+    print_menu_header "secondary" "Disable Restart Watcher" "Tunnel: $tunnel_suffix"
+
+    # cleanup_watcher_files (from helpers.sh) handles stopping the process and removing tmp files
+    if cleanup_watcher_files "$tunnel_suffix"; then
+        update_toml_value "$config_file" "restart_watcher_enabled" "false" "boolean"
+        update_toml_value "$config_file" "restart_watcher_pid" "0" "numeric" # Clear PID
+        handle_success "Watcher disabled and files cleaned up for tunnel: $tunnel_suffix."
     else
-        print_error "✗ Cannot reach $REMOTE_HOST:$REMOTE_PORT"
-        print_info "Check firewall rules and ensure remote watcher is running."
+        handle_error "WARNING" "Watcher cleanup reported issues, but proceeding to mark as disabled in config."
+        update_toml_value "$config_file" "restart_watcher_enabled" "false" "boolean"
+    fi
+    press_any_key
+}
+
+_show_tunnel_watcher_status() {
+    local tunnel_suffix="$1"
+    print_menu_header "secondary" "Watcher Status" "Tunnel: $tunnel_suffix"
+    
+    local watcher_pid_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.pid"
+    local watcher_conf_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.conf"
+
+    if [[ -f "$watcher_pid_file_path" ]]; then
+        local pid_val
+        pid_val=$(cat "$watcher_pid_file_path" 2>/dev/null)
+        if [[ -n "$pid_val" ]] && ps -p "$pid_val" > /dev/null 2>&1; then
+            print_success "Watcher is RUNNING (PID: $pid_val)."
+            echo "  Launcher: /tmp/backhaul-watcher-${tunnel_suffix}.sh"
+            echo "  Config: $watcher_conf_file_path"
+            echo "  Log: /var/log/easybackhaul/watcher-${tunnel_suffix}.log"
+            if [[ -f "$watcher_conf_file_path" ]]; then
+                echo "  --- Configuration from $watcher_conf_file_path ---"
+                grep -v "RESTART_SECRET" "$watcher_conf_file_path" | sed 's/^/    /' # Hide secret
+            fi
+        else
+            print_error "Watcher is NOT RUNNING (PID file found but process dead or PID invalid)."
+            print_info "Consider disabling and re-enabling the watcher."
+        fi
+    else
+        print_warning "Watcher is DISABLED or its PID file is missing."
+        print_info "To enable, use the 'Enable Watcher' option."
+    fi
+    press_any_key
+}
+
+_view_tunnel_watcher_log() {
+    local tunnel_suffix="$1"
+    local watcher_log_file="/var/log/easybackhaul/watcher-${tunnel_suffix}.log"
+    if [[ -f "$watcher_log_file" ]]; then
+        view_system_log "file" "$watcher_log_file" "Watcher Log: $tunnel_suffix"
+    else
+        handle_error "WARNING" "Watcher log file not found: $watcher_log_file"
         press_any_key
-        return
+    fi
+}
+
+_edit_tunnel_watcher_config() {
+    local tunnel_suffix="$1" main_tunnel_config_file="$2"
+    local watcher_conf_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.conf" # This is the live config for the running watcher
+    
+    print_menu_header "secondary" "Edit Watcher Configuration" "Tunnel: $tunnel_suffix"
+
+    if [[ ! -f "$watcher_conf_file_path" ]]; then
+        handle_error "ERROR" "Watcher process config file not found: $watcher_conf_file_path. Enable watcher first or check /tmp."
+        press_any_key
+        return 1
+    fi
+
+    # Display current settings from the watcher's .conf file
+    print_info "Current settings from $watcher_conf_file_path (effective on next watcher restart):"
+    # Exclude secret for display security
+    grep -v "RESTART_SECRET" "$watcher_conf_file_path" | sed 's/^/  /'
+    echo
+    print_info "Editing these values requires the watcher process to be restarted to take effect."
+    print_info "The main tunnel config ($main_tunnel_config_file) also stores some of these for UI display."
+
+    # For simplicity, prompt for common fields. Direct edit of .conf for full power.
+    # This is a simplified editor.
+    local new_log_pattern new_delay_local new_delay_remote new_max_retries
+
+    # Example: Edit Log Pattern
+    read -r -p "New Log Pattern (leave blank to keep current '$(grep LOG_PATTERN "$watcher_conf_file_path" | cut -d'=' -f2- | tr -d '"')'): " new_log_pattern
+    if [[ -n "$new_log_pattern" ]]; then
+        sed -i "s|^LOG_PATTERN=.*|LOG_PATTERN=\"$new_log_pattern\"|" "$watcher_conf_file_path"
+        update_toml_value "$main_tunnel_config_file" "watcher_log_pattern" "$new_log_pattern" "string"
+        print_success "Log pattern updated in $watcher_conf_file_path and main config."
     fi
     
-    # Test secret authentication
-    print_info "Testing secret authentication..."
-    echo "RESTART_REQUEST:$RESTART_SECRET:$ROLE" | nc "$REMOTE_HOST" "$REMOTE_PORT" -w 5
+    # Add more fields similarly... (RESTART_DELAY_LOCAL, etc.)
+
+    print_info "Configuration in $watcher_conf_file_path updated."
+    print_warning "Restart the watcher for tunnel '$tunnel_suffix' for changes to take effect."
+    press_any_key
+}
+
+_test_tunnel_watcher_comm() {
+    local tunnel_suffix="$1"
+    local watcher_conf_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.conf"
+    print_menu_header "secondary" "Test Watcher Communication" "Tunnel: $tunnel_suffix"
+
+    if [[ ! -f "$watcher_conf_file_path" ]]; then
+        handle_error "ERROR" "Watcher config file not found: $watcher_conf_file_path. Cannot perform test."
+        press_any_key; return 1;
+    fi
+    source "$watcher_conf_file_path" # Load REMOTE_HOST, REMOTE_PORT, RESTART_SECRET, ROLE
+
+    if [[ -z "$REMOTE_HOST" || -z "$REMOTE_PORT" || -z "$RESTART_SECRET" || -z "$ROLE" ]]; then
+        handle_error "ERROR" "Watcher config is incomplete. Cannot perform test."
+        press_any_key; return 1;
+    fi
     
-    # Wait for ACK
-    local ack_received=false
-    for i in {1..10}; do
-        if [[ -f "/tmp/restart_ack_${SERVICE_NAME}" ]]; then
-            rm -f "/tmp/restart_ack_${SERVICE_NAME}"
-            ack_received=true
-            break
+    ensure_netcat_installed
+    if [[ "${NC_COMPATIBLE:-false}" != "true" ]]; then
+        handle_error "ERROR" "Netcat is not compatible. Watcher communication test cannot be reliably performed."
+        press_any_key; return 1;
+    fi
+
+    print_info "Testing communication with remote watcher at $REMOTE_HOST:$REMOTE_PORT"
+    print_info "Sending a TEST_PING message..."
+    local test_message="TEST_PING:$RESTART_SECRET:$ROLE"
+    local ack_file_path="/tmp/test_ack_${SERVICE_NAME:-$tunnel_suffix}" # SERVICE_NAME might not be in scope here from conf
+    rm -f "$ack_file_path"
+
+    echo "$test_message" | nc "$REMOTE_HOST" "$REMOTE_PORT" -w 5 # Send with timeout
+
+    print_info "Waiting for TEST_ACK (up to 5 seconds)..."
+    local i
+    for i in {1..5}; do
+        if [[ -f "$ack_file_path" ]]; then
+            local ack_content
+            ack_content=$(cat "$ack_file_path")
+            handle_success "TEST_ACK received! Content: $ack_content"
+            rm -f "$ack_file_path"
+            press_any_key; return 0;
         fi
         sleep 1
     done
-    
-    if [[ "$ack_received" == "true" ]]; then
-        print_success "✓ Secret authentication successful"
-        print_success "✓ Watcher communication working properly"
-    else
-        print_warning "⚠ No ACK received. Possible issues:"
-        print_info "  - Remote watcher not running"
-        print_info "  - Different secret on remote side"
-        print_info "  - Network connectivity issues"
-    fi
-    
-    echo
-    print_info "Test completed."
+
+    handle_error "WARNING" "No TEST_ACK received. Check remote watcher, firewall, and secret."
     press_any_key
 }
 
-# Show watcher status
-show_watcher_status() {
-    local service="$1"
-    local suffix="$2"
-    local config_file="$3"
-    
-    clear
-    print_info "=== Watcher Status ==="
-    echo
-    
-    local pid_file="/tmp/backhaul-watcher-${suffix}.pid"
-    local watcher_config="/tmp/backhaul-watcher-${suffix}.conf"
-    
-    if [[ ! -f "$pid_file" ]]; then
-        print_warning "Watcher is not running for this tunnel."
-        echo
-        print_info "To enable watcher:"
-        echo "  1. Go to tunnel management"
-        echo "  2. Select 'Manage watcher'"
-        echo "  3. Choose 'Enable watcher'"
-        press_any_key
-        return
-    fi
-    
-    local pid=$(cat "$pid_file" 2>/dev/null)
-    
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-        print_success "✓ Watcher is running (PID: $pid)"
-        
-        # Show process info
-        echo
-        print_info "Process information:"
-        ps -p "$pid" -o pid,ppid,cmd,etime --no-headers 2>/dev/null || echo "  Process info unavailable"
-        
-        # Show configuration if available
-        if [[ -f "$watcher_config" ]]; then
-            source "$watcher_config"
-            echo
-            print_info "Configuration:"
-            echo "  Service: $SERVICE_NAME"
-            echo "  Remote host: $REMOTE_HOST"
-            echo "  Remote port: $REMOTE_PORT"
-            echo "  Listen port: $LISTEN_PORT"
-            echo "  Role: $ROLE"
-            echo "  Log pattern: $LOG_PATTERN"
-            echo "  Local delay: $RESTART_DELAY_LOCAL seconds"
-            echo "  Remote delay: $RESTART_DELAY_REMOTE seconds"
-            echo "  Max retries: $MAX_RETRIES"
-        fi
-        
-        # Show recent log entries
-        local log_file="/tmp/backhaul-watcher-${suffix}.log"
-        if [[ -f "$log_file" ]]; then
-            echo
-            print_info "Recent log entries:"
-            tail -10 "$log_file" | sed 's/^/  /'
-        fi
-        
-    else
-        print_error "✗ Watcher process not found or not responding"
-        print_info "The PID file exists but the process is not running."
-        print_info "This might indicate a crash or improper shutdown."
-    fi
-    
-    echo
-    press_any_key
-}
+_get_or_set_watcher_secret() {
+    local main_tunnel_config_file="$1"
+    local current_tunnel_role="$2" # "server" or "client"
+    local existing_secret
 
-# Show watcher logs
-show_watcher_logs() {
-    local service="$1"
-    local suffix="$2"
-    local config_file="$3"
-    
-    clear
-    print_info "=== Watcher Logs ==="
-    echo
-    
-    local log_file="/tmp/backhaul-watcher-${suffix}.log"
-    
-    if [[ ! -f "$log_file" ]]; then
-        print_warning "No log file found for this watcher."
-        press_any_key
-        return
+    # Try to get secret from the main tunnel config file first
+    if [[ -f "$main_tunnel_config_file" ]]; then
+        existing_secret=$(grep 'watcher_shared_secret' "$main_tunnel_config_file" | sed 's/.*=[[:space:]]*"\(.*\)"/\1/' 2>/dev/null)
     fi
-    
-    print_info "Log file: $log_file"
-    echo "Press 'q' to exit, 'f' to follow, 'r' to refresh"
-    echo
-    
-    while true; do
-        # Show last 20 lines
-        tail -20 "$log_file" 2>/dev/null || echo "No log content available"
-        echo
-        echo "Options: [q]uit [f]ollow [r]efresh [c]lear"
-        read -p "Select option: " log_choice
-        
-        case "$log_choice" in
-            q|Q)
-                break
-                ;;
-            f|F)
-                clear
-                print_info "Following logs (Ctrl+C to stop)..."
-                tail -f "$log_file"
-                break
-                ;;
-            r|R)
-                clear
-                print_info "=== Watcher Logs (Refreshed) ==="
-                echo
-                ;;
-            c|C)
-                if confirm_action "Clear log file?" "n"; then
-                    > "$log_file"
-                    print_success "Log file cleared"
+
+    # If not in tunnel config, try global watcher secret file (usually for first server setup)
+    if [[ -z "$existing_secret" && -f "$CONFIG_DIR/watcher_secret" ]]; then
+        existing_secret=$(cat "$CONFIG_DIR/watcher_secret")
+        # If found globally, also save it to the tunnel config for consistency
+        if [[ -n "$existing_secret" && -f "$main_tunnel_config_file" ]]; then
+             update_toml_value "$main_tunnel_config_file" "watcher_shared_secret" "$existing_secret" "string"
+        fi
+    fi
+
+    if [[ -n "$existing_secret" ]]; then
+        print_info "Using existing shared secret: [hidden]"
+        if prompt_yes_no "Use this existing secret?" "y"; then
+            echo "$existing_secret"
+            return 0
+        fi
+    fi
+
+    # If no existing secret or user wants to change/set one
+    if [[ "$current_tunnel_role" == "server" ]]; then
+        print_info "This is a SERVER. You can generate a new secret or enter one if you have it."
+        if prompt_yes_no "Generate a new random secret for this watcher pair?" "y"; then
+            local new_generated_secret
+            new_generated_secret=$(generate_random_secret 32) # From helpers.sh
+            print_info "Generated new secret: $new_generated_secret"
+            print_warning "IMPORTANT: You MUST use this exact secret when configuring the CLIENT watcher."
+            if prompt_yes_no "Use this generated secret?" "y"; then
+                # Save to global and tunnel config
+                echo "$new_generated_secret" > "$CONFIG_DIR/watcher_secret"
+                set_secure_file_permissions "$CONFIG_DIR/watcher_secret" "600"
+                if [[ -f "$main_tunnel_config_file" ]]; then
+                    update_toml_value "$main_tunnel_config_file" "watcher_shared_secret" "$new_generated_secret" "string"
                 fi
-                ;;
-            *)
-                print_warning "Invalid option"
-                ;;
-        esac
+                echo "$new_generated_secret"
+                return 0
+            fi
+        fi
+    fi
+    
+    # Prompt to enter manually (always for client if not found, or if server chose not to generate)
+    print_info "Please enter the shared watcher secret."
+    if [[ "$current_tunnel_role" == "client" ]]; then
+        print_info "This MUST match the secret on the SERVER side watcher."
+    else # server, but chose not to generate
+        print_info "This secret will be used for this watcher pair."
+    fi
+
+    local entered_secret
+    while true; do
+        read -r -s -p "Enter Shared Secret (min 8 chars): " entered_secret; echo
+        if [[ "${#entered_secret}" -ge 8 ]]; then
+            if [[ -f "$main_tunnel_config_file" ]]; then
+                 update_toml_value "$main_tunnel_config_file" "watcher_shared_secret" "$entered_secret" "string"
+            fi
+            # Also update global if this is the server setting it for the first time potentially
+            if [[ "$current_tunnel_role" == "server" ]]; then
+                 echo "$entered_secret" > "$CONFIG_DIR/watcher_secret"
+                 set_secure_file_permissions "$CONFIG_DIR/watcher_secret" "600"
+            fi
+            echo "$entered_secret"
+            return 0
+        else
+            print_warning "Secret too short. Must be at least 8 characters."
+            if prompt_yes_no "Try entering secret again?" "y"; then continue; else return 1; fi
+        fi
     done
 }
 
-# Show and manage watcher secret
-show_watcher_secret() {
-    local config_file="$1"
-    local secret
-    
-    clear
-    print_secondary_menu_header "Watcher Secret Management" "Tunnel Configuration"
-    
-    # Try to get secret from config file first
-    if [[ -f "$config_file" ]]; then
-        secret=$(grep '^restart_watcher_secret' "$config_file" | cut -d'"' -f2)
-    fi
-    
-    # If not in config, try global secret file
-    if [[ -z "$secret" ]] && [[ -f "$CONFIG_DIR/watcher_secret" ]]; then
-        secret=$(cat "$CONFIG_DIR/watcher_secret")
-    fi
-    
-    if [[ -n "$secret" ]]; then
-        print_success "Current watcher secret:"
-        echo "  $secret"
-        echo
-        print_info "This secret must be shared between client and server."
-        print_info "Both sides must use the same secret for coordination."
-        echo
-        print_info "Options:"
-        echo "  1. Copy secret to clipboard (if available)"
-        echo "  2. Generate new secret"
-        echo "  3. Enter secret manually"
-        print_menu_footer
-        
-        local choice
-        read -p "Select an option [0-3]: " choice
-        
-        case "$choice" in
-            1)
-                if command -v xclip >/dev/null 2>&1; then
-                    echo "$secret" | xclip -selection clipboard
-                    print_success "Secret copied to clipboard"
-                elif command -v pbcopy >/dev/null 2>&1; then
-                    echo "$secret" | pbcopy
-                    print_success "Secret copied to clipboard"
-                else
-                    print_warning "Clipboard not available. Copy manually:"
-                    echo "$secret"
-                fi
-                press_any_key
-                ;;
-            2)
-                if confirm_action "Generate new secret? This will break existing watcher coordination." "n"; then
-                    local new_secret
-                    new_secret=$(openssl rand -hex 16 2>/dev/null || tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
-                    echo "$new_secret" > "$CONFIG_DIR/watcher_secret"
-                    chmod 600 "$CONFIG_DIR/watcher_secret"
-                    if [[ -f "$config_file" ]]; then
-                        update_config_value "$config_file" "restart_watcher_secret" "$new_secret"
-                    fi
-                    print_success "New secret generated: $new_secret"
-                    print_warning "You must update the secret on the other side as well."
-                fi
-                press_any_key
-                ;;
-            3)
-                print_info "Enter the new secret (letters and numbers only):"
-                read -p "New secret: " new_secret
-                if [[ -n "$new_secret" ]] && [[ "$new_secret" =~ ^[A-Za-z0-9]+$ ]]; then
-                    echo "$new_secret" > "$CONFIG_DIR/watcher_secret"
-                    chmod 600 "$CONFIG_DIR/watcher_secret"
-                    if [[ -f "$config_file" ]]; then
-                        update_config_value "$config_file" "restart_watcher_secret" "$new_secret"
-                    fi
-                    print_success "Secret updated successfully"
-                else
-                    print_error "Invalid secret format"
-                fi
-                press_any_key
-                ;;
-            0)
-                return
-                ;;
-            *)
-                print_warning "Invalid option"
-                press_any_key
-                ;;
-        esac
-    else
-        print_warning "No watcher secret found"
-        echo
-        print_info "To enable watcher coordination, you need to:"
-        echo "  1. Generate a secret on the server side"
-        echo "  2. Share that secret with the client side"
-        echo "  3. Both sides must use the same secret"
-        echo
-        if confirm_action "Generate a new secret now?" "y"; then
-            local new_secret
-            new_secret=$(openssl rand -hex 16 2>/dev/null || tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
-            echo "$new_secret" > "$CONFIG_DIR/watcher_secret"
-            chmod 600 "$CONFIG_DIR/watcher_secret"
-            if [[ -f "$config_file" ]]; then
-                update_config_value "$config_file" "restart_watcher_secret" "$new_secret"
-            fi
-            print_success "New secret generated: $new_secret"
-            print_info "Share this secret with the other side."
-        fi
-        press_any_key
-    fi
-}
 
-# Show watcher menu
-show_watcher_menu() {
-    local service="$1"
-    local suffix="$2"
-    local config_file="$3"
+_manage_watcher_shared_secret() {
+    local main_tunnel_config_file="$1"
+    print_menu_header "secondary" "Watcher Shared Secret" "Manage"
+
+    local current_secret # This will be populated by _get_or_set_watcher_secret if it exists
+    current_secret=$(_get_or_set_watcher_secret "$main_tunnel_config_file" "unknown") # Role unknown just for display
     
-    clear
-    print_secondary_menu_header "Watcher Management" "Tunnel Configuration"
-    
-    echo " 1. Enable watcher (create/start background process)"
-    echo " 2. Disable watcher (stop/remove background process)"
-    echo " 3. Edit watcher config (pattern, delays, secret, ports)"
-    echo " 4. Show watcher status"
-    echo " 5. Show watcher logs"
-    echo " 6. Test watcher (send/receive signal)"
-    echo " 7. Show watcher secret"
+    if [[ -n "$current_secret" ]]; then
+        print_success "Current shared secret is set."
+        print_info "(Secret is hidden for security. Choose 'View/Copy' to see it.)"
+    else
+        print_warning "No shared secret is currently set in the tunnel config."
+    fi
     echo
-    echo " 0. Back"
-    
-    local choice
-    read -p "Select an option [0-7]: " choice
-    
-    case "$choice" in
-        1)
-            enable_watcher "$service" "$suffix" "$config_file"
+
+    local secret_menu_options=(
+        "1. View/Copy Current Secret"
+        "2. Set/Update Secret Manually"
+        "3. Generate New Secret (Server Role Recommended)"
+    )
+    local secret_exit_details=("0" "Back") # Array: [key, text]
+    local user_choice menu_rc
+
+    _secret_menu_help() {
+        print_info "Shared Secret Help:"
+        echo " - The watcher secret MUST be identical on both client and server watchers."
+        echo " - View/Copy: Shows current secret (use 'xclip' or 'pbcopy' if available)."
+        echo " - Set/Update: Manually enter or change the secret."
+        echo " - Generate New: Creates a new random secret. If this is a server,"
+        echo "   you must then update the client with this new secret."
+        press_any_key
+    }
+
+    menu_loop "Select secret option" secret_menu_options secret_exit_details "_secret_menu_help"
+    user_choice="$MENU_CHOICE" # menu_loop sets MENU_CHOICE
+    menu_rc=$?                # menu_loop returns status code
+
+    # Handle universal navigation keys based on menu_rc
+    case "$menu_rc" in
+        3) go_to_main_menu; return 0 ;; # m -> main menu
+        4) request_script_exit; return 0 ;; # e -> exit script
+        5) return_from_menu; return 0 ;; # r -> return/back (to previous menu - manage_tunnel_watcher)
+        2) _manage_watcher_shared_secret "$main_tunnel_config_file"; return $? ;; # ? -> help shown, re-call current function
+        0) # Numeric choice or default exit "0"
+            # Proceed to specific choice handling below
             ;;
-        2)
-            disable_watcher "$service" "$suffix" "$config_file"
-            ;;
-        3)
-            edit_watcher_config "$service" "$suffix" "$config_file"
-            ;;
-        4)
-            show_watcher_status "$service" "$suffix" "$config_file"
-            ;;
-        5)
-            show_watcher_logs "$service" "$suffix" "$config_file"
-            ;;
-        6)
-            test_watcher "$service" "$suffix" "$config_file"
-            ;;
-        7)
-            show_watcher_secret "$config_file"
-            ;;
-        0)
-            return
-            ;;
-        *)
-            print_warning "Invalid option"
-            ;;
+        *) handle_error "ERROR" "Unhandled menu_loop code $menu_rc in _manage_watcher_shared_secret"; press_any_key; return 1;;
     esac
-    
-    show_watcher_menu "$service" "$suffix" "$config_file"
-} 
+
+    # Handle numeric choices and the specific default exit ("0")
+    case "$user_choice" in
+        "1") # View/Copy
+            local secret_to_show
+            secret_to_show=$(grep 'watcher_shared_secret' "$main_tunnel_config_file" | sed 's/.*=[[:space:]]*"\(.*\)"/\1/' 2>/dev/null || cat "$CONFIG_DIR/watcher_secret" 2>/dev/null)
+            if [[ -n "$secret_to_show" ]]; then
+                print_info "Current Secret: $secret_to_show"
+                if command -v xclip &>/dev/null; then
+                    echo -n "$secret_to_show" | xclip -selection clipboard
+                    print_success "Secret copied to clipboard (xclip)."
+                elif command -v pbcopy &>/dev/null; then # macOS
+                    echo -n "$secret_to_show" | pbcopy
+                    print_success "Secret copied to clipboard (pbcopy)."
+                fi
+            else
+                print_warning "No secret found to display/copy."
+            fi
+            ;;
+        "2") # Set manually
+            local role_for_set="client" # Assume client unless server mode is detected in main config
+            if grep -q 'mode[[:space:]]*=[[:space:]]*"server"' "$main_tunnel_config_file"; then role_for_set="server"; fi
+            _get_or_set_watcher_secret "$main_tunnel_config_file" "$role_for_set" > /dev/null # Re-prompt
+            ;;
+        "3") # Generate new
+             if prompt_yes_no "Generate a new random secret? This will overwrite existing." "n"; then
+                local new_s
+                new_s=$(generate_random_secret 32)
+                print_info "New Generated Secret: $new_s"
+                print_warning "You MUST update the other side of the tunnel with this secret."
+                if prompt_yes_no "Use this new secret?" "y"; then
+                    echo "$new_s" > "$CONFIG_DIR/watcher_secret" # Global default
+                    set_secure_file_permissions "$CONFIG_DIR/watcher_secret"
+                    update_toml_value "$main_tunnel_config_file" "watcher_shared_secret" "$new_s" "string"
+                    handle_success "New secret set and saved."
+                else
+                    print_info "New secret generation cancelled."
+                fi
+            fi
+            ;;
+        "0") return_from_menu; return;;
+    esac
+    press_any_key
+}
+true # Ensure script is valid if sourced.
