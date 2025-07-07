@@ -1,6 +1,6 @@
 # EasyBackhaul: The User-Friendly Backhaul Installer & Manager
 
-![Version](https://img.shields.io/badge/Version-13.0--beta-blue.svg)
+![Version](https://img.shields.io/badge/Version-14.0--dev-blue.svg)
 ![License](https://img.shields.io/badge/License-AGPL--3.0-brightgreen.svg)
 ![Maintained](https://img.shields.io/badge/Maintained%3F-yes-green.svg)
 ![Features](https://img.shields.io/badge/Features-Advanced%20Management%20%7C%20Graceful%20Restart%20%7C%20Enhanced%20Validation%20%7C%20System%20Health%20Monitor-orange.svg)
@@ -19,7 +19,7 @@ Developed by [@N4Xon (NaxonM)](https://github.com/NaxonM/EasyBackhaul), EasyBack
 Run the script directly from GitHub with a single command:
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/NaxonM/EasyBackhaul/beta/easybh.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/NaxonM/EasyBackhaul/dev/easybh.sh)
 ```
 
 **From Source:**  
@@ -29,7 +29,7 @@ Clone the repo and build the script from source for the latest features.
 git clone https://github.com/NaxonM/EasyBackhaul.git
 cd EasyBackhaul
 ./build.sh
-sudo bash easybackhaul.sh
+sudo bash easybh.sh
 ```
 
 ---
@@ -95,10 +95,10 @@ The script starts with an installation wizard offering multiple options:
 After installation, you'll see:
 
 ```
-      EasyBackhaul Installer & Management Menu (v13.0-beta)
-================================================================
+      EasyBackhaul Management Menu (v14.0-dev)
+=================================================================
   Core by Musixal  |  Installer by @N4Xon
-----------------------------------------------------------------
+-----------------------------------------------------------------
  1. Configure a New Tunnel
  2. Manage Existing Tunnels
  3. Update/Re-install Backhaul Binary
@@ -243,8 +243,8 @@ After installation, you'll see:
 
 ### **Modular Architecture**
 - All logic is modularized in `modules/`
-- Use `./build.sh` to generate the distributable `easybackhaul.sh`
-- **Do not edit `easybackhaul.sh` directly**—edit modules and rebuild
+- Use `./build.sh` to generate the distributable `easybh.sh`
+- **Do not edit `easybh.sh` directly**—edit modules and rebuild
 
 ### **Module Structure**
 ```
@@ -273,7 +273,7 @@ cd EasyBackhaul
 ./build.sh
 
 # The script is now ready to use
-sudo bash easybackhaul.sh
+sudo bash easybh.sh
 ```
 
 ---
@@ -284,6 +284,7 @@ This version is distributed via the **beta channel**.
 Please report bugs and feedback via [GitHub Issues](https://github.com/NaxonM/EasyBackhaul/issues).
 
 ### **Recent Improvements**
+- ✅ **Major Code Refactoring (v14.0-dev)**: Significant internal restructuring of all script modules for improved maintainability, robustness, and standardization of helper functions. This also addressed various bugs and inconsistencies.
 - ✅ **Graceful Restart**: Advanced restart with health checks and resource monitoring
 - ✅ **Enhanced Validation**: Comprehensive configuration validation with detailed reporting
 - ✅ **Improved UX**: Progress indicators, better error messages, and contextual help

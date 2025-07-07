@@ -1,9 +1,11 @@
 # validation.sh
 # Comprehensive configuration validation for all Backhaul protocols
 
+# WARNING: Do not use a global CONFIG_FILE variable. Always pass config file paths explicitly to functions.
+
 # --- Configuration Validation ---
 # Validate configuration file with protocol-specific checks
-validate_config() {
+validate_tunnel_config() {
     local config_file="$1"
     local errors=0
     local warnings=0
@@ -538,14 +540,14 @@ validate_config_detailed() {
     echo
     print_info "--- Validation Summary ---"
     if [[ $validation_result -eq 0 ]]; then
-        print_success "✓ Configuration is valid"
+        print_success "Configuration is valid"
         if [[ $warnings_found -gt 0 ]]; then
             print_info "Found $warnings_found warning(s) - review recommended"
         else
             print_info "All checks passed successfully"
         fi
     else
-        print_error "✗ Configuration has issues"
+        print_error "Configuration has issues"
         print_info "Found $issues_found error(s) that need attention"
         
         if confirm_action "Would you like to create a backup before attempting fixes?" "y"; then

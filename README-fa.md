@@ -19,7 +19,7 @@
 اجرای مستقیم اسکریپت از گیت‌هاب با یک دستور:
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/NaxonM/EasyBackhaul/beta/easybh.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/NaxonM/EasyBackhaul/dev/easybh.sh)
 ```
 
 **از سورس:**  
@@ -29,7 +29,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/NaxonM/EasyBackhaul/beta/easyb
 git clone https://github.com/NaxonM/EasyBackhaul.git
 cd EasyBackhaul
 ./build.sh
-sudo bash easybackhaul.sh
+sudo bash easybh.sh
 ```
 
 ---
@@ -243,8 +243,8 @@ sudo bash easybackhaul.sh
 
 ### **معماری ماژولار**
 - تمام منطق در پوشه `modules/` ماژولار شده است
-- با اجرای `./build.sh` اسکریپت نهایی `easybackhaul.sh` ساخته می‌شود
-- **مستقیم فایل easybackhaul.sh را ویرایش نکنید** — ماژول‌ها را ویرایش و مجدد بسازید
+- با اجرای `./build.sh` اسکریپت نهایی `easybh.sh` ساخته می‌شود
+- **مستقیم فایل easybh.sh را ویرایش نکنید** — ماژول‌ها را ویرایش و مجدد بسازید
 
 ### **ساختار ماژول‌ها**
 ```
@@ -273,7 +273,7 @@ cd EasyBackhaul
 ./build.sh
 
 # اسکریپت آماده استفاده است
-sudo bash easybackhaul.sh
+sudo bash easybh.sh
 ```
 
 ---
