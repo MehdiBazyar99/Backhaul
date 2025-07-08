@@ -791,11 +791,11 @@ configure_tunnel() {
 
                 set_secure_file_permissions "$config_file_path" "600"
                 handle_success "Configuration saved: $config_file_path"
-                ((current_wizard_step++)) # Proceed to Post-Creation (Step 8)
+                ((current_wizard_step++))
                 ;;
-            8) # Step 8: Post-creation (Systemd, Start) (was Step 9)
+            9) # Step 9 (Was 8): Post-creation (Systemd, Start)
                 if type create_systemd_service &>/dev/null; then
-                    if create_systemd_service "$final_tunnel_name" "$config_file_path"; then
+                    if create_systemd_service "$final_tunnel_name" "$config_file_path"; then # Pass final_tunnel_name
                         if prompt_yes_no "Start the tunnel '$final_tunnel_name' now?" "y"; then
                             if run_with_spinner "Starting tunnel $final_tunnel_name..." systemctl start "backhaul-${final_tunnel_name}.service"; then
                                 handle_success "Tunnel '$final_tunnel_name' started."

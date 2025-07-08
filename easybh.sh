@@ -2918,11 +2918,11 @@ configure_tunnel() {
 
                 set_secure_file_permissions "$config_file_path" "600"
                 handle_success "Configuration saved: $config_file_path"
-                ((current_wizard_step++)) # Proceed to Post-Creation (Step 8)
+                ((current_wizard_step++))
                 ;;
-            8) # Step 8: Post-creation (Systemd, Start) (was Step 9)
+            9) # Step 9 (Was 8): Post-creation (Systemd, Start)
                 if type create_systemd_service &>/dev/null; then
-                    if create_systemd_service "$final_tunnel_name" "$config_file_path"; then
+                    if create_systemd_service "$final_tunnel_name" "$config_file_path"; then # Pass final_tunnel_name
                         if prompt_yes_no "Start the tunnel '$final_tunnel_name' now?" "y"; then
                             if run_with_spinner "Starting tunnel $final_tunnel_name..." systemctl start "backhaul-${final_tunnel_name}.service"; then
                                 handle_success "Tunnel '$final_tunnel_name' started."
@@ -5619,14 +5619,7 @@ _mng_delete_tunnel() {
     return 0 # Indicate successful deletion, return from specific tunnel menu
 }
 
-# Decommissioned functions that created standalone scripts for tunnels.
-# These are replaced by systemd services directly running the backhaul binary with a config file.
-# create_tunnel() { log_message "WARN" "DEPRECATED: create_tunnel function called. Tunnel creation is now part of configure_tunnel."; }
-# create_tunnel_impl() { log_message "WARN" "DEPRECATED: create_tunnel_impl function called."; }
-# start_tunnel() { log_message "WARN" "DEPRECATED: start_tunnel function called. Use systemctl via _mng_start_tunnel."; }
-# start_tunnel_impl() { log_message "WARN" "DEPRECATED: start_tunnel_impl function called."; }
-# stop_tunnel() { log_message "WARN" "DEPRECATED: stop_tunnel function called. Use systemctl via _mng_stop_tunnel."; }
-# stop_tunnel_impl() { log_message "WARN" "DEPRECATED: stop_tunnel_impl function called."; }
+# End of tunnel management functions.
 
 true # Ensure script is valid if sourced.
 # --- MODULE: modules/menu.sh ---

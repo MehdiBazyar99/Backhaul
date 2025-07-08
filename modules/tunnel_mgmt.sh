@@ -593,13 +593,6 @@ _mng_delete_tunnel() {
     return 0 # Indicate successful deletion, return from specific tunnel menu
 }
 
-# Decommissioned functions that created standalone scripts for tunnels.
-# These are replaced by systemd services directly running the backhaul binary with a config file.
-# create_tunnel() { log_message "WARN" "DEPRECATED: create_tunnel function called. Tunnel creation is now part of configure_tunnel."; }
-# create_tunnel_impl() { log_message "WARN" "DEPRECATED: create_tunnel_impl function called."; }
-# start_tunnel() { log_message "WARN" "DEPRECATED: start_tunnel function called. Use systemctl via _mng_start_tunnel."; }
-# start_tunnel_impl() { log_message "WARN" "DEPRECATED: start_tunnel_impl function called."; }
-# stop_tunnel() { log_message "WARN" "DEPRECATED: stop_tunnel function called. Use systemctl via _mng_stop_tunnel."; }
-# stop_tunnel_impl() { log_message "WARN" "DEPRECATED: stop_tunnel_impl function called."; }
+# End of tunnel management functions.
 
 true # Ensure script is valid if sourced.
