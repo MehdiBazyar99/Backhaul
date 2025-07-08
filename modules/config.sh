@@ -1004,7 +1004,7 @@ configure_tunnel() {
                 cfg_sniffer_log="/var/log/easybackhaul/${final_tunnel_name}-sniffer.json"
 
                 local config_file_path="$CONFIG_DIR/config-${final_tunnel_name}.toml"
-                ensure_dir "$CONFIG_DIR"
+                ensure_dir "$CONFIG_DIR" "755" # Ensure CONFIG_DIR is traversable
                 : > "$config_file_path" # Create/truncate config file
 
                 # Write [server] or [client] section header
