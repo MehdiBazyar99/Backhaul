@@ -1096,25 +1096,19 @@ configure_tunnel() {
                 ;;
             9) # Step 9 (Was 8): Post-creation (Systemd, Start)
                 if type create_systemd_service &>/dev/null; then
-                    if create_systemd_service "$final_tunnel_name" "$config_file_path"; then # Pass final_tunnel_name
-                        if prompt_yes_no "Start the tunnel '$final_tunnel_name' now?" "y"; then
-                            if run_with_spinner "Starting tunnel $final_tunnel_name..." systemctl start "backhaul-${final_tunnel_name}.service"; then
-                                handle_success "Tunnel '$final_tunnel_name' started."
-                            else
-                                handle_error "ERROR" "Failed to start tunnel '$final_tunnel_name'. Check logs: journalctl -u backhaul-${final_tunnel_name}.service"
-                            fi
-                        else
-                            print_info "Tunnel '$final_tunnel_name' created but not started."
-                        fi
-                    else
-                         handle_error "ERROR" "Failed to create systemd service for '$final_tunnel_name'."
+                    # create_systemd_service now handles enabling and the initial start attempt.
+                    # It also prompts "Check service status now?".
+                    # So, we just call it and report potential errors from it.
+                    if ! create_systemd_service "$final_tunnel_name" "$config_file_path"; then
+                         handle_error "ERROR" "Systemd service creation or initial start failed for '$final_tunnel_name'. Please check previous messages or use 'Manage Existing Tunnels' to check status and logs."
+                         # No redundant start prompt here, create_systemd_service handles the attempt.
                     fi
                 else
                     handle_error "WARNING" "Function 'create_systemd_service' not found. Cannot create service automatically."
                 fi
                 press_any_key
-                return_from_menu
-                return 0
+                return_from_menu # Return to the previous menu (likely main menu)
+                return 0 # Exit configure_tunnel function
                 ;;
             *)
                 handle_error "CRITICAL" "Invalid wizard step in configure_tunnel: $current_wizard_step"

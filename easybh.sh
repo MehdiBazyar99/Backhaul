@@ -3944,6 +3944,23 @@ $( [[ -n "$effective_group" ]] && echo "Group=${effective_group}" )
 WantedBy=multi-user.target
 EOL
 
+    # Set config file ownership and permissions so the service user can read it
+    if [[ -f "$config_path" ]]; then
+        log_message "INFO" "Setting ownership of $config_path to ${effective_user}:${effective_group}"
+        chown "${effective_user}:${effective_group}" "$config_path"
+        if [[ $? -ne 0 ]]; then
+            handle_error "WARNING" "Failed to change ownership of $config_path. Service may have permission issues."
+        fi
+
+        log_message "INFO" "Setting permissions of $config_path to 640."
+        chmod 640 "$config_path"
+        if [[ $? -ne 0 ]]; then
+            handle_error "WARNING" "Failed to change permissions of $config_path to 640. Service may have permission issues."
+        fi
+    else
+        handle_error "WARNING" "Config file $config_path not found during service creation. Cannot set ownership/permissions."
+    fi
+
     if ! run_with_spinner "Reloading systemd daemon..." systemctl daemon-reload; then
         handle_error "ERROR" "Failed to reload systemd daemon. Service file might be invalid or systemd failed. Path: $service_file_path"
         print_info "Attempting to get systemd status for $service_name (if it was loaded):"

@@ -25,9 +25,18 @@ _globals_ensure_config_dir_for_secret() {
             echo "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create CONFIG_DIR: $CONFIG_DIR. Please check permissions." >&2
             return 1
         else
-            chmod 700 "$CONFIG_DIR" # Set restrictive permissions
+            chmod 755 "$CONFIG_DIR" # Allow traversal for other users (e.g., service user)
+            # Owner is still root, which is fine.
             return 0
         fi
+    fi
+    # If directory already exists, ensure its permissions are also 755
+    # This handles cases where the script might have run before with 700
+    if [[ -d "$CONFIG_DIR" ]]; then
+        chmod 755 "$CONFIG_DIR" || {
+            echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to ensure 755 permissions on existing CONFIG_DIR: $CONFIG_DIR." >&2
+            # Not returning error here, as dir exists, but logging a warning.
+        }
     fi
     return 0 # Dir already exists
 }
