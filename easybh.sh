@@ -45,9 +45,18 @@ _globals_ensure_config_dir_for_secret() {
             echo "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create CONFIG_DIR: $CONFIG_DIR. Please check permissions." >&2
             return 1
         else
-            chmod 700 "$CONFIG_DIR" # Set restrictive permissions
+            chmod 755 "$CONFIG_DIR" # Allow traversal for other users (e.g., service user)
+            # Owner is still root, which is fine.
             return 0
         fi
+    fi
+    # If directory already exists, ensure its permissions are also 755
+    # This handles cases where the script might have run before with 700
+    if [[ -d "$CONFIG_DIR" ]]; then
+        chmod 755 "$CONFIG_DIR" || {
+            echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to ensure 755 permissions on existing CONFIG_DIR: $CONFIG_DIR." >&2
+            # Not returning error here, as dir exists, but logging a warning.
+        }
     fi
     return 0 # Dir already exists
 }
@@ -3253,25 +3262,19 @@ configure_tunnel() {
                 ;;
             9) # Step 9 (Was 8): Post-creation (Systemd, Start)
                 if type create_systemd_service &>/dev/null; then
-                    if create_systemd_service "$final_tunnel_name" "$config_file_path"; then # Pass final_tunnel_name
-                        if prompt_yes_no "Start the tunnel '$final_tunnel_name' now?" "y"; then
-                            if run_with_spinner "Starting tunnel $final_tunnel_name..." systemctl start "backhaul-${final_tunnel_name}.service"; then
-                                handle_success "Tunnel '$final_tunnel_name' started."
-                            else
-                                handle_error "ERROR" "Failed to start tunnel '$final_tunnel_name'. Check logs: journalctl -u backhaul-${final_tunnel_name}.service"
-                            fi
-                        else
-                            print_info "Tunnel '$final_tunnel_name' created but not started."
-                        fi
-                    else
-                         handle_error "ERROR" "Failed to create systemd service for '$final_tunnel_name'."
+                    # create_systemd_service now handles enabling and the initial start attempt.
+                    # It also prompts "Check service status now?".
+                    # So, we just call it and report potential errors from it.
+                    if ! create_systemd_service "$final_tunnel_name" "$config_file_path"; then
+                         handle_error "ERROR" "Systemd service creation or initial start failed for '$final_tunnel_name'. Please check previous messages or use 'Manage Existing Tunnels' to check status and logs."
+                         # No redundant start prompt here, create_systemd_service handles the attempt.
                     fi
                 else
                     handle_error "WARNING" "Function 'create_systemd_service' not found. Cannot create service automatically."
                 fi
                 press_any_key
-                return_from_menu
-                return 0
+                return_from_menu # Return to the previous menu (likely main menu)
+                return 0 # Exit configure_tunnel function
                 ;;
             *)
                 handle_error "CRITICAL" "Invalid wizard step in configure_tunnel: $current_wizard_step"
