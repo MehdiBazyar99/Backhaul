@@ -297,7 +297,7 @@ _prompt_basic_config_params() {
             return 1
         fi
     else # client mode
-        print_info "Client Mode: Configure remote server details and local forwarding port."
+        print_info "Client Mode: Configure remote server details." # Updated: removed "and local forwarding port"
         if ! prompt_for_ip "the public IP address of the Backhaul SERVER" "" true remote_ip_ref; then
             print_error "Failed to get a valid remote server IP for client."
             return 1
@@ -308,11 +308,9 @@ _prompt_basic_config_params() {
             return 1
         fi
 
-        print_info "Enter the local port this client will listen on to forward traffic."
-        if ! prompt_for_port "local forwarding port on THIS machine" "1080" true local_fwd_port_ref; then
-            print_error "Failed to get a valid local forwarding port for client."
-            return 1
-        fi
+        # Removed prompt for client_local_fwd_port as it's not a standard backhaul client param
+        # Forwarding is now primarily defined by the server's 'ports' array.
+        # client_local_fwd_port_ref will remain unset or at its default if passed by nameref.
     fi
 
     local default_auth_token="EasyBackhaulSecretToken"
@@ -481,6 +479,62 @@ _prompt_tls_config() {
     return 0
 }
 
+_prompt_server_ports_array() {
+    local -n rules_array_ref=$1 # Output: array of "listen_port:destination_port" strings
+    rules_array_ref=() # Initialize as empty
+
+    print_menu_header "secondary" "Server Port Forwarding" "Step 3b: Configure Forwarding Rules"
+    print_info "Configure rules for forwarding traffic from this server to the client."
+    print_info "Example: Server listens on public port 80, forwards to client's port 8080."
+    echo
+
+    while true; do
+        if ! prompt_yes_no "Add a port forwarding rule?" "y"; then
+            if [[ ${#rules_array_ref[@]} -eq 0 ]]; then
+                print_warning "No port forwarding rules defined. Server will not forward any traffic."
+                if ! prompt_yes_no "Are you sure you want to continue without any forwarding rules?" "n"; then
+                    # Loop again to ask if they want to add a rule
+                    continue
+                fi
+            fi
+            break # Exit loop if user doesn't want to add (more) rules
+        fi
+
+        local server_public_port client_dest_port
+        if ! prompt_for_port "Port on THIS SERVER to listen on (e.g., 80, 443)" "" true server_public_port; then
+            print_warning "Skipping this rule due to invalid server port."
+            if ! prompt_yes_no "Try adding a different rule?" "y"; then break; fi
+            continue
+        fi
+
+        if ! prompt_for_port "Port on the CLIENT where traffic should be forwarded (e.g., 8080)" "" false client_dest_port; then
+            print_warning "Skipping this rule due to invalid client port."
+            if ! prompt_yes_no "Try adding a different rule?" "y"; then break; fi
+            continue
+        fi
+
+        local new_rule="${server_public_port}:${client_dest_port}"
+        # Check if rule already exists to prevent duplicates, though not strictly necessary by backhaul
+        local rule_exists=false
+        for existing_rule in "${rules_array_ref[@]}"; do
+            if [[ "$existing_rule" == "$new_rule" ]]; then
+                rule_exists=true
+                break
+            fi
+        done
+
+        if $rule_exists; then
+            print_warning "Rule '$new_rule' already exists."
+        else
+            rules_array_ref+=("$new_rule")
+            print_success "Rule added: $new_rule"
+        fi
+        echo # Extra line for readability before next prompt_yes_no
+    done
+    return 0
+}
+
+
 # --- Main Configuration Wizard ---
 # Manages the overall flow of tunnel configuration.
 # Returns 0 if configuration is completed (even if not saved by user later),
@@ -491,6 +545,7 @@ configure_tunnel() {
     # Variables to store wizard state, passed by nameref or directly
     local setup_choice_val tunnel_mode transport_protocol
     local server_listen_port client_remote_ip client_remote_port client_local_fwd_port common_auth_token
+    local server_port_rules=() # Array to store server port forwarding rules
     local cfg_tls_cert_path cfg_tls_key_path
     local setup_is_advanced=false
 
@@ -557,29 +612,42 @@ configure_tunnel() {
                     *) handle_error "CRITICAL" "Unknown return code $step_rc from _prompt_basic_config_params." ; return 1 ;;
                 esac
                 ;;
-            4) # Step 4 (Conditional): Advanced Configuration
+            # NEW STEP for Server Port Forwarding Rules
+            4)
+                if [[ "$tunnel_mode" == "server" ]]; then
+                    _prompt_server_ports_array server_port_rules # Pass the array by nameref
+                    step_rc=$? # _prompt_server_ports_array currently always returns 0, but good practice
+                    # It handles its own internal looping and cancellation of adding rules.
+                    # If it were to return 1 (cancel wizard) or 2 (back a step), handle here.
+                    # For now, assume it completes or user confirms empty rules.
+                    if [[ "$step_rc" -eq 0 ]]; then
+                        ((current_wizard_step++))
+                    else
+                        # Handle cancellation/back from _prompt_server_ports_array if implemented
+                        # For now, this path isn't taken by _prompt_server_ports_array's current design.
+                        print_info "Port forwarding configuration was cancelled or an error occurred."
+                        # Decide if this means full wizard cancel or back to basic params
+                        # For now, assume it means back to basic params (step 3)
+                        current_wizard_step=3
+                        continue
+                    fi
+                else
+                    # Not a server, skip this step
+                    ((current_wizard_step++))
+                fi
+                ;;
+            5) # Step 5 (Was 4): Advanced Configuration
                 if $setup_is_advanced; then
                     # TODO: Implement _prompt_advanced_config_params
-                    # This function should also return 0 (success), 1 (cancel wizard), 2 (back)
-                    # For now, we'll simulate success and provide a message.
                     print_info "Advanced parameter configuration (currently using defaults)."
                     log_message "INFO" "Advanced setup chosen - using default advanced parameters for now."
-                    # Example call:
-                    # _prompt_advanced_config_params "$tunnel_mode" "$transport_protocol" namerefs...
-                    # step_rc=$?
-                    # case "$step_rc" in
-                    #    0) ((current_wizard_step++));;
-                    #    1) print_info "Wizard cancelled at Advanced Params."; return_from_menu; return 1 ;;
-                    #    2) ((current_wizard_step--)); continue ;; # Back to Basic Config
-                    #    *) handle_error "CRITICAL" "Unknown rc $step_rc from _prompt_advanced_config_params." ; return 1 ;;
-                    # esac
                     step_rc=0 # Simulate success for now
-                    if [[ "$step_rc" -eq 0 ]]; then ((current_wizard_step++)); else return 1; fi # Simplified for placeholder
+                    if [[ "$step_rc" -eq 0 ]]; then ((current_wizard_step++)); else return 1; fi
                 else
                     ((current_wizard_step++)) # Skip if not advanced setup
                 fi
                 ;;
-            5) # Step 5 (Conditional): TLS Configuration
+            6) # Step 6 (Was 5): TLS Configuration
                 cfg_tls_cert_path="" cfg_tls_key_path="" # Reset for this step
                 if [[ "$transport_protocol" =~ ^(wss|wssmux)$ ]]; then
                     _prompt_tls_config "$transport_protocol" cfg_tls_cert_path cfg_tls_key_path
@@ -587,24 +655,32 @@ configure_tunnel() {
                     case "$step_rc" in
                         0) ((current_wizard_step++));; # Success (includes user skipping TLS)
                         1) print_info "Configuration wizard cancelled at TLS Configuration."; return_from_menu; return 1 ;;
-                        2) ((current_wizard_step--)); continue ;; # Go back to Advanced (or Basic if not advanced)
+                        2) ((current_wizard_step--)); current_wizard_step=$((current_wizard_step > 0 ? current_wizard_step : 1)); continue ;; # Go back
                         *) handle_error "CRITICAL" "Unknown return code $step_rc from _prompt_tls_config." ; return 1 ;;
                     esac
                 else
                     ((current_wizard_step++)) # Skip if not WSS/WSSMUX
                 fi
                 ;;
-            6) # Step 6: Configuration Summary & Confirmation
+            7) # Step 7 (Was 6): Configuration Summary & Confirmation
                 print_menu_header "secondary" "Configuration Summary" "Review and Confirm"
                 echo "  Mode: $tunnel_mode"
                 echo "  Transport: $transport_protocol"
                 if [[ "$tunnel_mode" == "server" ]]; then
-                    echo "  Listen Port: $server_listen_port"
-                else
-                    echo "  Remote Server: $client_remote_ip:$client_remote_port"
-                    echo "  Local Forward Port: $client_local_fwd_port"
+                    echo "  Server Listen Address (bind_addr): :$server_listen_port" # Updated key name
+                    if [[ ${#server_port_rules[@]} -gt 0 ]]; then
+                        echo "  Port Forwarding Rules (ports):"
+                        for rule in "${server_port_rules[@]}"; do
+                            echo "    - \"$rule\""
+                        done
+                    else
+                        echo "  Port Forwarding Rules (ports): [None defined - server will not forward traffic]"
+                    fi
+                else # client
+                    echo "  Remote Server (remote_addr): $client_remote_ip:$client_remote_port" # Updated key name
+                    # client_local_fwd_port has been removed from prompts and will be removed from TOML writing.
                 fi
-                echo "  Auth Token: [set]" # Assuming it's always set if we reach here
+                echo "  Token: [set]" # Assuming it's always set if we reach here, updated key name
 
                 if $setup_is_advanced; then
                     echo "  --- Advanced Settings (Defaults Used) ---"
@@ -636,32 +712,44 @@ configure_tunnel() {
                     fi
                 else
                     # User wants to proceed with this configuration.
-                    ((current_wizard_step++)) # Proceed to Save step (Step 7)
+                    ((current_wizard_step++)) # Proceed to Save step
                 fi
                 ;;
-            7) # Step 7: Generate Tunnel Name and Save Configuration (was Step 8)
+            8) # Step 8 (Was 7): Generate Tunnel Name and Save Configuration
                 local tunnel_name_suffix
-                # Renumbering comments for steps for clarity from here:
-                # Current step is 7 (Save), next is 8 (Post-create)
                 tunnel_name_suffix="${tunnel_mode}-${transport_protocol}-$(date +%s | tail -c 5)"
                 local final_tunnel_name="bh-$tunnel_name_suffix"
-                cfg_sniffer_log="/var/log/easybackhaul/${final_tunnel_name}-sniffer.json" # Set specific sniffer log path
+                cfg_sniffer_log="/var/log/easybackhaul/${final_tunnel_name}-sniffer.json"
 
                 local config_file_path="$CONFIG_DIR/config-${final_tunnel_name}.toml"
                 ensure_dir "$CONFIG_DIR"
-                : > "$config_file_path"
+                : > "$config_file_path" # Create/truncate config file
 
-                update_toml_value "$config_file_path" "mode" "$tunnel_mode" "string"
+                # Write [server] or [client] section header
+                echo "[$tunnel_mode]" > "$config_file_path"
+
+                # Common parameters (already corrected names)
                 update_toml_value "$config_file_path" "transport" "$transport_protocol" "string"
-                update_toml_value "$config_file_path" "auth_token" "$common_auth_token" "string"
+                update_toml_value "$config_file_path" "token" "$common_auth_token" "string"
 
                 if [[ "$tunnel_mode" == "server" ]]; then
-                    update_toml_value "$config_file_path" "listen" ":$server_listen_port" "string"
-                else
-                    update_toml_value "$config_file_path" "server" "${client_remote_ip}:${client_remote_port}" "string"
-                    update_toml_value "$config_file_path" "local" ":$client_local_fwd_port" "string"
+                    update_toml_value "$config_file_path" "bind_addr" ":$server_listen_port" "string"
+                    # Add the ports array
+                    if [[ ${#server_port_rules[@]} -gt 0 ]]; then
+                        echo "ports = [" >> "$config_file_path"
+                        for rule in "${server_port_rules[@]}"; do
+                            echo "  \"$rule\"," >> "$config_file_path"
+                        done
+                        echo "]" >> "$config_file_path"
+                    else
+                        echo "ports = [] # No forwarding rules defined" >> "$config_file_path"
+                    fi
+                else # client mode
+                    update_toml_value "$config_file_path" "remote_addr" "${client_remote_ip}:${client_remote_port}" "string" # Name already corrected
+                    # The line for `local = ":$client_local_fwd_port"` is now removed.
                 fi
 
+                # Advanced parameters are written after basic ones and potentially after the ports array (for server)
                 if $setup_is_advanced; then
                     update_toml_value "$config_file_path" "log_level" "$cfg_log_level" "string"
                     update_toml_value "$config_file_path" "sniffer" "$cfg_sniffer" "boolean"
@@ -691,7 +779,7 @@ configure_tunnel() {
                         update_toml_value "$config_file_path" "mux_con" "$cfg_mux_con" "numeric"
                         update_toml_value "$config_file_path" "mux_version" "$cfg_mux_version" "numeric"
                         update_toml_value "$config_file_path" "mux_framesize" "$cfg_mux_framesize" "numeric"
-                        update_toml_value "$config_file_path" "mux_receivebuffer" "$cfg_mux_receivebuffer" "numeric"
+                        update_toml_value "$config_file_path" "mux_receivebuffer" "$cfg_mux_receivebuffer" "numeric" # CORRECTED SPELLING
                         update_toml_value "$config_file_path" "mux_streambuffer" "$cfg_mux_streambuffer" "numeric"
                     fi
                 fi
