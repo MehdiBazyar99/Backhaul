@@ -3933,11 +3933,12 @@ $( [[ -n "$effective_user" ]] && echo "User=${effective_user}" )
 $( [[ -n "$effective_group" ]] && echo "Group=${effective_group}" )
 
 # Security Hardening Options (optional, but good practice)
-# ProtectSystem=full
-# ProtectHome=true
-# PrivateTmp=true
-# NoNewPrivileges=true
-# ReadWritePaths=${CONFIG_DIR} ${LOG_DIR} # Paths Backhaul needs to write to, adjust as needed
+# ProtectSystem=full # Consider enabling if paths are well-defined
+# ProtectHome=true   # Consider enabling
+PrivateTmp=false # Allow access to /tmp/easybackhaul_config
+NoNewPrivileges=true
+ReadWritePaths=${CONFIG_DIR} # Allow access to config directory
+# Add other ReadWritePaths if binary writes logs elsewhere, e.g. ${LOG_DIR}
 # CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW # Example, adjust to minimum required
 
 [Install]
@@ -5737,12 +5738,21 @@ _perform_full_uninstall() {
     fi
 
     print_info "Removing systemd service files..."
-    if [[ -d "$SERVICE_DIR" ]]; then
-        secure_delete "${SERVICE_DIR}/backhaul-bh-*.service"
-        secure_delete "${SERVICE_DIR}/backhaul-watcher-*.service"
-        secure_delete "${SERVICE_DIR}/backhaul-*.service"
+    if [[ -d "$SERVICE_DIR" ]]; then # SERVICE_DIR is now /etc/systemd/system
+        # Construct full paths for secure_delete if it doesn't handle wildcards well across all systems
+        # However, secure_delete itself calls rm -rf for directories, and rm -f for files,
+        # which should handle wildcards if the shell expands them before calling secure_delete.
+        # To be safe, let's list and delete.
+        find "$SERVICE_DIR" -name "backhaul-bh-*.service" -print -exec secure_delete {} \; 2>/dev/null
+        find "$SERVICE_DIR" -name "backhaul-watcher-*.service" -print -exec secure_delete {} \; 2>/dev/null
+        find "$SERVICE_DIR" -name "backhaul-*.service" -print -exec secure_delete {} \; 2>/dev/null # General catch-all
     fi
     run_with_spinner "Reloading systemd daemon..." systemctl daemon-reload
+
+    print_info "Removing Logrotate configuration..."
+    secure_delete "/etc/logrotate.d/easybackhaul"
+    secure_delete "/tmp/easybackhaul_logrotate_conf_test.conf" # Sandbox/test file
+    log_message "INFO" "Attempted removal of logrotate configurations."
     
     print_info "Removing UFW rules..."
     if type delete_all_easybackhaul_ufw_rules &>/dev/null; then
@@ -5783,6 +5793,17 @@ _perform_full_uninstall() {
             handle_success "Log directory $LOG_DIR deleted."
         else
             print_info "Log directory $LOG_DIR preserved."
+        fi
+    fi
+
+    # Remove watcher specific log directory
+    local watcher_log_root="/var/log/easybackhaul"
+    if [[ -d "$watcher_log_root" ]]; then
+        if prompt_yes_no "Also delete the watcher log directory $watcher_log_root and its contents?" "n"; then
+            secure_delete "$watcher_log_root"
+            handle_success "Watcher log directory $watcher_log_root deleted."
+        else
+            print_info "Watcher log directory $watcher_log_root preserved."
         fi
     fi
     
