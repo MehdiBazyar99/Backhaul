@@ -111,4 +111,34 @@ WATCHER_CLIENT_LISTEN_PORT=45680 # Default listen port for client-side watcher
 # Note: When a server watcher communicates, its REMOTE_PORT will be WATCHER_CLIENT_LISTEN_PORT.
 # When a client watcher communicates, its REMOTE_PORT will be WATCHER_SERVER_LISTEN_PORT.
 
+# --- Backhaul Binary Default Optional Parameters ---
+# These are used by easybh.sh for "Advanced Setup" if the user doesn't override.
+# "Quick Setup" will omit these, relying on Backhaul binary's internal defaults.
+
+BH_DEFAULT_LOG_LEVEL="info"
+BH_DEFAULT_SNIFFER="false"
+# BH_DEFAULT_SNIFFER_LOG - Path is context-dependent, generated in configure_tunnel if sniffer enabled.
+BH_DEFAULT_WEB_PORT=0         # 0 means disabled
+BH_DEFAULT_NODELAY="true"     # For TCP-based transports
+BH_DEFAULT_KEEPALIVE_PERIOD=75 # For TCP-based transports
+
+# Server-specific defaults
+BH_DEFAULT_HEARTBEAT=40
+BH_DEFAULT_CHANNEL_SIZE=2048
+BH_DEFAULT_ACCEPT_UDP="false" # For TCP/TCPMUX server
+
+# Client-specific defaults
+BH_DEFAULT_CONNECTION_POOL=8
+BH_DEFAULT_AGGRESSIVE_POOL="false"
+BH_DEFAULT_RETRY_INTERVAL=3
+BH_DEFAULT_DIAL_TIMEOUT=10
+# BH_DEFAULT_EDGE_IP - Typically empty or user-provided.
+
+# MUX-specific defaults (common for client/server if mux is used)
+BH_DEFAULT_MUX_CON=8
+BH_DEFAULT_MUX_VERSION=1
+BH_DEFAULT_MUX_FRAMESIZE=32768
+BH_DEFAULT_MUX_RECEIVEBUFFER=4194304 # Using corrected spelling 'receive'
+BH_DEFAULT_MUX_STREAMBUFFER=65536   # Was 256KB (262144) in README, using prior easybh.sh default
+
 true # Ensure the script can be sourced without error if it's the last one.
