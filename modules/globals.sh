@@ -7,7 +7,7 @@
 CONFIG_DIR="/tmp/easybackhaul_config"
 BACKUP_DIR="/tmp/easybackhaul_backups"
 BIN_PATH="/tmp/easybackhaul_bin/easybackhaul_binary" # Renamed to avoid conflict
-SERVICE_DIR="/tmp/easybackhaul_services" # Dummy for testing, real systemd is /etc/systemd/system
+SERVICE_DIR="/etc/systemd/system" # Standard systemd directory
 LOG_DIR="/tmp/easybackhaul_logs"
 
 CRON_COMMENT_TAG="EasyBackhaul" # Standardized comment tag

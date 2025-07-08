@@ -3945,25 +3945,36 @@ WantedBy=multi-user.target
 EOL
 
     if ! run_with_spinner "Reloading systemd daemon..." systemctl daemon-reload; then
-        handle_error "ERROR" "Failed to reload systemd daemon. Service file might be invalid: $service_file_path"
+        handle_error "ERROR" "Failed to reload systemd daemon. Service file might be invalid or systemd failed. Path: $service_file_path"
+        print_info "Attempting to get systemd status for $service_name (if it was loaded):"
+        systemctl status "$service_name" --no-pager || true # Allow failure if unit not found
+        print_info "Check systemd general logs: journalctl -n 50 --no-pager"
         return 1
     fi
 
     log_message "INFO" "Enabling service $service_name..."
     if ! run_with_spinner "Enabling service $service_name..." systemctl enable "$service_name"; then
-        handle_error "ERROR" "Failed to enable service $service_name. Check systemd logs."
-        # Attempt to show specific error if possible
-        journalctl -u "$service_name" -n 5 --no-pager
+        handle_error "ERROR" "Failed to enable service $service_name."
+        print_info "Diagnostics for $service_name:"
+        print_info "Status:"
+        systemctl status "$service_name" --no-pager || true
+        print_info "Recent Logs (if any):"
+        journalctl -u "$service_name" -n 20 --no-pager || true
+        print_info "General systemd logs:"
+        journalctl -n 50 --no-pager
         return 1
     fi
 
     log_message "INFO" "Starting service $service_name..."
     if ! run_with_spinner "Starting service $service_name..." systemctl start "$service_name"; then
         handle_error "ERROR" "Failed to start service $service_name."
-        print_info "Check configuration and logs: journalctl -u $service_name -n 50 --no-pager"
-        if prompt_yes_no "Show last 20 lines of the service log now?" "y"; then
-            journalctl -u "$service_name" -n 20 --no-pager
-        fi
+        print_info "Diagnostics for $service_name:"
+        print_info "Status:"
+        systemctl status "$service_name" --no-pager || true
+        print_info "Recent Logs (service specific):"
+        journalctl -u "$service_name" -n 50 --no-pager || true
+        print_info "General systemd logs:"
+        journalctl -n 50 --no-pager
         return 1
     fi
 
