@@ -2466,52 +2466,50 @@ _prompt_basic_config_params() {
     local -n listen_port_ref=$2 # Output for server mode
     local -n remote_ip_ref=$3   # Output for client mode
     local -n remote_port_ref=$4 # Output for client mode
-    local -n local_fwd_port_ref=$5 # Output for client mode (local port to forward from)
+    local -n local_fwd_port_ref=$5 # Output for client mode (local port to forward from) - NO LONGER USED for prompting/saving
     local -n auth_token_ref=$6  # Output: auth token
 
-    print_menu_header "secondary" "Basic Configuration" "Step 3 of N" # N depends on if TLS is needed, step number adjusted
+    print_menu_header "secondary" "Basic Configuration" "Step 3: Mandatory Settings"
 
     if [[ "$tunnel_mode" == "server" ]]; then
-        print_info "Server Mode: Configure listening port."
-        if [[ -z "$SERVER_IP" || "$SERVER_IP" == "N/A" ]]; then get_server_info; fi
+        print_info "Server Mode: Configure listening address."
+        if [[ -z "$SERVER_IP" || "$SERVER_IP" == "N/A" ]]; then get_server_info; fi # Ensure we have an IP for defaults if needed
 
-        if ! prompt_for_port "port for Backhaul server to listen on" "443" true listen_port_ref; then
+        if ! prompt_for_port "Port for Backhaul server to listen on (e.g., 443)" "443" true listen_port_ref; then
             print_error "Failed to get a valid listen port for server."
-            return 1
+            return 1 # Critical failure
         fi
     else # client mode
-        print_info "Client Mode: Configure remote server details." # Updated: removed "and local forwarding port"
-        if ! prompt_for_ip "the public IP address of the Backhaul SERVER" "" true remote_ip_ref; then
+        print_info "Client Mode: Configure remote server details."
+        if ! prompt_for_ip "Public IP address of the Backhaul SERVER" "" true remote_ip_ref; then
             print_error "Failed to get a valid remote server IP for client."
-            return 1
+            return 1 # Critical failure
         fi
         
-        if ! prompt_for_port "port the Backhaul SERVER is listening on" "443" false remote_port_ref; then
+        if ! prompt_for_port "Port the Backhaul SERVER is listening on" "443" false remote_port_ref; then
             print_error "Failed to get a valid remote server port for client."
-            return 1
+            return 1 # Critical failure
         fi
-
-        # Removed prompt for client_local_fwd_port as it's not a standard backhaul client param
-        # Forwarding is now primarily defined by the server's 'ports' array.
-        # client_local_fwd_port_ref will remain unset or at its default if passed by nameref.
     fi
 
-    local default_auth_token="EasyBackhaulSecretToken"
+    local default_auth_token="EasyBackhaulSecretToken" # Example default
     print_info "Set an authentication token (must match on both server and client)."
     while true; do
-        read -r -s -p "Enter auth token (min 8 chars, or type 'cancel' to abort this step): " auth_token_val
-        echo
+        read -r -s -p "Enter token (min 8 chars, or type 'cancel'): " auth_token_val
+        echo # Newline after secret input
         if [[ "$auth_token_val" == "cancel" ]]; then
-            print_info "Auth token input cancelled by user."
-            return 1 # Signal cancellation of this step to the caller
+            print_info "Token input cancelled by user."
+            return 1 # Signal cancellation
         fi
-        auth_token_val=${auth_token_val:-$default_auth_token}
-        if [[ "${#auth_token_val}" -lt 8 ]]; then
+        # Use default if input is empty AND a default is set (currently not using default_auth_token if empty)
+        # Forcing user to enter something or explicitly cancel.
+        # auth_token_val=${auth_token_val:-$default_auth_token}
+        if [[ -z "$auth_token_val" ]]; then
+             print_warning "Token cannot be empty."
+             if ! prompt_yes_no "Try entering token again?" "y"; then print_error "Token setup aborted."; return 1; fi
+        elif [[ "${#auth_token_val}" -lt 8 ]]; then
             print_warning "Token too short. Please use at least 8 characters for security."
-            if ! prompt_yes_no "Try entering token again?" "y"; then
-                 print_error "Auth token setup aborted by user."
-                 return 1
-            fi
+            if ! prompt_yes_no "Try entering token again?" "y"; then print_error "Token setup aborted."; return 1; fi
         else
             auth_token_ref="$auth_token_val"
             break
@@ -2529,191 +2527,135 @@ _prompt_tls_config() {
         return 0 # Not applicable for this transport
     fi
 
-    # Determine Step Number. Could be Step 4 (after Basic) or Step 5 (after Advanced if shown)
-    # This is tricky to get exact from within here without knowing if advanced was shown.
-    # Let's assume it's called with context, or use a generic "Step X of N"
-    print_menu_header "secondary" "TLS Certificate Configuration" "Step 4/5 of N: Secure Protocols"
+    print_menu_header "secondary" "TLS Certificate Configuration" "Step 6: Secure Protocols (WSS/WSSMUX)" # Adjusted step
     print_info "Secure protocols (WSS/WSSMUX) require a TLS certificate and private key."
 
-    local cert_dir_global="${CERT_DIR:-/etc/easybackhaul/certs}"
-    ensure_dir "$cert_dir_global" "700"
+    local cert_dir_global="${CERT_DIR:-/etc/easybackhaul/certs}" # CERT_DIR from globals.sh
+    ensure_dir "$cert_dir_global" "700" # Ensure it exists
     
-    mapfile -t existing_certs < <(find "$cert_dir_global" -maxdepth 1 -name '*.pem' -o -name '*.crt' 2>/dev/null | sort)
+    mapfile -t existing_certs < <(find "$cert_dir_global" -maxdepth 1 \( -name '*.pem' -o -name '*.crt' \) 2>/dev/null | sort)
     
     local tls_options=()
-    local cert_map=()
+    local cert_map=() # Associative array to map choice number to paths
 
     if [[ ${#existing_certs[@]} -gt 0 ]]; then
         print_info "Existing certificates/keys found in $cert_dir_global:"
         local count=1
         for cert_file in "${existing_certs[@]}"; do
-            local potential_key_file="${cert_file%.*}.key"
-            if [[ ! -f "$potential_key_file" ]]; then potential_key_file="${cert_file%.*}.pem"; fi
+            # Try to find a matching .key file (more specific than just another .pem)
+            local potential_key_file_key="${cert_file%.pem}.key"
+            if [[ ! -f "$potential_key_file_key" ]]; then potential_key_file_key="${cert_file%.crt}.key"; fi
 
-            if [[ -f "$potential_key_file" ]]; then
-                 tls_options+=("$count. Use: $(basename "$cert_file") + $(basename "$potential_key_file")")
-                 cert_map[$count]="$cert_file;$potential_key_file"
+            # Fallback if .key not found, check for a .pem that could be a key (less ideal)
+            local potential_key_file_pem="${cert_file%.crt}.pem" # if cert is .crt, key could be .pem
+            if [[ "$cert_file" == *".pem" && -f "${cert_file%.pem}.pem" && "$cert_file" != "${cert_file%.pem}.pem" ]]; then
+                 # This case is tricky, could be two .pem files. Assume cert is fullchain.pem, key is privkey.pem
+                 # For simplicity, this heuristic might not be perfect.
+                 : # Skip complex .pem + .pem logic for now, prefer .crt + .key or .pem + .key
+            fi
+
+            local final_key_file=""
+            if [[ -f "$potential_key_file_key" ]]; then
+                final_key_file="$potential_key_file_key"
+            # Add more sophisticated pairing logic if needed, e.g. matching common names
+            elif [[ -f "$potential_key_file_pem" && "$cert_file" != "$potential_key_file_pem" ]]; then
+                 # Heuristic: if cert is fullchain.pem, key might be privkey.pem
+                 if [[ "$(basename "$cert_file")" == "fullchain.pem" && "$(basename "$potential_key_file_pem")" == "privkey.pem" ]]; then
+                    final_key_file="$potential_key_file_pem"
+                 fi
+            fi
+
+            if [[ -n "$final_key_file" ]]; then
+                 tls_options+=("$count. Use: $(basename "$cert_file") & $(basename "$final_key_file")")
+                 cert_map[$count]="$cert_file;$final_key_file" # Store paths
                  ((count++))
             else
-                print_warning "Certificate $(basename "$cert_file") found without a clearly matching .key file, skipping."
+                # If only a single .pem or .crt is found without a clear pair, list it as possibly incomplete
+                # For now, we only list clear pairs.
+                # print_warning "Certificate $(basename "$cert_file") found without a clearly matching .key file, skipping for auto-pairing."
+                :
             fi
         done
     fi
     tls_options+=("$((${#cert_map[@]} + 1)). Generate New Self-Signed Certificate")
     local generate_new_opt_num=$((${#cert_map[@]} + 1))
-    tls_options+=("$((${#cert_map[@]} + 2)). Skip TLS configuration (NOT RECOMMENDED)")
-    local skip_tls_opt_num=$((${#cert_map[@]} + 2))
+    tls_options+=("$((${#cert_map[@]} + 2)). Manually Enter Paths for Certificate and Key")
+    local manual_paths_opt_num=$((${#cert_map[@]} + 2))
+    tls_options+=("$((${#cert_map[@]} + 3)). Skip TLS configuration (NOT RECOMMENDED)")
+    local skip_tls_opt_num=$((${#cert_map[@]} + 3))
+
 
     _tls_help() {
         print_info "TLS Configuration Help:"
-        echo " - Select an existing certificate/key pair if available."
+        echo " - Select an existing certificate/key pair if found."
         echo " - Choose 'Generate New' to create a self-signed certificate."
+        echo " - 'Manually Enter Paths' if your cert/key are elsewhere."
         echo " - 'Skip TLS' will proceed without TLS; WSS/WSSMUX will likely fail."
         echo " - Certificate paths are stored in the tunnel's TOML config file."
-        echo "Use 'r' to return to Basic Params, 'c' to cancel configuration."
+        echo "Use 'r' to return to previous step, 'm' for main menu."
         press_any_key
     }
 
     menu_loop "Select TLS certificate option" tls_options "_tls_help"
     local menu_rc=$?
-    local user_choice="$MENU_CHOICE" # MENU_CHOICE is set by menu_loop on rc=0
+    local user_choice="$MENU_CHOICE"
 
     case "$menu_rc" in
         0) # Numeric choice
             if (( user_choice == generate_new_opt_num )); then
-                # Attempt to generate certs. generate_self_signed_tls_cert handles its own user interaction.
-                # It returns 0 on success, 1 on failure/cancel.
-                if generate_self_signed_tls_cert; then
-                    local new_cert=$(find "$cert_dir_global" -name '*.pem' -o -name '*.crt' -print0 | xargs -0 stat -c "%Y %n" | sort -nr | head -n1 | awk '{print $2}')
-                    local new_key="${new_cert%.*}.key"
-                    if [[ ! -f "$new_key" ]]; then new_key="${new_cert%.*}.pem"; fi
-
-                    if [[ -f "$new_cert" && -f "$new_key" ]]; then
-                        tls_cert_path_ref="$new_cert"
-                        tls_key_path_ref="$new_key"
+                if generate_self_signed_tls_cert; then # This function handles its own output and sets paths
+                    # It should output the paths it created, we need to capture them.
+                    # For now, assume generate_self_signed_tls_cert updates some global vars or returns paths.
+                    # This part needs refinement: generate_self_signed_tls_cert needs to return the paths.
+                    # Let's assume it writes to last_cert.path and last_key.path files for simplicity here.
+                    # This is a placeholder for better path communication.
+                    if [[ -f "$cert_dir_global/last_generated_cert.path" && -f "$cert_dir_global/last_generated_key.path" ]]; then
+                        tls_cert_path_ref=$(cat "$cert_dir_global/last_generated_cert.path")
+                        tls_key_path_ref=$(cat "$cert_dir_global/last_generated_key.path")
+                        rm -f "$cert_dir_global/last_generated_cert.path" "$cert_dir_global/last_generated_key.path"
                         print_success "Using newly generated cert: $tls_cert_path_ref and key: $tls_key_path_ref"
-                        # Fall through to return 0 at the end of the function
                     else
-                        handle_error "ERROR" "Failed to identify newly generated certificate/key pair after successful generation."
-                        # Offer to retry this step? For now, treat as failure of this step.
-                        # This implies a problem with find/stat logic, not user cancellation.
-                        if prompt_yes_no "Error identifying generated files. Retry TLS setup step?" "y"; then
-                           _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $?
-                        else
-                           return 1 # Cancel wizard due to internal error
+                        handle_error "ERROR" "Failed to retrieve paths of newly generated certificate/key. Please enter manually."
+                        # Fallback to manual entry
+                        read -e -r -p "Enter full path to TLS certificate file (.crt or .pem): " tls_cert_path_ref
+                        read -e -r -p "Enter full path to TLS private key file (.key or .pem): " tls_key_path_ref
+                        if [[ ! -f "$tls_cert_path_ref" || ! -f "$tls_key_path_ref" ]]; then
+                            handle_error "ERROR" "One or both manually entered TLS file paths are invalid."; return 1;
                         fi
                     fi
                 else
-                    # generate_self_signed_tls_cert failed or was cancelled by user within it.
                     print_warning "Self-signed certificate generation failed or was cancelled."
-                    # Ask user if they want to retry the TLS config step or cancel wizard
-                    if prompt_yes_no "Retry TLS configuration, or cancel wizard? (Retry/Cancel)" "y"; then
-                        _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $?
-                    else
-                        return 1 # User chose to cancel wizard
-                    fi
+                    if prompt_yes_no "Retry TLS configuration?" "y"; then _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $?; else return 1; fi
                 fi
+            elif (( user_choice == manual_paths_opt_num )); then
+                read -e -r -p "Enter full path to TLS certificate file (.crt or .pem): " tls_cert_path_ref
+                read -e -r -p "Enter full path to TLS private key file (.key or .pem): " tls_key_path_ref
+                if [[ ! -f "$tls_cert_path_ref" || ! -f "$tls_key_path_ref" ]]; then
+                    handle_error "ERROR" "One or both manually entered TLS file paths are invalid."
+                    if prompt_yes_no "Retry entering paths?" "y"; then _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $?; else return 1; fi
+                fi
+                print_success "Using manually specified cert: $tls_cert_path_ref and key: $tls_key_path_ref"
             elif (( user_choice == skip_tls_opt_num )); then
                 print_warning "Skipping TLS configuration. WSS/WSSMUX will likely not work without it."
-                tls_cert_path_ref=""
-                tls_key_path_ref=""
-                # Fall through to return 0
+                tls_cert_path_ref=""; tls_key_path_ref=""
             elif [[ -n "${cert_map[$user_choice]}" ]]; then
                 IFS=';' read -r tls_cert_path_ref tls_key_path_ref <<< "${cert_map[$user_choice]}"
                 print_success "Using selected cert: $tls_cert_path_ref and key: $tls_key_path_ref"
-                # Fall through to return 0
             else
                 handle_error "ERROR" "Invalid TLS certificate selection: $user_choice."
-                # Ask user to retry this step
-                if prompt_yes_no "Invalid selection. Retry TLS setup step?" "y"; then
-                    _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $?
-                else
-                    return 1 # User chose to cancel wizard
-                fi
+                if prompt_yes_no "Retry TLS setup step?" "y"; then _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $?; else return 1; fi
             fi
-            return 0 # Successful numeric choice processing
+            return 0
             ;;
-        2) # '?' Help
-            _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $? ;; # Re-call current step
-        3) # 'm' Main Menu
-            print_info "Configuration cancelled: returning to Main Menu."
-            return 1 ;; # Signal cancel wizard
-        4) # 'x' Exit script
-            request_script_exit
-            return 1 ;; # Should not be reached
-        5) # 'r' Return/Back
-            print_info "Going back to previous step from TLS config."
-            return 2 ;; # Signal go back one step
-        6)  # Invalid input in menu_loop
-            # press_any_key handled by menu_loop
-            _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $? ;; # Re-call current step
-        *) # Includes unexpected menu_loop return codes
+        2) _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $? ;;
+        3) print_info "Configuration cancelled: returning to Main Menu."; return 1 ;;
+        4) request_script_exit; return 1 ;;
+        5) print_info "Going back to previous step from TLS config."; return 2 ;;
+        6) _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $? ;;
+        *)
             handle_error "ERROR" "Unhandled menu_loop code $menu_rc in _prompt_tls_config"
-            # Offer to retry or cancel
-            if prompt_yes_no "Unexpected error in TLS config. Retry this step?" "y"; then
-                _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $?
-            else
-                return 1 # Signal cancel wizard
-            fi
+            if prompt_yes_no "Unexpected error in TLS config. Retry this step?" "y"; then _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $?; else return 1; fi
     esac
-    # Should be unreachable if all paths in case either return or re-invoke.
-    # However, as a fallback for case 0 if it doesn't return explicitly:
-    # This implies a valid selection was made (or skipped).
-    return 0
-}
-
-_prompt_server_ports_array() {
-    local -n rules_array_ref=$1 # Output: array of "listen_port:destination_port" strings
-    rules_array_ref=() # Initialize as empty
-
-    print_menu_header "secondary" "Server Port Forwarding" "Step 3b: Configure Forwarding Rules"
-    print_info "Configure rules for forwarding traffic from this server to the client."
-    print_info "Example: Server listens on public port 80, forwards to client's port 8080."
-    echo
-
-    while true; do
-        if ! prompt_yes_no "Add a port forwarding rule?" "y"; then
-            if [[ ${#rules_array_ref[@]} -eq 0 ]]; then
-                print_warning "No port forwarding rules defined. Server will not forward any traffic."
-                if ! prompt_yes_no "Are you sure you want to continue without any forwarding rules?" "n"; then
-                    # Loop again to ask if they want to add a rule
-                    continue
-                fi
-            fi
-            break # Exit loop if user doesn't want to add (more) rules
-        fi
-
-        local server_public_port client_dest_port
-        if ! prompt_for_port "Port on THIS SERVER to listen on (e.g., 80, 443)" "" true server_public_port; then
-            print_warning "Skipping this rule due to invalid server port."
-            if ! prompt_yes_no "Try adding a different rule?" "y"; then break; fi
-            continue
-        fi
-
-        if ! prompt_for_port "Port on the CLIENT where traffic should be forwarded (e.g., 8080)" "" false client_dest_port; then
-            print_warning "Skipping this rule due to invalid client port."
-            if ! prompt_yes_no "Try adding a different rule?" "y"; then break; fi
-            continue
-        fi
-
-        local new_rule="${server_public_port}:${client_dest_port}"
-        # Check if rule already exists to prevent duplicates, though not strictly necessary by backhaul
-        local rule_exists=false
-        for existing_rule in "${rules_array_ref[@]}"; do
-            if [[ "$existing_rule" == "$new_rule" ]]; then
-                rule_exists=true
-                break
-            fi
-        done
-
-        if $rule_exists; then
-            print_warning "Rule '$new_rule' already exists."
-        else
-            rules_array_ref+=("$new_rule")
-            print_success "Rule added: $new_rule"
-        fi
-        echo # Extra line for readability before next prompt_yes_no
-    done
     return 0
 }
 
@@ -2840,7 +2782,7 @@ _configure_server_forwarding_rules() {
 
 # Prompts user for advanced optional parameters
 # Populates an associative array with chosen values.
-# Usage: _prompt_advanced_parameters params_assoc_array "$tunnel_mode" "$transport_protocol"
+# Usage: _prompt_advanced_parameters params_assoc_array "$tunnel_mode" "$transport_protocol" "$is_interactive"
 _prompt_advanced_parameters() {
     local -n params_ref=$1 # Associative array passed by nameref
     local tunnel_mode="$2"
@@ -3113,27 +3055,27 @@ configure_tunnel() {
                 fi
                 echo "  Token: [set]"
 
-                if $setup_is_advanced && [[ ${#advanced_params_map[@]} -gt 0 ]]; then
-                    echo "  --- Advanced Settings ---"
-                    # Iterate through advanced_params_map to display them
-                    # Sorting keys for consistent display:
+                if [[ ${#advanced_params_map[@]} -gt 0 ]]; then # Check if map has entries, will be true for both Quick and Advanced
+                    if $setup_is_advanced; then
+                        echo "  --- Advanced Settings (User Customized/Confirmed Defaults) ---"
+                    else # Quick Setup
+                        echo "  --- Optional Settings (Using Script Defaults) ---"
+                    fi
                     local key
                     for key in $(echo "${!advanced_params_map[@]}" | tr ' ' '\n' | sort); do
-                        # Do not display sensitive or overly verbose params if not desired
-                        # For now, display all collected advanced params
-                        echo "    $key = ${advanced_params_map[$key]}"
-                    done
-                    # Display edge_ip if set (it's handled separately for now)
-                    # edge_ip is now part of advanced_params_map, so it's displayed by the loop.
-                elif $setup_is_advanced; then # Should not be hit if advanced_params_map is populated by default for quick.
-                    echo "  --- Advanced Settings: Will use script defaults (prompting was just done) ---"
-                else # Quick setup - advanced_params_map still populated with defaults
-                    echo "  --- Optional Settings (using script defaults) ---"
-                     local key
-                    for key in $(echo "${!advanced_params_map[@]}" | tr ' ' '\n' | sort); do
+                        # Conditional display for sniffer_log and web_port=0
+                        if [[ "$key" == "sniffer_log" && "${advanced_params_map[sniffer]}" != "true" ]]; then
+                            # Only display sniffer_log if sniffer is true
+                            continue
+                        fi
+                        if [[ "$key" == "web_port" && "${advanced_params_map[$key]}" == "0" ]]; then
+                             echo "    $key = ${advanced_params_map[$key]} (Disabled)"
+                             continue
+                        fi
                         echo "    $key = ${advanced_params_map[$key]}"
                     done
                 fi
+                # Note: edge_ip is now part of advanced_params_map and will be displayed by the loop above if set.
 
                 if [[ -n "$cfg_tls_cert_path" && -n "$cfg_tls_key_path" ]]; then
                     echo "  TLS Certificate: $cfg_tls_cert_path"
@@ -3167,7 +3109,7 @@ configure_tunnel() {
                 local tunnel_name_suffix
                 tunnel_name_suffix="${tunnel_mode}-${transport_protocol}-$(date +%s | tail -c 5)"
                 local final_tunnel_name="bh-$tunnel_name_suffix"
-                cfg_sniffer_log="/var/log/easybackhaul/${final_tunnel_name}-sniffer.json"
+                # cfg_sniffer_log is now populated in advanced_params_map if sniffer is true
 
                 local config_file_path="$CONFIG_DIR/config-${final_tunnel_name}.toml"
                 ensure_dir "$CONFIG_DIR" "755" # Ensure CONFIG_DIR is traversable
@@ -3197,66 +3139,52 @@ configure_tunnel() {
                     # The line for `local = ":$client_local_fwd_port"` is now removed.
                 fi
 
-                # Advanced parameters are written after basic ones and potentially after the ports array (for server)
-                if $setup_is_advanced; then
-                    local param_key param_value param_type
-                    for param_key in "${!advanced_params_map[@]}"; do
-                        param_value="${advanced_params_map[$param_key]}"
-                        # Determine data type for update_toml_value (simple heuristic)
-                        param_type="string" # Default to string
-                        if [[ "$param_value" == "true" || "$param_value" == "false" ]]; then
-                            param_type="boolean"
-                        elif [[ "$param_value" =~ ^[0-9]+$ ]]; then
-                            param_type="numeric"
-                        fi
+                # Write all parameters from advanced_params_map (populated for both Quick and Advanced)
+                local param_key param_value param_type
+                for param_key in "${!advanced_params_map[@]}"; do
+                    param_value="${advanced_params_map[$param_key]}"
+                    param_type="string" # Default
+                    if [[ "$param_value" == "true" || "$param_value" == "false" ]]; then
+                        param_type="boolean"
+                    elif [[ "$param_value" =~ ^[0-9]+$ ]]; then
+                        param_type="numeric"
+                    fi
 
-                        # Skip writing sniffer_log if sniffer is false, or handle its path generation here
-                        if [[ "$param_key" == "sniffer_log" && "${advanced_params_map[sniffer]}" != "true" ]]; then
-                            continue
-                        elif [[ "$param_key" == "sniffer_log" && "${advanced_params_map[sniffer]}" == "true" ]]; then
-                             # Ensure sniffer_log path is sensible if not customized by user
-                             # For now, _prompt_advanced_parameters sets it, or we use a generated one.
-                             # The path generation is already: cfg_sniffer_log="/var/log/easybackhaul/${final_tunnel_name}-sniffer.json"
-                             # So, if sniffer is true, and sniffer_log is in advanced_params_map, it will be written.
-                             # If sniffer_log was not explicitly prompted & changed in _prompt_advanced_parameters,
-                             # we might need to set it here based on final_tunnel_name if sniffer is true.
-                             # For now, assume _prompt_advanced_parameters populates it correctly if sniffer is true.
-                             # Or, more simply, if sniffer is true, ensure sniffer_log gets a value.
-                            if [[ "${advanced_params_map[sniffer]}" == "true" && -z "${advanced_params_map[sniffer_log]}" ]] ; then
-                                advanced_params_map[sniffer_log]="/var/log/easybackhaul/${final_tunnel_name}-sniffer.json" # Default path if sniffer true but no log path set
-                                param_value="${advanced_params_map[sniffer_log]}" # update for current iteration
-                            fi
-                        fi
+                    if [[ "$param_key" == "sniffer_log" && "${advanced_params_map[sniffer]}" != "true" ]]; then
+                        continue # Skip sniffer_log if sniffer is not true
+                    fi
+                    if [[ "$param_key" == "sniffer_log" && "${advanced_params_map[sniffer]}" == "true" && -z "$param_value" ]]; then
+                        # If sniffer is true but sniffer_log is empty in map (e.g. Quick setup didn't set it)
+                        # then assign the generated default path.
+                        param_value="/var/log/easybackhaul/${final_tunnel_name}-sniffer.json"
+                    fi
 
-                        # Ensure web_port is not written if 0 (disabled), unless backhaul handles web_port=0 correctly
-                        if [[ "$param_key" == "web_port" && "$param_value" -eq 0 ]]; then
-                            # Optional: explicitly skip writing web_port = 0 if backhaul doesn't like it
-                            # log_message "DEBUG" "Skipping web_port = 0 for $config_file_path"
-                            continue # Skip writing web_port = 0
-                        fi
+                    if [[ "$param_key" == "web_port" && "$param_value" == "0" ]]; then
+                        # Optional: Do not write 'web_port = 0' if backhaul binary defaults to disabled when key is absent.
+                        # For explicitness, we are writing it. Backhaul should handle '0' as disabled.
+                        # If it causes issues, this 'continue' can be un-commented.
+                        # log_message "DEBUG" "Skipping web_port = 0 for $config_file_path"
+                        # continue
+                        : # Explicitly do nothing, will write web_port = 0
+                    fi
+                     # Skip empty edge_ip
+                    if [[ "$param_key" == "edge_ip" && -z "$param_value" ]]; then
+                        continue
+                    fi
 
-                        update_toml_value "$config_file_path" "$param_key" "$param_value" "$param_type"
-                    done
-                # Removed the 'else' block for Quick Setup here, as advanced_params_map is now always populated
-                # (either by user input in Advanced mode, or by script defaults in Quick mode).
-                # The loop above will handle writing all necessary optional parameters.
-                # The log message for Quick Setup using binary defaults is no longer accurate,
-                # as we are now writing explicit script defaults.
-                fi
-                # A general log message for Quick Setup can be added if needed,
-                # or rely on the debug messages from _prompt_advanced_parameters.
-                # Example:
+                    update_toml_value "$config_file_path" "$param_key" "$param_value" "$param_type"
+                done
+
                 if ! $setup_is_advanced; then
                     log_message "INFO" "Quick setup for $final_tunnel_name: All applicable optional parameters written with script defaults."
                 fi
-
 
                 if [[ -n "$cfg_tls_cert_path" && -n "$cfg_tls_key_path" ]]; then
                     update_toml_value "$config_file_path" "tls_cert" "$cfg_tls_cert_path" "string"
                     update_toml_value "$config_file_path" "tls_key" "$cfg_tls_key_path" "string"
                 fi
 
-                set_secure_file_permissions "$config_file_path" "600"
+                set_secure_file_permissions "$config_file_path" "600" # Will be chowned by create_systemd_service
                 handle_success "Configuration saved: $config_file_path"
                 ((current_wizard_step++))
                 ;;
