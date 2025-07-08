@@ -559,7 +559,9 @@ _configure_server_forwarding_rules() {
     echo "  - Port range: 7000-7010 (forwards server range 7000-7010 to client's range 7000-7010)"
     echo "  - Port range to single client port: 7000-7010:6000 (forwards server range 7000-7010 to client's single port 6000)"
     echo "  - To specific client IP & port: 2222=192.168.0.10:22 (forwards server's 2222 to 192.168.0.10:22 on client side)"
-    echo "Use comma to separate multiple rules. E.g.: 80, 443:8443, 7000-7010, 53/udp"
+    echo "Separate multiple rules with a comma. Examples:"
+    echo "  Ex 1: 80, 443:8443, 7000-7010, 53/udp"
+    echo "  Ex 2: 2222=10.0.0.5:22, 8000-8010:9000, 999/udp"
     echo "Leave blank for no forwarding."
     echo
 
