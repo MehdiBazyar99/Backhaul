@@ -3,42 +3,89 @@
 
 # --- Global Variables ---
 # All global variables use UPPER_SNAKE_CASE for consistency
-# Using /tmp for paths to ensure writability in restricted environments/sandboxes
-CONFIG_DIR="/tmp/easybackhaul_config"
-BACKUP_DIR="/tmp/easybackhaul_backups"
-BIN_PATH="/tmp/easybackhaul_bin/easybackhaul_binary" # Renamed to avoid conflict
-SERVICE_DIR="/etc/systemd/system" # Standard systemd directory
-LOG_DIR="/tmp/easybackhaul_logs"
+# Using /etc for persistent configurations and /var/log for logs.
+# /tmp is still used for transient items like backups or temporary binary location.
+CONFIG_DIR="/etc/easybackhaul/configs"
+BACKUP_DIR="/tmp/easybackhaul_backups" # Backups can remain in /tmp or move to /var/backups/easybackhaul
+BIN_PATH="/tmp/easybackhaul_bin/easybackhaul_binary"
+SERVICE_DIR="/etc/systemd/system"
+LOG_DIR="/var/log/easybackhaul" # Standard log location
 
-CRON_COMMENT_TAG="EasyBackhaul" # Standardized comment tag
+CRON_COMMENT_TAG="EasyBackhaul"
 
 # Generate a random secret for restart watcher if not already set
 # This secret is a global default; per-tunnel secrets can also be used.
-GLOBAL_WATCHER_SECRET_FILE="${CONFIG_DIR}/watcher_master.secret"
+GLOBAL_WATCHER_SECRET_FILE="${CONFIG_DIR}/watcher_master.secret" # Path updated
 
 # Helper function scoped to this file for early CONFIG_DIR creation if needed.
 # This is because helpers.sh (with ensure_dir) isn't sourced yet.
 _globals_ensure_config_dir_for_secret() {
     if [[ ! -d "$CONFIG_DIR" ]]; then
+        # Create parent directory /etc/easybackhaul first, then the configs subdir
+        # This ensures correct ownership and permissions are set progressively.
+        local parent_dir
+        parent_dir=$(dirname "$CONFIG_DIR") # /etc/easybackhaul
+
+        if [[ ! -d "$parent_dir" ]]; then
+            mkdir -p "$parent_dir"
+            if [[ $? -ne 0 ]]; then
+                echo "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create parent directory: $parent_dir. Please check permissions." >&2
+                return 1
+            fi
+            # Set ownership to root:nogroup and permissions to 0750 for the parent directory
+            # This allows members of 'nogroup' (like 'nobody') to traverse into /etc/easybackhaul
+            chown root:nogroup "$parent_dir"
+            chmod 0750 "$parent_dir"
+        fi
+
         mkdir -p "$CONFIG_DIR"
         if [[ $? -ne 0 ]]; then
             echo "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create CONFIG_DIR: $CONFIG_DIR. Please check permissions." >&2
             return 1
-        else
-            chmod 755 "$CONFIG_DIR" # Allow traversal for other users (e.g., service user)
-            # Owner is still root, which is fine.
-            return 0
+        fi
+        # Set ownership to root:nogroup and permissions to 0770 for the configs directory
+        # This allows 'nogroup' to read/write/execute (list files) in this directory.
+        # Individual config files will be 'nobody:nogroup' and '640'.
+        chown root:nogroup "$CONFIG_DIR"
+        chmod 0770 "$CONFIG_DIR"
+        return 0
+    fi
+
+    # If directory already exists, ensure its permissions and ownership are correct.
+    # This handles cases where the script might have run before with different settings.
+    if [[ -d "$CONFIG_DIR" ]]; then
+        # Ensure parent directory /etc/easybackhaul also has correct perms/owner
+        local existing_parent_dir
+        existing_parent_dir=$(dirname "$CONFIG_DIR")
+        if [[ -d "$existing_parent_dir" ]]; then
+            if [[ $(stat -c "%U:%G" "$existing_parent_dir") != "root:nogroup" ]]; then
+                chown root:nogroup "$existing_parent_dir" || echo "WARNING: Failed to chown $existing_parent_dir to root:nogroup" >&2
+            fi
+            if [[ $(stat -c "%a" "$existing_parent_dir") != "750" ]]; then
+                 # Check if current perms are more open, e.g. 755, if so, leave them. Otherwise set to 750.
+                current_perms_parent=$(stat -c "%a" "$existing_parent_dir")
+                if [[ "$current_perms_parent" -lt "750" && "$current_perms_parent" != "750" ]]; then # if less than 0750, set it
+                    chmod 0750 "$existing_parent_dir" || echo "WARNING: Failed to chmod $existing_parent_dir to 0750" >&2
+                fi
+            fi
+        fi
+
+        # Check and set CONFIG_DIR permissions
+        if [[ $(stat -c "%U:%G" "$CONFIG_DIR") != "root:nogroup" ]]; then
+            chown root:nogroup "$CONFIG_DIR" || {
+                echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to chown existing CONFIG_DIR $CONFIG_DIR to root:nogroup." >&2
+            }
+        fi
+        # Current permissions for CONFIG_DIR should be 0770.
+        # If they are more permissive (e.g., 775, 777), that's okay. If less, set to 0770.
+        current_perms_config_dir=$(stat -c "%a" "$CONFIG_DIR")
+        if [[ "$current_perms_config_dir" -lt "770" && "$current_perms_config_dir" != "770" ]]; then # if less than 0770, set it
+            chmod 0770 "$CONFIG_DIR" || {
+                echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to ensure 0770 permissions on existing CONFIG_DIR: $CONFIG_DIR." >&2
+            }
         fi
     fi
-    # If directory already exists, ensure its permissions are also 755
-    # This handles cases where the script might have run before with 700
-    if [[ -d "$CONFIG_DIR" ]]; then
-        chmod 755 "$CONFIG_DIR" || {
-            echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to ensure 755 permissions on existing CONFIG_DIR: $CONFIG_DIR." >&2
-            # Not returning error here, as dir exists, but logging a warning.
-        }
-    fi
-    return 0 # Dir already exists
+    return 0 # Dir already exists and permissions checked/set
 }
 
 RESTART_WATCHER_SECRET_VALUE="" # Temporary variable to hold the secret value

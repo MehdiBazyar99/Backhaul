@@ -25,23 +25,55 @@ press_any_key() { read -n 1 -s -r -p "Press any key to continue..."; echo; }
 
 # Initialize the logging system (directories, main log file)
 init_logging() {
-    # Ensure LOG_DIR is set, fallback to a default if necessary (should be defined in globals.sh)
-    local current_log_dir="${LOG_DIR:-/var/log/easybackhaul}"
-    mkdir -p "$current_log_dir"
-    chmod 750 "$current_log_dir"
-    
-    local main_log_file="$current_log_dir/easybackhaul.log"
-    touch "$main_log_file"
-    chmod 640 "$main_log_file"
+    # LOG_DIR is now defined in globals.sh as /var/log/easybackhaul
+    # Ensure LOG_DIR exists and has appropriate permissions.
+    # The user running easybh.sh (likely root) will create this.
+    # Services running as 'nobody' will write to files here, so group writability might be needed
+    # or files need specific 'nobody:nogroup' ownership.
+    # For simplicity, we'll make LOG_DIR root:adm 0775 or root:nogroup 0775,
+    # and log files root:adm 0664 or nobody:nogroup 0664.
+    # 'adm' group is standard for log access. 'nogroup' if 'nobody' needs to write directly.
 
-    # Specific log files if they are different from main_log_file
+    if [[ -z "$LOG_DIR" ]]; then
+        handle_critical_error "LOG_DIR global variable is not set. Logging cannot be initialized."
+        return 1
+    fi
+
+    if [[ ! -d "$LOG_DIR" ]]; then
+        mkdir -p "$LOG_DIR" || { handle_critical_error "Failed to create LOG_DIR: $LOG_DIR"; return 1; }
+    fi
+
+    # Set ownership and permissions for LOG_DIR
+    # Try chown to root:adm, then root:nogroup as fallback, then root:root.
+    # Permissions 0775 allow owner/group to write, others to read/execute.
+    if id -g adm >/dev/null 2>&1; then
+        chown root:adm "$LOG_DIR" && chmod 0775 "$LOG_DIR"
+    elif id -g nogroup >/dev/null 2>&1; then
+        chown root:nogroup "$LOG_DIR" && chmod 0775 "$LOG_DIR"
+    else
+        chown root:root "$LOG_DIR" && chmod 0755 "$LOG_DIR" # Fallback to root:root 0755
+    fi
+    
+    # Main log file
+    local main_log_file="$LOG_DIR/easybackhaul.log"
+    touch "$main_log_file" || { handle_error "WARN" "Failed to touch main log file: $main_log_file"; }
+    # Set permissions for the main log file. If services write here as 'nobody',
+    # they'll need write permission. root:adm 664 or nobody:nogroup 664.
+    if id -g adm >/dev/null 2>&1; then
+        chown root:adm "$main_log_file" && chmod 0664 "$main_log_file"
+    elif id -g nogroup >/dev/null 2>&1; then
+        chown nobody:nogroup "$main_log_file" && chmod 0664 "$main_log_file" # Allow easybackhaul_binary to write if it runs as nobody
+    else
+        chown root:root "$main_log_file" && chmod 0640 "$main_log_file"
+    fi
+
+
+    # Specific log files (health, performance) - these are typically written by easybh.sh itself (root)
     if [[ -n "${HEALTH_LOG_FILE:-}" && "$HEALTH_LOG_FILE" != "$main_log_file" ]]; then
-        touch "$HEALTH_LOG_FILE"
-        chmod 640 "$HEALTH_LOG_FILE"
+        touch "$HEALTH_LOG_FILE" && chmod 0640 "$HEALTH_LOG_FILE" && chown root:root "$HEALTH_LOG_FILE" 2>/dev/null
     fi
     if [[ -n "${PERFORMANCE_LOG_FILE:-}" && "$PERFORMANCE_LOG_FILE" != "$main_log_file" ]]; then
-        touch "$PERFORMANCE_LOG_FILE"
-        chmod 640 "$PERFORMANCE_LOG_FILE"
+        touch "$PERFORMANCE_LOG_FILE" && chmod 0640 "$PERFORMANCE_LOG_FILE" && chown root:root "$PERFORMANCE_LOG_FILE" 2>/dev/null
     fi
     
     if command -v logrotate &>/dev/null; then
@@ -51,15 +83,32 @@ init_logging() {
 
 # Setup log rotation for easybackhaul logs
 setup_log_rotation() {
-    local current_log_dir="${LOG_DIR:-/tmp/easybackhaul_logs}" # Using /tmp for sandbox
+    # LOG_DIR is now /var/log/easybackhaul
+    local current_log_dir="$LOG_DIR"
     local logrotate_conf_target="/etc/logrotate.d/easybackhaul"
-    local logrotate_conf_sandbox="/tmp/easybackhaul_logrotate_conf_test.conf" # Write to /tmp for sandbox
+    # No longer using sandbox path for logrotate config, directly target /etc/logrotate.d
     local max_files_to_rotate="${LOG_MAX_FILES:-5}"
 
-    print_info "Logrotate: Simulating creation of $logrotate_conf_target by writing to $logrotate_conf_sandbox for testing."
-    # In a real deployment, this would be: cat > "$logrotate_conf_target" << EOF
-    # For sandbox/testing, we write to /tmp to avoid permission errors.
-    cat > "$logrotate_conf_sandbox" << EOF
+    # Determine user/group for created log files by logrotate.
+    # Default to root:adm if adm group exists, else root:root or root:nogroup.
+    local logrotate_create_user="root"
+    local logrotate_create_group="root"
+    if id -g adm >/dev/null 2>&1; then
+        logrotate_create_group="adm"
+    elif id -g nogroup >/dev/null 2>&1; then
+         logrotate_create_group="nogroup" # If backhaul binary logs as nobody:nogroup
+    fi
+
+    log_message "INFO" "Attempting to create/update logrotate configuration at $logrotate_conf_target."
+
+    # Check if we can write to /etc/logrotate.d (requires root)
+    if [[ ! -w "$(dirname "$logrotate_conf_target")" && "$(id -u)" -ne 0 ]]; then
+        print_warning "Cannot write to $(dirname "$logrotate_conf_target"). Logrotate setup skipped. Run as root or setup manually."
+        log_message "WARN" "Logrotate setup skipped due to insufficient permissions for $logrotate_conf_target."
+        return 1
+    fi
+
+    cat > "$logrotate_conf_target" << EOF
 ${current_log_dir}/*.log {
     daily
     missingok
@@ -67,16 +116,16 @@ ${current_log_dir}/*.log {
     compress
     delaycompress
     notifempty
-    create 0640 root adm
+    create 0640 ${logrotate_create_user} ${logrotate_create_group}
     postrotate
-        # No action needed for script logs generally
+        # If services write to these logs, they might need a signal to reopen log files.
+        # For simple file logs by backhaul binary, this is usually not needed unless it keeps file handle open.
+        # Example: systemctl kill -s HUP backhaul-*.service >/dev/null 2>&1 || true
     endscript
 }
 EOF
-    chmod 644 "$logrotate_conf_sandbox" # Target the sandbox path
-    log_message "DEBUG" "Logrotate (sandbox) configuration created/updated at $logrotate_conf_sandbox."
-    # In a real deployment, this would be: log_message "DEBUG" "Logrotate configuration created/updated at $logrotate_conf_target."
-    # This function is called by init_logging, so log_message should be available after init_logging completes.
+    chmod 0644 "$logrotate_conf_target"
+    log_message "DEBUG" "Logrotate configuration created/updated at $logrotate_conf_target."
 }
 
 # Unified logging function
@@ -84,8 +133,8 @@ log_message() {
     local level="$1"
     local message="$2"
 
-    local current_log_dir="${LOG_DIR:-/var/log/easybackhaul}"
-    local log_file_to_use="${LOG_FILE_OVERRIDE:-$current_log_dir/easybackhaul.log}"
+    # LOG_DIR is now reliably set by globals.sh and init_logging ensures it exists.
+    local log_file_to_use="${LOG_FILE_OVERRIDE:-$LOG_DIR/easybackhaul.log}"
     local current_log_level="${LOG_LEVEL:-INFO}"
     local current_log_format="${LOG_FORMAT:-text}"
     local timestamp
