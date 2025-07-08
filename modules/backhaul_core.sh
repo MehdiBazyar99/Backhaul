@@ -231,12 +231,12 @@ download_backhaul_binary_workflow() {
 
     local menu_options=(
         "1. Automatic GitHub Download (Recommended)"
-        "2. Install from Local File"
-        "3. Install from Alternative URL"
-        "4. Run Network Diagnostics"
-        "5. Skip Installation (Advanced)"
+        "2. Install from Local .tar.gz File"
+        "3. Use Existing Local Binary File" # New option
+        "4. Install from Alternative URL"
+        "5. Run Network Diagnostics"
+        "6. Skip Installation (Advanced)"
     )
-    # local current_exit_details=("0" "Cancel Installation") # No longer needed
     local user_choice menu_rc
 
     while true; do
@@ -250,18 +250,21 @@ download_backhaul_binary_workflow() {
 
         case "$menu_rc" in
             0) # Numeric choice
-                install_attempted=true
+                install_attempted=true # Assume an install attempt unless it's diagnostics/skip
                 case "$user_choice" in
                     "1") # GitHub Download
                         if _download_from_github "$system_os" "$detected_arch_suffix"; then install_succeeded=true; fi
                         ;;
-                    "2") # Local File
+                    "2") # Local .tar.gz File
                         if _download_from_local_file "$system_os" "$detected_arch_suffix"; then install_succeeded=true; fi
                         ;;
-                    "3") # Alternative URL
+                    "3") # Use Existing Local Binary File (New)
+                        if _use_existing_local_binary; then install_succeeded=true; fi
+                        ;;
+                    "4") # Alternative URL
                         if _download_from_alternative_source "$system_os" "$detected_arch_suffix"; then install_succeeded=true; fi
                         ;;
-                    "4") # Network Diagnostics
+                    "5") # Network Diagnostics
                         if type run_network_diagnostics_menu &>/dev/null; then
                             navigate_to_menu "run_network_diagnostics_menu"
                             return 0 # Let main loop call it; run_network_diagnostics_menu will return here
@@ -270,7 +273,7 @@ download_backhaul_binary_workflow() {
                         fi
                         install_attempted=false # Not an install attempt
                         ;;
-                    "5") # Skip
+                    "6") # Skip
                         print_warning "Skipping binary installation."
                         print_info "You can install the binary later using the main menu."
                         print_info "Ensure it's placed at: $BIN_PATH"
@@ -378,8 +381,15 @@ _download_from_local_file() {
     
     local local_file_path
     while true; do
-        read -e -r -p "Enter path to local .tar.gz file (or '0' to cancel): " local_file_path
-        if [[ "$local_file_path" == "0" ]]; then print_info "Cancelled."; return 1; fi
+        read -e -r -p "Enter path to local .tar.gz file (or type 'cancel' to return): " local_file_path
+        local lower_case_input
+        lower_case_input=$(echo "$local_file_path" | tr '[:upper:]' '[:lower:]')
+
+        if [[ "$lower_case_input" == "cancel" ]]; then
+            print_info "Local file installation cancelled."
+            return 1 # Indicate cancellation
+        fi
+
         if [[ -z "$local_file_path" ]]; then
             if prompt_yes_no "Path cannot be empty. Cancel local file installation?" "y"; then return 1; fi
             continue
@@ -388,9 +398,6 @@ _download_from_local_file() {
             if prompt_yes_no "File not found: '$local_file_path'. Try again?" "y"; then continue; else return 1; fi
         fi
         # Relaxed check for .tar.gz, install_downloaded_binary will verify archive integrity.
-        # if [[ "$local_file_path" != *.tar.gz ]]; then
-        #     if prompt_yes_no "File does not end with .tar.gz. Proceed anyway?" "n"; then break; else continue; fi
-        # fi
         break
     done
 
@@ -436,6 +443,71 @@ _download_from_alternative_source() {
     fi
 }
 
+_use_existing_local_binary() {
+    print_menu_header "secondary" "Use Existing Local Binary" \
+        "Point to an already extracted Backhaul binary file."
+
+    local local_binary_path
+    while true; do
+        read -e -r -p "Enter full path to your local Backhaul binary file (or type 'cancel' to return): " local_binary_path
+        local lower_case_input
+        lower_case_input=$(echo "$local_binary_path" | tr '[:upper:]' '[:lower:]')
+
+        if [[ "$lower_case_input" == "cancel" ]]; then
+            print_info "Using existing local binary cancelled."
+            return 1 # Indicate cancellation
+        fi
+
+        if [[ -z "$local_binary_path" ]]; then
+            if prompt_yes_no "Path cannot be empty. Cancel providing local binary?" "y"; then return 1; fi
+            continue
+        fi
+        if [[ ! -f "$local_binary_path" ]]; then
+            if prompt_yes_no "File not found: '$local_binary_path'. Try again?" "y"; then continue; else return 1; fi
+        fi
+        if [[ ! -x "$local_binary_path" ]]; then
+            print_warning "File '$local_binary_path' is not executable."
+            if prompt_yes_no "Attempt to make it executable (chmod +x)?" "y"; then
+                chmod +x "$local_binary_path"
+                if [[ ! -x "$local_binary_path" ]]; then
+                    handle_error "ERROR" "Failed to make '$local_binary_path' executable."
+                    if prompt_yes_no "Try a different path?" "y"; then continue; else return 1; fi
+                else
+                    print_success "File '$local_binary_path' is now executable."
+                fi
+            else
+                if prompt_yes_no "Try a different path?" "y"; then continue; else return 1; fi
+            fi
+        fi
+        break # Path is valid, file exists, and is executable
+    done
+
+    local target_bin_dir
+    target_bin_dir=$(dirname "$BIN_PATH")
+    ensure_dir "$target_bin_dir" "755" # Ensure target directory exists (e.g., /tmp/easybackhaul_bin)
+
+    log_message "INFO" "Copying user-provided binary '$local_binary_path' to '$BIN_PATH'"
+    if cp "$local_binary_path" "$BIN_PATH"; then
+        # Ensure the copied binary also has correct execute permissions
+        chmod +x "$BIN_PATH"
+        set_secure_file_permissions "$BIN_PATH" "755"
+
+        if verify_binary_installation; then # verify_binary_installation uses global BIN_PATH
+            handle_success "Backhaul binary copied from '$local_binary_path' and verified successfully!"
+            print_info "Summary: 📁 $BIN_PATH | 🔒 $(stat -c %a "$BIN_PATH") | 📊 $(du -h "$BIN_PATH" | cut -f1)"
+            return 0 # Success
+        else
+            handle_error "ERROR" "Binary copied to $BIN_PATH, but verification failed. It may be incompatible or corrupted."
+            # Optionally, offer to remove the copied file from BIN_PATH
+            secure_delete "$BIN_PATH" 2>/dev/null
+            return 1 # Verification failed
+        fi
+    else
+        handle_error "ERROR" "Failed to copy binary from '$local_binary_path' to '$BIN_PATH'."
+        return 1
+    fi
+}
+
 # Network diagnostics menu (moved from menu.sh potentially, or refined)
 run_network_diagnostics_menu() {
     _network_diag_help() {
@@ -447,8 +519,7 @@ run_network_diagnostics_menu() {
     }
 
     local diag_menu_options=("1. Run All Network Tests")
-    # local diag_exit_details=("0" "Back to Installation Options") # No longer needed
-    local user_choice diag_rc
+    local user_choice diag_rc # Renamed from menu_rc to avoid conflict with outer scope
 
     while true; do
         print_menu_header "secondary" "Network Connectivity Diagnostics"
