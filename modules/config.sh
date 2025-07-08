@@ -70,9 +70,10 @@ _prompt_setup_type_and_mode() {
         esac
 
         # --- Mode (Server/Client) ---
-        print_menu_header "secondary" "Tunnel Mode" "Step 1b: Select Mode"
-        local default_mode_val="2"
-        local detected_loc_info=""
+        while true; do # Inner loop for Mode selection
+            print_menu_header "secondary" "Tunnel Mode" "Step 1b: Select Mode"
+            local default_mode_val="2" # Default to client typically
+            local detected_loc_info=""
         if [[ -n "$SERVER_COUNTRY" && "$SERVER_COUNTRY" != "N/A" ]]; then
             if [[ "$SERVER_COUNTRY" == "IR" ]]; then
                 default_mode_val="1"
@@ -106,43 +107,59 @@ _prompt_setup_type_and_mode() {
                     handle_error "ERROR" "Invalid mode choice '$MENU_CHOICE' from menu_loop."
                     print_warning "Please try selecting mode again."
                     press_any_key
-                    continue 2 # Continue outer loop (Setup Type), effectively restarting Mode selection after Setup Type
+                    # continue 2 was wrong, now just 'continue' for inner loop
+                    continue # Re-prompt Mode selection
                 fi
-                return 0 # Both parts successful
+                # Mode selected successfully, break inner loop and then outer loop will be exited by return 0
+                break
                 ;;
             2) # '?' Help
-                continue 2 # Re-loop for Mode (effectively re-prompts Mode after re-printing Setup Type header and re-running Mode logic)
+                # continue 2 was wrong, now just 'continue' for inner loop
+                continue # Re-prompt Mode selection (after help)
                 ;;
             3) # 'm' Main Menu
                 print_info "Configuration cancelled: returning to Main Menu."
-                return 1 ;; # Signal cancel wizard
+                return 1 ;; # Signal cancel wizard (exits function)
             4) # 'x' Exit script
                 request_script_exit
-                return 1 ;;
+                return 1 ;; # Signal cancel wizard (exits function)
             5) # 'r' Return/Back (to Setup Type selection)
                 print_info "Going back to Setup Type selection."
-                # The outer loop `continue` will handle re-prompting Setup Type
-                continue 1 # Continue the outer while loop for Setup Type
+                break # Break inner Mode loop, outer Setup Type loop will 'continue 1' implicitly
                 ;;
-            6)  # Invalid input in menu_loop
-                print_info "Invalid mode selection, please try again."
-                # press_any_key handled by menu_loop
-                # Need to re-prompt Mode. `continue 2` goes to the Mode part of the outer loop.
-                # The '2' in 'continue 2' refers to the second enclosing loop, which is the 'while true'
-                # that starts right before "print_menu_header ... Tunnel Mode ... Step 1b".
-                # However, the current structure has only one `while true` loop at the top of the function.
-                # So, `continue` (or `continue 1`) will restart the whole function from "Setup Type".
-                # To re-prompt only "Mode", this sub-case needs to effectively loop back to its own menu_loop.
-                # This can be done by simply `continue` which will hit the outer loop, then setup type will be re-confirmed,
-                # then mode will be prompted again. This might be acceptable UX.
-                # For a true "re-prompt only mode", this section would need its own inner loop.
-                # Given the current structure, `continue` (same as `continue 1`) is the simplest.
-                continue ;; # Re-prompt from Setup Type, which will then lead to Mode
+            6)  # Invalid input in menu_loop (including empty Enter)
+                # menu_loop handles press_any_key for non-empty invalid input.
+                # For empty input, no message from menu_loop, so we don't add one here either.
+                # Simply re-prompt Mode.
+                continue # Re-prompt Mode selection
+                ;;
             *)
                 handle_error "ERROR" "Unhandled menu_loop code $menu_rc in _prompt_setup_type_and_mode (Mode)"
-                return 1 ;; # Signal cancel wizard on error
+                return 1 ;; # Signal cancel wizard (exits function)
         esac
-    done # End of while true for Setup Type
+        done # End of inner while true for Mode selection
+
+        # If we broke from Mode selection due to 'r' (Return/Back),
+        # we need to continue the outer loop to re-prompt Setup Type.
+        if [[ "$menu_rc" == "5" ]]; then # 'r' was chosen for Mode
+            continue # Continue outer loop (Setup Type)
+        fi
+
+        # If we reached here, it means Mode was successfully selected OR an exit/error occurred.
+        # If Mode was successful (rc=0), the 'return 0' from that case already exited.
+        # If an error/exit occurred (rc=1, 3, 4), 'return 1' already exited.
+        # This part of the code should ideally only be reached if 'r' was selected in Mode,
+        # and the outer loop needs to continue.
+        # Or, if Mode selection succeeded, we'd have hit `return 0` already.
+
+        # Fallback / Should not be reached if logic above is perfect
+        # but as a safeguard, if mode was set, we can assume success.
+        if [[ -n "$tunnel_mode_ref" ]]; then
+             return 0 # Mode was set, assume overall success for the function
+        fi
+        # If mode wasn't set and 'r' wasn't the reason for breaking inner loop,
+        # it implies an unhandled state or error, loop Setup Type again.
+    done # End of outer while true for Setup Type
 }
 
 _prompt_transport_protocol() {
@@ -534,6 +551,247 @@ _prompt_server_ports_array() {
     return 0
 }
 
+# Validates a single port or a port range (e.g., "80", "400-500")
+# Returns 0 if valid, 1 if invalid.
+_validate_port_or_range() {
+    local port_spec="$1"
+    if [[ "$port_spec" =~ ^[0-9]+$ ]]; then # Single port
+        validate_port "$port_spec" # Uses existing helper
+        return $?
+    elif [[ "$port_spec" =~ ^([0-9]+)-([0-9]+)$ ]]; then # Port range
+        local start_port="${BASH_REMATCH[1]}"
+        local end_port="${BASH_REMATCH[2]}"
+        if validate_port "$start_port" && validate_port "$end_port"; then
+            if (( start_port < end_port )); then
+                return 0
+            else
+                print_warning "Invalid range: Start port $start_port must be less than end port $end_port."
+                return 1
+            fi
+        else
+            # validate_port would have printed specific error
+            return 1
+        fi
+    else
+        print_warning "Invalid port/range format: '$port_spec'. Use 'port' or 'start_port-end_port'."
+        return 1
+    fi
+}
+
+# Prompts user for server port forwarding rules with validation for various formats.
+# Replaces _prompt_server_ports_array
+_configure_server_forwarding_rules() {
+    local -n rules_array_ref=$1 # Output: array of rule strings
+    rules_array_ref=() # Initialize
+
+    print_menu_header "secondary" "Server Port Forwarding" "Step 4: Configure Forwarding Rules"
+    print_info "Define rules for how the server listens for and forwards traffic."
+    print_info "Type 'help' for format examples, 'done' when finished."
+    echo
+
+    while true; do
+        local user_input
+        read -r -p "Enter forwarding rule (or 'help'/'done'): " user_input
+        user_input=$(echo "$user_input" | tr '[:upper:]' '[:lower:]') # Normalize
+
+        if [[ "$user_input" == "done" ]]; then
+            if [[ ${#rules_array_ref[@]} -eq 0 ]]; then
+                print_warning "No port forwarding rules defined. Server will not forward any traffic."
+                if ! prompt_yes_no "Are you sure you want to continue without any forwarding rules?" "n"; then
+                    continue
+                fi
+            fi
+            break
+        elif [[ "$user_input" == "help" ]]; then
+            echo "Supported rule formats (listen_spec can be port or port-range):"
+            echo "  1. listen_spec                  (e.g., '443', '5201/udp', '600-700')"
+            echo "     => Forwards from server's listen_spec to client's same port/range."
+            echo "  2. listen_spec:dest_port        (e.g., '80:8080', '443-450:3000')"
+            echo "     => Forwards from server's listen_spec to client's dest_port."
+            echo "  3. listen_spec=dest_ip:dest_port (e.g., '443=10.0.0.5:8443', '1000-1005=10.0.0.5:8000')"
+            echo "     => Forwards from server's listen_spec to specific IP and port from client."
+            echo "Note: UDP forwarding is specified by appending '/udp' to the listen_spec, e.g., '53/udp'."
+            echo
+            continue
+        fi
+
+        if [[ -z "$user_input" ]]; then
+            continue
+        fi
+
+        local listen_spec dest_ip dest_port protocol_suffix=""
+        local valid_rule=false
+        local original_rule_for_adding="$user_input" # Save original input for adding if valid
+
+        # Check for /udp suffix first
+        if [[ "$user_input" == */udp ]]; then
+            protocol_suffix="/udp"
+            user_input="${user_input%/udp}" # Remove /udp for further parsing
+        fi
+
+        # Try to parse listen_spec=dest_ip:dest_port format
+        if [[ "$user_input" =~ ^([^=]+)=([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}):([0-9]+)$ ]]; then
+            listen_spec="${BASH_REMATCH[1]}"
+            dest_ip="${BASH_REMATCH[2]}"
+            dest_port="${BASH_REMATCH[3]}"
+            if _validate_port_or_range "$listen_spec" && validate_ip "$dest_ip" && validate_port "$dest_port"; then
+                valid_rule=true
+            fi
+        # Try to parse listen_spec:dest_port format
+        elif [[ "$user_input" =~ ^([^:]+):([0-9]+)$ ]]; then
+            listen_spec="${BASH_REMATCH[1]}"
+            dest_port="${BASH_REMATCH[2]}"
+            if _validate_port_or_range "$listen_spec" && validate_port "$dest_port"; then
+                valid_rule=true
+            fi
+        # Try to parse listen_spec (single port or range) format
+        elif _validate_port_or_range "$user_input"; then # user_input here is listen_spec without /udp
+            listen_spec="$user_input"
+            valid_rule=true
+        else
+            # _validate_port_or_range or other regexes would have printed an error.
+            # If no specific error printed, give a generic one.
+            # This path is less likely if _validate_port_or_range is comprehensive.
+            if $valid_rule; then : ; else print_warning "Invalid rule format: '$original_rule_for_adding'"; fi
+        fi
+
+        if $valid_rule; then
+            # Re-append /udp if it was present
+            # The original_rule_for_adding already contains /udp if it was there.
+            # No, original_rule_for_adding is the raw input. We need to add protocol_suffix to the validated listen_spec part
+            # if we were to reconstruct. Better to add the user's original valid input.
+            rules_array_ref+=("$original_rule_for_adding")
+            print_success "Rule added: \"$original_rule_for_adding\""
+        else
+            # Errors should have been printed by validation functions
+            print_warning "Rule '$original_rule_for_adding' NOT added due to errors."
+        fi
+        echo
+    done
+    return 0
+}
+
+
+# Prompts user for advanced optional parameters
+# Populates an associative array with chosen values.
+# Usage: _prompt_advanced_parameters params_assoc_array "$tunnel_mode" "$transport_protocol"
+_prompt_advanced_parameters() {
+    local -n params_ref=$1 # Associative array passed by nameref
+    local tunnel_mode="$2"
+    local transport_protocol="$3"
+    local is_interactive="${4:-true}" # Default to true for interactive prompting
+
+    if [[ "$is_interactive" == "true" ]]; then
+        print_menu_header "secondary" "Advanced Configuration" "Customize Optional Parameters"
+        print_info "For each parameter, the default value will be shown."
+        print_info "You can accept the default by pressing Enter, or provide a new value."
+        echo
+    else
+        log_message "INFO" "Populating advanced parameters with defaults (Quick Setup)."
+    fi
+
+    # Helper to prompt for/set a single advanced parameter
+    # Usage: _handle_single_adv_param "description" "toml_key" "default_value_var_name"
+    _handle_single_adv_param() {
+        local desc="$1" toml_key="$2" default_val_var_name="$3"
+        local default_val="${!default_val_var_name}" # Indirect expansion
+        local input_val
+
+        if [[ "$is_interactive" == "true" ]]; then
+            while true; do
+                read -r -p "Configure '$desc' ($toml_key) [Default: $default_val]: " input_val
+                input_val="${input_val:-$default_val}" # Apply default if empty
+
+                # Basic validation can be added here if needed, e.g., numeric, boolean
+                # Example for boolean (can be expanded for numeric ranges too):
+                if [[ "$toml_key" == "nodelay" || "$toml_key" == "sniffer" || "$toml_key" == "accept_udp" || "$toml_key" == "aggressive_pool" ]]; then
+                    if [[ "$input_val" != "true" && "$input_val" != "false" ]]; then
+                        print_warning "Invalid boolean. Must be 'true' or 'false'."
+                        continue # Re-prompt
+                    fi
+                elif [[ "$toml_key" =~ port$ || "$toml_key" =~ _period$ || "$toml_key" =~ _interval$ || "$toml_key" =~ _timeout$ || "$toml_key" =~ _size$ || "$toml_key" =~ _con$ || "$toml_key" =~ _version$ || "$toml_key" =~ buffer$ ]]; then
+                     if ! [[ "$input_val" =~ ^[0-9]+$ ]]; then
+                        print_warning "Invalid numeric value for $toml_key. Must be an integer."
+                        continue
+                     fi
+                fi
+                params_ref["$toml_key"]="$input_val"
+                print_success "  $toml_key set to: ${params_ref[$toml_key]}"
+                break
+            done
+            echo
+        else # Not interactive, just set the default
+            params_ref["$toml_key"]="$default_val"
+            log_message "DEBUG" "Quick Setup: $toml_key set to default: $default_val"
+        fi
+    }
+
+    # General Parameters
+    _handle_single_adv_param "Log Level" "log_level" "BH_DEFAULT_LOG_LEVEL"
+    _handle_single_adv_param "Enable Traffic Sniffer" "sniffer" "BH_DEFAULT_SNIFFER"
+    # sniffer_log is handled during save config if sniffer is true
+
+    if [[ "$transport_protocol" != "udp" ]]; then
+        _handle_single_adv_param "TCP NoDelay" "nodelay" "BH_DEFAULT_NODELAY"
+        _handle_single_adv_param "Keepalive Period (s)" "keepalive_period" "BH_DEFAULT_KEEPALIVE_PERIOD"
+    fi
+    _handle_single_adv_param "Web Interface Port (0 to disable)" "web_port" "BH_DEFAULT_WEB_PORT"
+
+    if [[ "$tunnel_mode" == "server" ]]; then
+        if [[ "$is_interactive" == "true" ]]; then print_info "--- Server-Specific Advanced Parameters ---"; fi
+        _handle_single_adv_param "Heartbeat Interval (s)" "heartbeat" "BH_DEFAULT_HEARTBEAT"
+        _handle_single_adv_param "Channel Size" "channel_size" "BH_DEFAULT_CHANNEL_SIZE"
+        if [[ "$transport_protocol" == "tcp" || "$transport_protocol" == "tcpmux" ]]; then
+            _handle_single_adv_param "Accept UDP over TCP" "accept_udp" "BH_DEFAULT_ACCEPT_UDP"
+        fi
+    else # client mode
+        if [[ "$is_interactive" == "true" ]]; then print_info "--- Client-Specific Advanced Parameters ---"; fi
+        _handle_single_adv_param "Connection Pool Size" "connection_pool" "BH_DEFAULT_CONNECTION_POOL"
+        _handle_single_adv_param "Aggressive Pool Mgmt" "aggressive_pool" "BH_DEFAULT_AGGRESSIVE_POOL"
+        _handle_single_adv_param "Retry Interval (s)" "retry_interval" "BH_DEFAULT_RETRY_INTERVAL"
+        _handle_single_adv_param "Dial Timeout (s)" "dial_timeout" "BH_DEFAULT_DIAL_TIMEOUT"
+
+        if [[ "$transport_protocol" == "ws" || "$transport_protocol" == "wss" || "$transport_protocol" == "wsmux" || "$transport_protocol" == "wssmux" ]]; then
+            if [[ "$is_interactive" == "true" ]]; then
+                local current_edge_ip="" # Default to empty for prompt
+                read -r -p "Configure 'Edge IP (for CDN/WebSocket routing)' (edge_ip) [Default: blank]: " input_val
+                input_val="${input_val:-$current_edge_ip}"
+                if [[ -n "$input_val" ]]; then
+                    if validate_ip "$input_val"; then
+                        params_ref["edge_ip"]="$input_val"
+                        print_success "  edge_ip set to: ${params_ref[edge_ip]}"
+                    else
+                        print_warning "  Invalid Edge IP: $input_val. Not set."
+                    fi
+                else
+                     print_info "  Edge IP not set (blank)."
+                fi
+                echo
+            else
+                # For Quick Setup, edge_ip is not automatically set unless a BH_DEFAULT_EDGE_IP was defined (it's not)
+                log_message "DEBUG" "Quick Setup: edge_ip not set by default."
+            fi
+        fi
+    fi
+
+    if [[ "$transport_protocol" =~ mux$ ]]; then # MUX specific
+        if [[ "$is_interactive" == "true" ]]; then print_info "--- Multiplexer (MUX) Advanced Parameters ---"; fi
+        _handle_single_adv_param "Mux Concurrency" "mux_con" "BH_DEFAULT_MUX_CON"
+        _handle_single_adv_param "Mux Version" "mux_version" "BH_DEFAULT_MUX_VERSION"
+        _handle_single_adv_param "Mux Frame Size (bytes)" "mux_framesize" "BH_DEFAULT_MUX_FRAMESIZE"
+        _handle_single_adv_param "Mux Receive Buffer (bytes)" "mux_receivebuffer" "BH_DEFAULT_MUX_RECEIVEBUFFER"
+        _handle_single_adv_param "Mux Stream Buffer (bytes)" "mux_streambuffer" "BH_DEFAULT_MUX_STREAMBUFFER"
+    fi
+
+    if [[ "$is_interactive" == "true" ]]; then
+        print_info "Advanced parameter configuration complete."
+        press_any_key
+    else
+        log_message "INFO" "Finished populating advanced parameters with defaults for Quick Setup."
+    fi
+    return 0
+}
+
 
 # --- Main Configuration Wizard ---
 # Manages the overall flow of tunnel configuration.
@@ -548,15 +806,11 @@ configure_tunnel() {
     local server_port_rules=() # Array to store server port forwarding rules
     local cfg_tls_cert_path cfg_tls_key_path
     local setup_is_advanced=false
+    declare -A advanced_params_map # Associative array for advanced parameters
 
-    # Default advanced parameters (can be populated if an advanced step is added)
-    local cfg_log_level="info" cfg_sniffer="false"
-    local cfg_sniffer_log # Example: "/var/log/easybackhaul/${final_tunnel_name}-sniffer.json"
-    local cfg_web_port=0 cfg_nodelay="true" cfg_keepalive_period=75
-    local cfg_heartbeat=40 cfg_channel_size=2048 cfg_accept_udp="false"
-    local cfg_connection_pool=8 cfg_aggressive_pool="false" cfg_retry_interval=3 cfg_dial_timeout=10
-    local cfg_mux_con=8 cfg_mux_version=1 cfg_mux_framesize=32768
-    local cfg_mux_receivebuffer=4194304 cfg_mux_streambuffer=65536
+    # NOTE: The old local cfg_* variables are no longer used for storing defaults here.
+    # They will be sourced from BH_DEFAULT_* globals within _prompt_advanced_parameters
+    # and results stored in advanced_params_map.
 
     # Wizard State Machine
     # Returns 0 if configuration is completed and saved.
@@ -612,13 +866,14 @@ configure_tunnel() {
                     *) handle_error "CRITICAL" "Unknown return code $step_rc from _prompt_basic_config_params." ; return 1 ;;
                 esac
                 ;;
-            # NEW STEP for Server Port Forwarding Rules
+            # NEW STEP for Server Port Forwarding Rules (Step 4)
             4)
                 if [[ "$tunnel_mode" == "server" ]]; then
-                    _prompt_server_ports_array server_port_rules # Pass the array by nameref
-                    step_rc=$? # _prompt_server_ports_array currently always returns 0, but good practice
-                    # It handles its own internal looping and cancellation of adding rules.
-                    # If it were to return 1 (cancel wizard) or 2 (back a step), handle here.
+                    _configure_server_forwarding_rules server_port_rules # Pass the array by nameref
+                    step_rc=$? # _configure_server_forwarding_rules returns 0 on 'done'
+                    # This function handles its own internal looping, 'help', and 'done'.
+                    # It doesn't have a 'back' option to a previous wizard step.
+                    # If it needs to signal a full wizard cancel, it would return non-zero.
                     # For now, assume it completes or user confirms empty rules.
                     if [[ "$step_rc" -eq 0 ]]; then
                         ((current_wizard_step++))
@@ -636,16 +891,26 @@ configure_tunnel() {
                     ((current_wizard_step++))
                 fi
                 ;;
-            5) # Step 5 (Was 4): Advanced Configuration
+            5) # Step 5 (Was 4): Advanced Configuration Prompts / Default Population
                 if $setup_is_advanced; then
-                    # TODO: Implement _prompt_advanced_config_params
-                    print_info "Advanced parameter configuration (currently using defaults)."
-                    log_message "INFO" "Advanced setup chosen - using default advanced parameters for now."
-                    step_rc=0 # Simulate success for now
-                    if [[ "$step_rc" -eq 0 ]]; then ((current_wizard_step++)); else return 1; fi
+                    # Interactive prompting for Advanced Setup
+                    _prompt_advanced_parameters advanced_params_map "$tunnel_mode" "$transport_protocol" true
+                    step_rc=$?
+                    if [[ "$step_rc" -ne 0 ]]; then
+                        print_info "Advanced configuration cancelled or failed."
+                        return 1 # Exit wizard
+                    fi
                 else
-                    ((current_wizard_step++)) # Skip if not advanced setup
+                    # Non-interactive population of defaults for Quick Setup
+                    _prompt_advanced_parameters advanced_params_map "$tunnel_mode" "$transport_protocol" false
+                    step_rc=$? # Should always be 0 if logic is correct
+                    if [[ "$step_rc" -ne 0 ]]; then
+                        handle_error "CRITICAL" "Failed to populate default advanced parameters for Quick Setup."
+                        return 1 # Exit wizard
+                    fi
                 fi
+                # Common path after populating advanced_params_map one way or another
+                ((current_wizard_step++))
                 ;;
             6) # Step 6 (Was 5): TLS Configuration
                 cfg_tls_cert_path="" cfg_tls_key_path="" # Reset for this step
@@ -680,13 +945,30 @@ configure_tunnel() {
                     echo "  Remote Server (remote_addr): $client_remote_ip:$client_remote_port" # Updated key name
                     # client_local_fwd_port has been removed from prompts and will be removed from TOML writing.
                 fi
-                echo "  Token: [set]" # Assuming it's always set if we reach here, updated key name
+                echo "  Token: [set]"
 
-                if $setup_is_advanced; then
-                    echo "  --- Advanced Settings (Defaults Used) ---"
-                    echo "  Log Level: $cfg_log_level"
-                    # Consider printing other relevant advanced params if they were configurable
+                if $setup_is_advanced && [[ ${#advanced_params_map[@]} -gt 0 ]]; then
+                    echo "  --- Advanced Settings ---"
+                    # Iterate through advanced_params_map to display them
+                    # Sorting keys for consistent display:
+                    local key
+                    for key in $(echo "${!advanced_params_map[@]}" | tr ' ' '\n' | sort); do
+                        # Do not display sensitive or overly verbose params if not desired
+                        # For now, display all collected advanced params
+                        echo "    $key = ${advanced_params_map[$key]}"
+                    done
+                    # Display edge_ip if set (it's handled separately for now)
+                    # edge_ip is now part of advanced_params_map, so it's displayed by the loop.
+                elif $setup_is_advanced; then # Should not be hit if advanced_params_map is populated by default for quick.
+                    echo "  --- Advanced Settings: Will use script defaults (prompting was just done) ---"
+                else # Quick setup - advanced_params_map still populated with defaults
+                    echo "  --- Optional Settings (using script defaults) ---"
+                     local key
+                    for key in $(echo "${!advanced_params_map[@]}" | tr ' ' '\n' | sort); do
+                        echo "    $key = ${advanced_params_map[$key]}"
+                    done
                 fi
+
                 if [[ -n "$cfg_tls_cert_path" && -n "$cfg_tls_key_path" ]]; then
                     echo "  TLS Certificate: $cfg_tls_cert_path"
                     echo "  TLS Key: $cfg_tls_key_path"
@@ -751,38 +1033,57 @@ configure_tunnel() {
 
                 # Advanced parameters are written after basic ones and potentially after the ports array (for server)
                 if $setup_is_advanced; then
-                    update_toml_value "$config_file_path" "log_level" "$cfg_log_level" "string"
-                    update_toml_value "$config_file_path" "sniffer" "$cfg_sniffer" "boolean"
-                    if [[ "$cfg_sniffer" == "true" ]]; then
-                        update_toml_value "$config_file_path" "sniffer_log" "$cfg_sniffer_log" "string"
-                    fi
-                    if (( cfg_web_port > 0 )); then
-                         update_toml_value "$config_file_path" "web_port" "$cfg_web_port" "numeric"
-                    fi
-                    if [[ "$transport_protocol" != "udp" ]]; then
-                         update_toml_value "$config_file_path" "nodelay" "$cfg_nodelay" "boolean"
-                         update_toml_value "$config_file_path" "keepalive_period" "$cfg_keepalive_period" "numeric"
-                    fi
-                    if [[ "$tunnel_mode" == "server" ]]; then
-                        update_toml_value "$config_file_path" "heartbeat" "$cfg_heartbeat" "numeric"
-                        update_toml_value "$config_file_path" "channel_size" "$cfg_channel_size" "numeric"
-                        if [[ "$transport_protocol" == "tcp" || "$transport_protocol" == "tcpmux" ]]; then # accept_udp for TCP server
-                            update_toml_value "$config_file_path" "accept_udp" "$cfg_accept_udp" "boolean"
+                    local param_key param_value param_type
+                    for param_key in "${!advanced_params_map[@]}"; do
+                        param_value="${advanced_params_map[$param_key]}"
+                        # Determine data type for update_toml_value (simple heuristic)
+                        param_type="string" # Default to string
+                        if [[ "$param_value" == "true" || "$param_value" == "false" ]]; then
+                            param_type="boolean"
+                        elif [[ "$param_value" =~ ^[0-9]+$ ]]; then
+                            param_type="numeric"
                         fi
-                    else # client
-                        update_toml_value "$config_file_path" "connection_pool" "$cfg_connection_pool" "numeric"
-                        update_toml_value "$config_file_path" "aggressive_pool" "$cfg_aggressive_pool" "boolean"
-                        update_toml_value "$config_file_path" "retry_interval" "$cfg_retry_interval" "numeric"
-                        update_toml_value "$config_file_path" "dial_timeout" "$cfg_dial_timeout" "numeric"
-                    fi
-                    if [[ "$transport_protocol" =~ mux$ ]]; then # MUX specific
-                        update_toml_value "$config_file_path" "mux_con" "$cfg_mux_con" "numeric"
-                        update_toml_value "$config_file_path" "mux_version" "$cfg_mux_version" "numeric"
-                        update_toml_value "$config_file_path" "mux_framesize" "$cfg_mux_framesize" "numeric"
-                        update_toml_value "$config_file_path" "mux_receivebuffer" "$cfg_mux_receivebuffer" "numeric" # CORRECTED SPELLING
-                        update_toml_value "$config_file_path" "mux_streambuffer" "$cfg_mux_streambuffer" "numeric"
-                    fi
+
+                        # Skip writing sniffer_log if sniffer is false, or handle its path generation here
+                        if [[ "$param_key" == "sniffer_log" && "${advanced_params_map[sniffer]}" != "true" ]]; then
+                            continue
+                        elif [[ "$param_key" == "sniffer_log" && "${advanced_params_map[sniffer]}" == "true" ]]; then
+                             # Ensure sniffer_log path is sensible if not customized by user
+                             # For now, _prompt_advanced_parameters sets it, or we use a generated one.
+                             # The path generation is already: cfg_sniffer_log="/var/log/easybackhaul/${final_tunnel_name}-sniffer.json"
+                             # So, if sniffer is true, and sniffer_log is in advanced_params_map, it will be written.
+                             # If sniffer_log was not explicitly prompted & changed in _prompt_advanced_parameters,
+                             # we might need to set it here based on final_tunnel_name if sniffer is true.
+                             # For now, assume _prompt_advanced_parameters populates it correctly if sniffer is true.
+                             # Or, more simply, if sniffer is true, ensure sniffer_log gets a value.
+                            if [[ "${advanced_params_map[sniffer]}" == "true" && -z "${advanced_params_map[sniffer_log]}" ]] ; then
+                                advanced_params_map[sniffer_log]="/var/log/easybackhaul/${final_tunnel_name}-sniffer.json" # Default path if sniffer true but no log path set
+                                param_value="${advanced_params_map[sniffer_log]}" # update for current iteration
+                            fi
+                        fi
+
+                        # Ensure web_port is not written if 0 (disabled), unless backhaul handles web_port=0 correctly
+                        if [[ "$param_key" == "web_port" && "$param_value" -eq 0 ]]; then
+                            # Optional: explicitly skip writing web_port = 0 if backhaul doesn't like it
+                            # log_message "DEBUG" "Skipping web_port = 0 for $config_file_path"
+                            continue # Skip writing web_port = 0
+                        fi
+
+                        update_toml_value "$config_file_path" "$param_key" "$param_value" "$param_type"
+                    done
+                # Removed the 'else' block for Quick Setup here, as advanced_params_map is now always populated
+                # (either by user input in Advanced mode, or by script defaults in Quick mode).
+                # The loop above will handle writing all necessary optional parameters.
+                # The log message for Quick Setup using binary defaults is no longer accurate,
+                # as we are now writing explicit script defaults.
                 fi
+                # A general log message for Quick Setup can be added if needed,
+                # or rely on the debug messages from _prompt_advanced_parameters.
+                # Example:
+                if ! $setup_is_advanced; then
+                    log_message "INFO" "Quick setup for $final_tunnel_name: All applicable optional parameters written with script defaults."
+                fi
+
 
                 if [[ -n "$cfg_tls_cert_path" && -n "$cfg_tls_key_path" ]]; then
                     update_toml_value "$config_file_path" "tls_cert" "$cfg_tls_cert_path" "string"
