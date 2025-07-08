@@ -118,13 +118,15 @@ _perform_full_uninstall() {
     print_warning "WARNING: This will PERMANENTLY REMOVE EasyBackhaul and ALL related data!"
     echo "This includes:"
     echo "  - The Backhaul binary ($BIN_PATH)"
-    echo "  - All tunnel configurations ($CONFIG_DIR)"
+    echo "  - All tunnel configurations (from $CONFIG_DIR, likely /etc/easybackhaul/configs)"
+    echo "  - The main configuration directory structure (e.g., /etc/easybackhaul)"
     echo "  - All systemd services (e.g., backhaul-*.service in $SERVICE_DIR)"
     echo "  - All UFW rules managed by EasyBackhaul (if UFW is used)"
     echo "  - All EasyBackhaul-managed cron jobs."
-    echo "  - Temporary files and watcher scripts (typically in $EASYBACKHAUL_TMP_DIR or /tmp)"
+    echo "  - Temporary files and watcher scripts (typically in ${EASYBACKHAUL_TMP_DIR:-/tmp})"
     echo "  - Backup files ($BACKUP_DIR)"
-    echo "  - Potentially log files ($LOG_DIR) - you will be asked about this."
+    echo "  - Log files and directory (from $LOG_DIR, likely /var/log/easybackhaul) - you will be asked about this."
+    echo "  - Logrotate configuration (/etc/logrotate.d/easybackhaul)"
     
     if ! prompt_yes_no "Are you absolutely sure you want to proceed with uninstallation?" "n"; then
         print_info "Uninstallation cancelled."; press_any_key; return 1; fi
@@ -199,14 +201,30 @@ _perform_full_uninstall() {
     
     print_info "Removing files and directories..."
     if [[ -n "$BIN_PATH" && -f "$BIN_PATH" ]]; then secure_delete "$BIN_PATH"; fi
-    if [[ -n "$CONFIG_DIR" && -d "$CONFIG_DIR" ]]; then secure_delete "$CONFIG_DIR"; fi
+    # CONFIG_DIR is now /etc/easybackhaul/configs. Remove its parent /etc/easybackhaul as well.
+    if [[ -n "$CONFIG_DIR" && -d "$(dirname "$CONFIG_DIR")" ]]; then # Check parent dir
+        secure_delete "$(dirname "$CONFIG_DIR")" # This removes /etc/easybackhaul (and configs within)
+        log_message "INFO" "Removed main config directory structure: $(dirname "$CONFIG_DIR")"
+    elif [[ -n "$CONFIG_DIR" && -d "$CONFIG_DIR" ]]; then # Fallback if parent wasn't as expected
+         secure_delete "$CONFIG_DIR"
+         log_message "INFO" "Removed config directory: $CONFIG_DIR"
+    fi
+
     if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then secure_delete "$BACKUP_DIR"; fi
     if [[ -n "$EASYBACKHAUL_TMP_DIR" && -d "$EASYBACKHAUL_TMP_DIR" && "$EASYBACKHAUL_TMP_DIR" != "/tmp" && "$EASYBACKHAUL_TMP_DIR" != "/tmp/" ]]; then
         secure_delete "$EASYBACKHAUL_TMP_DIR"
     fi
 
+    # Remove logrotate configuration
+    local logrotate_conf_file="/etc/logrotate.d/easybackhaul"
+    if [[ -f "$logrotate_conf_file" ]]; then
+        secure_delete "$logrotate_conf_file"
+        log_message "INFO" "Removed logrotate configuration file: $logrotate_conf_file"
+    fi
+
+    # LOG_DIR is now /var/log/easybackhaul
     if [[ -n "$LOG_DIR" && -d "$LOG_DIR" ]]; then
-        if prompt_yes_no "Also delete the main log directory $LOG_DIR and its contents?" "n"; then
+        if prompt_yes_no "Also delete the main log directory ($LOG_DIR) and all its contents?" "n"; then
             secure_delete "$LOG_DIR"
             handle_success "Log directory $LOG_DIR deleted."
         else
@@ -215,7 +233,7 @@ _perform_full_uninstall() {
     fi
     
     handle_success "EasyBackhaul uninstallation completed."
-    print_info "Some manual cleanup of system logs (journalctl) might be desired."
+    print_info "Some manual cleanup of system logs (journalctl) might be desired if services were problematic."
     print_info "Exiting now."
     exit 0
 }

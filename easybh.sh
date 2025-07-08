@@ -23,42 +23,89 @@ echo 'DEBUG: SCRIPT EXECUTION STARTED' >&2
 
 # --- Global Variables ---
 # All global variables use UPPER_SNAKE_CASE for consistency
-# Using /tmp for paths to ensure writability in restricted environments/sandboxes
-CONFIG_DIR="/tmp/easybackhaul_config"
-BACKUP_DIR="/tmp/easybackhaul_backups"
-BIN_PATH="/tmp/easybackhaul_bin/easybackhaul_binary" # Renamed to avoid conflict
-SERVICE_DIR="/etc/systemd/system" # Standard systemd directory
-LOG_DIR="/tmp/easybackhaul_logs"
+# Using /etc for persistent configurations and /var/log for logs.
+# /tmp is still used for transient items like backups or temporary binary location.
+CONFIG_DIR="/etc/easybackhaul/configs"
+BACKUP_DIR="/tmp/easybackhaul_backups" # Backups can remain in /tmp or move to /var/backups/easybackhaul
+BIN_PATH="/tmp/easybackhaul_bin/easybackhaul_binary"
+SERVICE_DIR="/etc/systemd/system"
+LOG_DIR="/var/log/easybackhaul" # Standard log location
 
-CRON_COMMENT_TAG="EasyBackhaul" # Standardized comment tag
+CRON_COMMENT_TAG="EasyBackhaul"
 
 # Generate a random secret for restart watcher if not already set
 # This secret is a global default; per-tunnel secrets can also be used.
-GLOBAL_WATCHER_SECRET_FILE="${CONFIG_DIR}/watcher_master.secret"
+GLOBAL_WATCHER_SECRET_FILE="${CONFIG_DIR}/watcher_master.secret" # Path updated
 
 # Helper function scoped to this file for early CONFIG_DIR creation if needed.
 # This is because helpers.sh (with ensure_dir) isn't sourced yet.
 _globals_ensure_config_dir_for_secret() {
     if [[ ! -d "$CONFIG_DIR" ]]; then
+        # Create parent directory /etc/easybackhaul first, then the configs subdir
+        # This ensures correct ownership and permissions are set progressively.
+        local parent_dir
+        parent_dir=$(dirname "$CONFIG_DIR") # /etc/easybackhaul
+
+        if [[ ! -d "$parent_dir" ]]; then
+            mkdir -p "$parent_dir"
+            if [[ $? -ne 0 ]]; then
+                echo "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create parent directory: $parent_dir. Please check permissions." >&2
+                return 1
+            fi
+            # Set ownership to root:nogroup and permissions to 0750 for the parent directory
+            # This allows members of 'nogroup' (like 'nobody') to traverse into /etc/easybackhaul
+            chown root:nogroup "$parent_dir"
+            chmod 0750 "$parent_dir"
+        fi
+
         mkdir -p "$CONFIG_DIR"
         if [[ $? -ne 0 ]]; then
             echo "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create CONFIG_DIR: $CONFIG_DIR. Please check permissions." >&2
             return 1
-        else
-            chmod 755 "$CONFIG_DIR" # Allow traversal for other users (e.g., service user)
-            # Owner is still root, which is fine.
-            return 0
+        fi
+        # Set ownership to root:nogroup and permissions to 0770 for the configs directory
+        # This allows 'nogroup' to read/write/execute (list files) in this directory.
+        # Individual config files will be 'nobody:nogroup' and '640'.
+        chown root:nogroup "$CONFIG_DIR"
+        chmod 0770 "$CONFIG_DIR"
+        return 0
+    fi
+
+    # If directory already exists, ensure its permissions and ownership are correct.
+    # This handles cases where the script might have run before with different settings.
+    if [[ -d "$CONFIG_DIR" ]]; then
+        # Ensure parent directory /etc/easybackhaul also has correct perms/owner
+        local existing_parent_dir
+        existing_parent_dir=$(dirname "$CONFIG_DIR")
+        if [[ -d "$existing_parent_dir" ]]; then
+            if [[ $(stat -c "%U:%G" "$existing_parent_dir") != "root:nogroup" ]]; then
+                chown root:nogroup "$existing_parent_dir" || echo "WARNING: Failed to chown $existing_parent_dir to root:nogroup" >&2
+            fi
+            if [[ $(stat -c "%a" "$existing_parent_dir") != "750" ]]; then
+                 # Check if current perms are more open, e.g. 755, if so, leave them. Otherwise set to 750.
+                current_perms_parent=$(stat -c "%a" "$existing_parent_dir")
+                if [[ "$current_perms_parent" -lt "750" && "$current_perms_parent" != "750" ]]; then # if less than 0750, set it
+                    chmod 0750 "$existing_parent_dir" || echo "WARNING: Failed to chmod $existing_parent_dir to 0750" >&2
+                fi
+            fi
+        fi
+
+        # Check and set CONFIG_DIR permissions
+        if [[ $(stat -c "%U:%G" "$CONFIG_DIR") != "root:nogroup" ]]; then
+            chown root:nogroup "$CONFIG_DIR" || {
+                echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to chown existing CONFIG_DIR $CONFIG_DIR to root:nogroup." >&2
+            }
+        fi
+        # Current permissions for CONFIG_DIR should be 0770.
+        # If they are more permissive (e.g., 775, 777), that's okay. If less, set to 0770.
+        current_perms_config_dir=$(stat -c "%a" "$CONFIG_DIR")
+        if [[ "$current_perms_config_dir" -lt "770" && "$current_perms_config_dir" != "770" ]]; then # if less than 0770, set it
+            chmod 0770 "$CONFIG_DIR" || {
+                echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to ensure 0770 permissions on existing CONFIG_DIR: $CONFIG_DIR." >&2
+            }
         fi
     fi
-    # If directory already exists, ensure its permissions are also 755
-    # This handles cases where the script might have run before with 700
-    if [[ -d "$CONFIG_DIR" ]]; then
-        chmod 755 "$CONFIG_DIR" || {
-            echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to ensure 755 permissions on existing CONFIG_DIR: $CONFIG_DIR." >&2
-            # Not returning error here, as dir exists, but logging a warning.
-        }
-    fi
-    return 0 # Dir already exists
+    return 0 # Dir already exists and permissions checked/set
 }
 
 RESTART_WATCHER_SECRET_VALUE="" # Temporary variable to hold the secret value
@@ -200,23 +247,55 @@ press_any_key() { read -n 1 -s -r -p "Press any key to continue..."; echo; }
 
 # Initialize the logging system (directories, main log file)
 init_logging() {
-    # Ensure LOG_DIR is set, fallback to a default if necessary (should be defined in globals.sh)
-    local current_log_dir="${LOG_DIR:-/var/log/easybackhaul}"
-    mkdir -p "$current_log_dir"
-    chmod 750 "$current_log_dir"
-    
-    local main_log_file="$current_log_dir/easybackhaul.log"
-    touch "$main_log_file"
-    chmod 640 "$main_log_file"
+    # LOG_DIR is now defined in globals.sh as /var/log/easybackhaul
+    # Ensure LOG_DIR exists and has appropriate permissions.
+    # The user running easybh.sh (likely root) will create this.
+    # Services running as 'nobody' will write to files here, so group writability might be needed
+    # or files need specific 'nobody:nogroup' ownership.
+    # For simplicity, we'll make LOG_DIR root:adm 0775 or root:nogroup 0775,
+    # and log files root:adm 0664 or nobody:nogroup 0664.
+    # 'adm' group is standard for log access. 'nogroup' if 'nobody' needs to write directly.
 
-    # Specific log files if they are different from main_log_file
+    if [[ -z "$LOG_DIR" ]]; then
+        handle_critical_error "LOG_DIR global variable is not set. Logging cannot be initialized."
+        return 1
+    fi
+
+    if [[ ! -d "$LOG_DIR" ]]; then
+        mkdir -p "$LOG_DIR" || { handle_critical_error "Failed to create LOG_DIR: $LOG_DIR"; return 1; }
+    fi
+
+    # Set ownership and permissions for LOG_DIR
+    # Try chown to root:adm, then root:nogroup as fallback, then root:root.
+    # Permissions 0775 allow owner/group to write, others to read/execute.
+    if id -g adm >/dev/null 2>&1; then
+        chown root:adm "$LOG_DIR" && chmod 0775 "$LOG_DIR"
+    elif id -g nogroup >/dev/null 2>&1; then
+        chown root:nogroup "$LOG_DIR" && chmod 0775 "$LOG_DIR"
+    else
+        chown root:root "$LOG_DIR" && chmod 0755 "$LOG_DIR" # Fallback to root:root 0755
+    fi
+    
+    # Main log file
+    local main_log_file="$LOG_DIR/easybackhaul.log"
+    touch "$main_log_file" || { handle_error "WARN" "Failed to touch main log file: $main_log_file"; }
+    # Set permissions for the main log file. If services write here as 'nobody',
+    # they'll need write permission. root:adm 664 or nobody:nogroup 664.
+    if id -g adm >/dev/null 2>&1; then
+        chown root:adm "$main_log_file" && chmod 0664 "$main_log_file"
+    elif id -g nogroup >/dev/null 2>&1; then
+        chown nobody:nogroup "$main_log_file" && chmod 0664 "$main_log_file" # Allow easybackhaul_binary to write if it runs as nobody
+    else
+        chown root:root "$main_log_file" && chmod 0640 "$main_log_file"
+    fi
+
+
+    # Specific log files (health, performance) - these are typically written by easybh.sh itself (root)
     if [[ -n "${HEALTH_LOG_FILE:-}" && "$HEALTH_LOG_FILE" != "$main_log_file" ]]; then
-        touch "$HEALTH_LOG_FILE"
-        chmod 640 "$HEALTH_LOG_FILE"
+        touch "$HEALTH_LOG_FILE" && chmod 0640 "$HEALTH_LOG_FILE" && chown root:root "$HEALTH_LOG_FILE" 2>/dev/null
     fi
     if [[ -n "${PERFORMANCE_LOG_FILE:-}" && "$PERFORMANCE_LOG_FILE" != "$main_log_file" ]]; then
-        touch "$PERFORMANCE_LOG_FILE"
-        chmod 640 "$PERFORMANCE_LOG_FILE"
+        touch "$PERFORMANCE_LOG_FILE" && chmod 0640 "$PERFORMANCE_LOG_FILE" && chown root:root "$PERFORMANCE_LOG_FILE" 2>/dev/null
     fi
     
     if command -v logrotate &>/dev/null; then
@@ -226,15 +305,32 @@ init_logging() {
 
 # Setup log rotation for easybackhaul logs
 setup_log_rotation() {
-    local current_log_dir="${LOG_DIR:-/tmp/easybackhaul_logs}" # Using /tmp for sandbox
+    # LOG_DIR is now /var/log/easybackhaul
+    local current_log_dir="$LOG_DIR"
     local logrotate_conf_target="/etc/logrotate.d/easybackhaul"
-    local logrotate_conf_sandbox="/tmp/easybackhaul_logrotate_conf_test.conf" # Write to /tmp for sandbox
+    # No longer using sandbox path for logrotate config, directly target /etc/logrotate.d
     local max_files_to_rotate="${LOG_MAX_FILES:-5}"
 
-    print_info "Logrotate: Simulating creation of $logrotate_conf_target by writing to $logrotate_conf_sandbox for testing."
-    # In a real deployment, this would be: cat > "$logrotate_conf_target" << EOF
-    # For sandbox/testing, we write to /tmp to avoid permission errors.
-    cat > "$logrotate_conf_sandbox" << EOF
+    # Determine user/group for created log files by logrotate.
+    # Default to root:adm if adm group exists, else root:root or root:nogroup.
+    local logrotate_create_user="root"
+    local logrotate_create_group="root"
+    if id -g adm >/dev/null 2>&1; then
+        logrotate_create_group="adm"
+    elif id -g nogroup >/dev/null 2>&1; then
+         logrotate_create_group="nogroup" # If backhaul binary logs as nobody:nogroup
+    fi
+
+    log_message "INFO" "Attempting to create/update logrotate configuration at $logrotate_conf_target."
+
+    # Check if we can write to /etc/logrotate.d (requires root)
+    if [[ ! -w "$(dirname "$logrotate_conf_target")" && "$(id -u)" -ne 0 ]]; then
+        print_warning "Cannot write to $(dirname "$logrotate_conf_target"). Logrotate setup skipped. Run as root or setup manually."
+        log_message "WARN" "Logrotate setup skipped due to insufficient permissions for $logrotate_conf_target."
+        return 1
+    fi
+
+    cat > "$logrotate_conf_target" << EOF
 ${current_log_dir}/*.log {
     daily
     missingok
@@ -242,16 +338,16 @@ ${current_log_dir}/*.log {
     compress
     delaycompress
     notifempty
-    create 0640 root adm
+    create 0640 ${logrotate_create_user} ${logrotate_create_group}
     postrotate
-        # No action needed for script logs generally
+        # If services write to these logs, they might need a signal to reopen log files.
+        # For simple file logs by backhaul binary, this is usually not needed unless it keeps file handle open.
+        # Example: systemctl kill -s HUP backhaul-*.service >/dev/null 2>&1 || true
     endscript
 }
 EOF
-    chmod 644 "$logrotate_conf_sandbox" # Target the sandbox path
-    log_message "DEBUG" "Logrotate (sandbox) configuration created/updated at $logrotate_conf_sandbox."
-    # In a real deployment, this would be: log_message "DEBUG" "Logrotate configuration created/updated at $logrotate_conf_target."
-    # This function is called by init_logging, so log_message should be available after init_logging completes.
+    chmod 0644 "$logrotate_conf_target"
+    log_message "DEBUG" "Logrotate configuration created/updated at $logrotate_conf_target."
 }
 
 # Unified logging function
@@ -259,8 +355,8 @@ log_message() {
     local level="$1"
     local message="$2"
 
-    local current_log_dir="${LOG_DIR:-/var/log/easybackhaul}"
-    local log_file_to_use="${LOG_FILE_OVERRIDE:-$current_log_dir/easybackhaul.log}"
+    # LOG_DIR is now reliably set by globals.sh and init_logging ensures it exists.
+    local log_file_to_use="${LOG_FILE_OVERRIDE:-$LOG_DIR/easybackhaul.log}"
     local current_log_level="${LOG_LEVEL:-INFO}"
     local current_log_format="${LOG_FORMAT:-text}"
     local timestamp
@@ -4225,6 +4321,13 @@ create_systemd_service() {
     local service_name="backhaul-${name_suffix}.service"
     local service_file_path="${SERVICE_DIR}/${service_name}"
 
+    # Ensure CONFIG_DIR and LOG_DIR are available (should be from globals.sh)
+    # These are now needed for ReadWritePaths
+    if [[ -z "$CONFIG_DIR" || -z "$LOG_DIR" ]]; then
+        handle_error "CRITICAL" "CONFIG_DIR or LOG_DIR not defined. Cannot create systemd service with proper paths."
+        return 1
+    fi
+
     if ! command -v systemctl &>/dev/null; then
         handle_error "WARNING" "Systemd (systemctl) not found on this system."
         print_info "A persistent service cannot be automatically created."
@@ -4241,30 +4344,47 @@ create_systemd_service() {
     log_message "INFO" "Creating systemd service file: $service_file_path for tunnel $name_suffix"
 
     # Determine User and Group for the service
-    # If not provided, and script is run as root, use 'nobody' or a dedicated user if exists.
-    # If script is not root, it will likely fail to write to /etc/systemd/system anyway.
     local effective_user="$service_user"
     local effective_group="$service_group"
 
     if [[ "$(id -u)" -eq 0 ]]; then # Running as root
         if [[ -z "$effective_user" ]]; then effective_user="nobody"; fi
-        if [[ -z "$effective_group" ]]; then effective_group="nogroup"; fi # or 'nobody' depending on distro
-        # Check if user 'nobody' exists, else use current user if not root (which it is)
+        if [[ -z "$effective_group" ]]; then effective_group="nogroup"; fi
+
         if ! id -u "$effective_user" >/dev/null 2>&1; then
             log_message "WARN" "User '$effective_user' not found, service will run as root. Consider creating a dedicated user."
             effective_user="root"
+            effective_group="root"
+        elif ! getent group "$effective_group" >/dev/null 2>&1; then
+             log_message "WARN" "Group '$effective_group' not found, service will run as root. Consider creating a dedicated group or using an existing one."
+            effective_user="root" # Revert user to root too if group is invalid for nobody
             effective_group="root"
         fi
     elif [[ -n "$effective_user" ]]; then
          log_message "WARN" "Running as non-root. Service User/Group might not be applied effectively by systemd unless root manages it."
     fi
 
+    # Ensure the service configuration file has correct ownership and permissions
+    # The CONFIG_DIR (/etc/easybackhaul/configs) itself should be root:nogroup 0770 (set by globals.sh)
+    # This allows 'nobody' (if in 'nogroup') to read files within it.
+    if [[ -f "$config_path" ]] && [[ "$(id -u)" -eq 0 ]]; then
+        log_message "DEBUG" "Setting ownership of $config_path to $effective_user:$effective_group"
+        chown "${effective_user}:${effective_group}" "$config_path" || handle_error "WARN" "Failed to chown $config_path to $effective_user:$effective_group"
 
-    # Ensure the directory for service files exists
-    ensure_dir "$(dirname "$service_file_path")" "755" # Systemd service dir usually root owned
+        log_message "DEBUG" "Setting permissions of $config_path to 0640"
+        chmod 0640 "$config_path" || handle_error "WARN" "Failed to chmod $config_path to 0640"
+    elif [[ ! -f "$config_path" ]]; then
+        handle_error "ERROR" "Configuration file $config_path not found. Cannot set permissions or create service."
+        return 1
+    fi
+
+    # Ensure the directory for systemd service files exists
+    ensure_dir "$(dirname "$service_file_path")" "0755" # Systemd service dir usually root owned
 
     # Create the service file content
-    # Added User and Group. Increased LimitNOFILE. Added some hardening.
+    # Added User and Group. Increased LimitNOFILE.
+    # Added ReadWritePaths for the new CONFIG_DIR and LOG_DIR.
+    # Set PrivateTmp=false explicitly.
     cat > "$service_file_path" <<EOL
 [Unit]
 Description=Backhaul Tunnel Service (${name_suffix})
@@ -4283,43 +4403,63 @@ $( [[ -n "$effective_user" ]] && echo "User=${effective_user}" )
 $( [[ -n "$effective_group" ]] && echo "Group=${effective_group}" )
 
 # Security Hardening Options (optional, but good practice)
-# ProtectSystem=full
-# ProtectHome=true
-# PrivateTmp=true
-# NoNewPrivileges=true
-# ReadWritePaths=${CONFIG_DIR} ${LOG_DIR} # Paths Backhaul needs to write to, adjust as needed
-# CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW # Example, adjust to minimum required
+# Security Hardening Options
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=false # Set to false as we are managing config access explicitly.
+NoNewPrivileges=true
+ReadWritePaths=${CONFIG_DIR} # Allow reading from the config directory
+ReadWritePaths=${LOG_DIR}    # Allow writing to the log directory
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW # Adjust to minimum required
 
 [Install]
 WantedBy=multi-user.target
 EOL
 
     if ! run_with_spinner "Reloading systemd daemon..." systemctl daemon-reload; then
-        handle_error "ERROR" "Failed to reload systemd daemon. Service file might be invalid: $service_file_path"
+        handle_error "ERROR" "Failed to reload systemd daemon. Service file might be invalid: $service_file_path. Check permissions and syntax."
+        if [[ -f "$service_file_path" ]]; then
+            cat "$service_file_path" # Show the generated service file for debugging
+        fi
         return 1
     fi
 
     log_message "INFO" "Enabling service $service_name..."
     if ! run_with_spinner "Enabling service $service_name..." systemctl enable "$service_name"; then
-        handle_error "ERROR" "Failed to enable service $service_name. Check systemd logs."
-        # Attempt to show specific error if possible
-        journalctl -u "$service_name" -n 5 --no-pager
+        handle_error "ERROR" "Failed to enable service $service_name. Check systemd logs (journalctl -xe) and service file."
+        journalctl -u "$service_name" -n 20 --no-pager
         return 1
     fi
 
-    log_message "INFO" "Starting service $service_name..."
+    log_message "INFO" "Attempting to start service $service_name..."
+    # Before starting, let's try to stat the config file as the service user to check access
+    if [[ "$effective_user" != "root" ]] && command -v sudo &>/dev/null && command -v stat &>/dev/null; then
+        log_message "DEBUG" "Pre-start check: Attempting to stat '$config_path' as user '$effective_user'..."
+        if sudo -u "$effective_user" stat "$config_path" >/dev/null 2>&1; then
+            log_message "INFO" "Pre-start check: User '$effective_user' can access '$config_path'."
+        else
+            log_message "WARN" "Pre-start check: User '$effective_user' may NOT be able to access '$config_path'. Stat command failed."
+            # Log ls -ld output for the config directory and the file itself
+            ls -ld "$CONFIG_DIR"
+            ls -l "$config_path"
+        fi
+    fi
+
     if ! run_with_spinner "Starting service $service_name..." systemctl start "$service_name"; then
         handle_error "ERROR" "Failed to start service $service_name."
-        print_info "Check configuration and logs: journalctl -u $service_name -n 50 --no-pager"
+        print_info "Please check the service logs for details: journalctl -u $service_name -n 50 --no-pager"
         if prompt_yes_no "Show last 20 lines of the service log now?" "y"; then
             journalctl -u "$service_name" -n 20 --no-pager
         fi
+        # Also show status which might include more direct error info
+        systemctl status "$service_name" --no-pager
         return 1
     fi
 
-    handle_success "Service $service_name created, enabled, and started."
+    handle_success "Service $service_name created, enabled, and appears to be starting."
+    print_info "It might take a few seconds for the service to fully initialize."
 
-    if prompt_yes_no "Check service status now?" "y"; then
+    if prompt_yes_no "Check service status now to confirm it's active (running)?" "y"; then
         systemctl status "$service_name" --no-pager
     fi
     return 0
@@ -6005,13 +6145,15 @@ _perform_full_uninstall() {
     print_warning "WARNING: This will PERMANENTLY REMOVE EasyBackhaul and ALL related data!"
     echo "This includes:"
     echo "  - The Backhaul binary ($BIN_PATH)"
-    echo "  - All tunnel configurations ($CONFIG_DIR)"
+    echo "  - All tunnel configurations (from $CONFIG_DIR, likely /etc/easybackhaul/configs)"
+    echo "  - The main configuration directory structure (e.g., /etc/easybackhaul)"
     echo "  - All systemd services (e.g., backhaul-*.service in $SERVICE_DIR)"
     echo "  - All UFW rules managed by EasyBackhaul (if UFW is used)"
     echo "  - All EasyBackhaul-managed cron jobs."
-    echo "  - Temporary files and watcher scripts (typically in $EASYBACKHAUL_TMP_DIR or /tmp)"
+    echo "  - Temporary files and watcher scripts (typically in ${EASYBACKHAUL_TMP_DIR:-/tmp})"
     echo "  - Backup files ($BACKUP_DIR)"
-    echo "  - Potentially log files ($LOG_DIR) - you will be asked about this."
+    echo "  - Log files and directory (from $LOG_DIR, likely /var/log/easybackhaul) - you will be asked about this."
+    echo "  - Logrotate configuration (/etc/logrotate.d/easybackhaul)"
     
     if ! prompt_yes_no "Are you absolutely sure you want to proceed with uninstallation?" "n"; then
         print_info "Uninstallation cancelled."; press_any_key; return 1; fi
@@ -6086,14 +6228,30 @@ _perform_full_uninstall() {
     
     print_info "Removing files and directories..."
     if [[ -n "$BIN_PATH" && -f "$BIN_PATH" ]]; then secure_delete "$BIN_PATH"; fi
-    if [[ -n "$CONFIG_DIR" && -d "$CONFIG_DIR" ]]; then secure_delete "$CONFIG_DIR"; fi
+    # CONFIG_DIR is now /etc/easybackhaul/configs. Remove its parent /etc/easybackhaul as well.
+    if [[ -n "$CONFIG_DIR" && -d "$(dirname "$CONFIG_DIR")" ]]; then # Check parent dir
+        secure_delete "$(dirname "$CONFIG_DIR")" # This removes /etc/easybackhaul (and configs within)
+        log_message "INFO" "Removed main config directory structure: $(dirname "$CONFIG_DIR")"
+    elif [[ -n "$CONFIG_DIR" && -d "$CONFIG_DIR" ]]; then # Fallback if parent wasn't as expected
+         secure_delete "$CONFIG_DIR"
+         log_message "INFO" "Removed config directory: $CONFIG_DIR"
+    fi
+
     if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then secure_delete "$BACKUP_DIR"; fi
     if [[ -n "$EASYBACKHAUL_TMP_DIR" && -d "$EASYBACKHAUL_TMP_DIR" && "$EASYBACKHAUL_TMP_DIR" != "/tmp" && "$EASYBACKHAUL_TMP_DIR" != "/tmp/" ]]; then
         secure_delete "$EASYBACKHAUL_TMP_DIR"
     fi
 
+    # Remove logrotate configuration
+    local logrotate_conf_file="/etc/logrotate.d/easybackhaul"
+    if [[ -f "$logrotate_conf_file" ]]; then
+        secure_delete "$logrotate_conf_file"
+        log_message "INFO" "Removed logrotate configuration file: $logrotate_conf_file"
+    fi
+
+    # LOG_DIR is now /var/log/easybackhaul
     if [[ -n "$LOG_DIR" && -d "$LOG_DIR" ]]; then
-        if prompt_yes_no "Also delete the main log directory $LOG_DIR and its contents?" "n"; then
+        if prompt_yes_no "Also delete the main log directory ($LOG_DIR) and all its contents?" "n"; then
             secure_delete "$LOG_DIR"
             handle_success "Log directory $LOG_DIR deleted."
         else
@@ -6102,7 +6260,7 @@ _perform_full_uninstall() {
     fi
     
     handle_success "EasyBackhaul uninstallation completed."
-    print_info "Some manual cleanup of system logs (journalctl) might be desired."
+    print_info "Some manual cleanup of system logs (journalctl) might be desired if services were problematic."
     print_info "Exiting now."
     exit 0
 }
