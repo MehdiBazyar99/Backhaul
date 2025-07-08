@@ -550,9 +550,9 @@ validate_config_detailed() {
         print_error "Configuration has issues"
         print_info "Found $issues_found error(s) that need attention"
         
-        if confirm_action "Would you like to create a backup before attempting fixes?" "y"; then
-            backup_config "$config_file"
-            print_success "Backup created"
+        if prompt_yes_no "Would you like to create a backup before attempting fixes?" "y"; then
+            backup_configuration_path "$config_file" "validation-error-backup"
+            # print_success "Backup created" # backup_configuration_path handles its own success/failure messages
         fi
     fi
     

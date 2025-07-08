@@ -1,1156 +1,748 @@
-# config.sh
-# Validation functions, backup config, and tunnel configuration wizard
+# modules/config.sh
+# Tunnel configuration wizard and related TOML file management.
 
-# WARNING: Do not use a global CONFIG_FILE variable. Always pass config file paths explicitly to functions.
+# WARNING: Do not use a global CONFIG_FILE variable. All configurations are per-tunnel TOML files.
 
-# --- Configuration & Validation ---
-# Note: validate_port() and validate_ip() are now defined in helpers.sh
-
-# Get process information for a port
-get_port_process_info() {
-    local port_to_check=$1
-    local process_info=""
+# --- Helper: Get process information for a port ---
+# This is kept here as it's specific to the config wizard's port checking UX
+_get_port_process_info() {
+    local port_to_check="$1"
+    log_message "DEBUG" "Checking process for port $port_to_check"
     
-    # Try to get process info using ss
-    if command -v ss >/dev/null 2>&1; then
-        process_info=$(ss -lntup 2>/dev/null | grep ":${port_to_check}[[:space:]]" | head -1)
-        if [[ -n "$process_info" ]]; then
-            # Extract PID and process name
-            local pid=$(echo "$process_info" | awk '{print $6}' | sed 's/.*pid=\([0-9]*\).*/\1/')
-            if [[ -n "$pid" && "$pid" != "pid=" ]]; then
-                local process_name=$(ps -p "$pid" -o comm= 2>/dev/null | head -1)
-                local cmd_line=$(ps -p "$pid" -o cmd= 2>/dev/null | head -1 | cut -c1-60)
-                echo "Process ID: $pid"
-                echo "Process Name: $process_name"
-                echo "Command: $cmd_line..."
-                return
-            fi
-        fi
+    if command -v ss &>/dev/null; then
+        # Using ss for more detailed info, including user if possible
+        ss -lntupe "sport = :$port_to_check" 2>/dev/null | awk 'NR>1 {print "  - Process (ss): " $0}' && return 0
     fi
-    
-    # Fallback to netstat if ss doesn't work
-    if command -v netstat >/dev/null 2>&1; then
-        process_info=$(netstat -tlnp 2>/dev/null | grep ":${port_to_check}[[:space:]]" | head -1)
-        if [[ -n "$process_info" ]]; then
-            local pid=$(echo "$process_info" | awk '{print $7}' | cut -d'/' -f1)
-            if [[ -n "$pid" && "$pid" != "-" ]]; then
-                local process_name=$(ps -p "$pid" -o comm= 2>/dev/null | head -1)
-                local cmd_line=$(ps -p "$pid" -o cmd= 2>/dev/null | head -1 | cut -c1-60)
-                echo "Process ID: $pid"
-                echo "Process Name: $process_name"
-                echo "Command: $cmd_line..."
-                return
-            fi
-        fi
+    if command -v netstat &>/dev/null; then
+        netstat -tlnp 2>/dev/null | grep ":${port_to_check}[[:space:]]" | awk '{print "  - Process (netstat): " $0}' && return 0
     fi
-    
-    # If we can't get detailed info, show basic port usage
-    echo "Port is in use but process details unavailable"
+    if command -v lsof &>/dev/null; then # More resource intensive
+        lsof -i ":$port_to_check" -sTCP:LISTEN -P -n -- 2>/dev/null | awk 'NR>1 {print "  - Process (lsof): " $0}' && return 0
+    fi
+    print_info "  Port $port_to_check is in use, but detailed process info unavailable with current tools."
+    return 1
 }
 
-# Note: check_port_availability() and backup_config() are now defined in helpers.sh
 
-# --- Configuration Wizard ---
-configure_tunnel() {
-    local tunnel_name=""
-    local setup_type=""
-    local transport=""
-    local server_ip=""
-    local server_port=""
-    local local_port=""
-    local auth_token=""
-    local tls_cert_path=""
-    local tls_key_path=""
-    
-    clear
-    print_server_info_banner_minimal
-    print_info "=========================================="
-    print_info "      VPN Tunnel Configuration Wizard"
-    print_info "=========================================="
-    print_info "This wizard helps you set up a VPN tunnel between:"
-    print_info "  • Iran Server: Relay/exit point (users connect here)"
-    print_info "  • Foreign Server: VPN panel hosting (tunnel destination)"
-    print_info "Users connect to Iran server → Traffic forwarded to foreign server VPN panel"
-    echo
-    
-    # --- Step 1: Setup Type ---
-    print_info "Choose your setup preference:"
-    echo " 1. Quick Setup (recommended) - Uses sensible defaults for most settings"
-    echo " 2. Advanced Setup - Configure all settings manually"
-    echo " 0. Back to Main Menu"
-    
-    local setup_type_choice
-    while true; do
-        read -p "Select setup type [1-2, 0] (default: 1): " setup_type_choice
-        setup_type_choice=${setup_type_choice:-1}
-        case $setup_type_choice in
-            1|2) break ;;
-            0) return ;;
-            *) print_warning "Invalid selection." ;;
+# --- Sub-functions for configure_tunnel wizard ---
+
+_prompt_setup_type_and_mode() {
+    local -n setup_type_choice_ref=$1 # Output: 1 for Quick, 2 for Advanced
+    local -n tunnel_mode_ref=$2       # Output: "server" or "client"
+
+    while true; do # Loop for Setup Type, to allow 'back' from Mode selection
+        print_menu_header "secondary" "Tunnel Setup Type" "Step 1a: Setup Type"
+        local setup_options=("1. Quick Setup (Recommended)" "2. Advanced Setup")
+        _setup_type_help() {
+            print_info "Setup Type Help:"
+            echo " - Quick Setup: Uses sensible defaults for most common scenarios."
+            echo " - Advanced Setup: Allows manual configuration of all parameters."
+            echo "Use 'r' to cancel wizard, 'm' for main menu, 'x' to exit script."
+            press_any_key
+        }
+        menu_loop "Select setup type" setup_options "_setup_type_help"
+        local menu_rc=$?
+        case "$menu_rc" in
+            0) # Numeric choice
+                setup_type_choice_ref="$MENU_CHOICE"
+                # Proceed to Mode selection
+                ;;
+            2) # '?' Help
+                continue # Re-loop for Setup Type
+                ;;
+            3) # 'm' Main Menu
+                print_info "Configuration cancelled: returning to Main Menu."
+                return 1 ;; # Signal cancel wizard
+            4) # 'x' Exit script
+                request_script_exit # This function handles its own exit.
+                return 1 # Should not be reached if request_script_exit works.
+                ;;
+            5) # 'r' Return/Back (from first step is cancel wizard)
+                print_info "Configuration cancelled: 'Back' from first step."
+                return 1 ;; # Signal cancel wizard
+            6)  # Invalid input in menu_loop
+                print_info "Invalid setup type selection, please try again." # Optional: more specific message
+                # press_any_key already handled by menu_loop before returning 6
+                continue ;; # Re-prompt Setup Type
+            *)
+                handle_error "ERROR" "Unhandled menu_loop code $menu_rc in _prompt_setup_type_and_mode (Setup Type)"
+                return 1 ;; # Signal cancel wizard on error
         esac
-    done
 
-    # --- Step 2: Automatic Role Detection ---
-    local mode_choice
-    local default_mode
-    
-    # Get server country if not already set
-    if [[ -z "$SERVER_COUNTRY" ]]; then
-        print_info "Detecting server location..."
-        get_server_info
-    fi
-    
-    if [[ "$SERVER_COUNTRY" == "IR" ]]; then
-        default_mode="1"
-        print_info "Detected server location: Iran (defaulting to Server mode)"
-    else
-        default_mode="2"
-        print_info "Detected server location: $SERVER_COUNTRY (defaulting to Client mode)"
-    fi
-    
-    while true; do
-        echo
-        print_info "Select tunnel mode:"
-        echo " 1. Server (Listens for connections)"
-        echo " 2. Client (Connects to a server)"
-        echo " 0. Back to Main Menu"
-        read -p "Select mode [1-2, 0] (default: $default_mode): " mode_choice
-        mode_choice=${mode_choice:-$default_mode}
-        case $mode_choice in
-            1) setup_type="server"; break ;;
-            2) setup_type="client"; break ;;
-            0) return ;;
-            *) print_warning "Invalid selection." ;;
+        # --- Mode (Server/Client) ---
+        print_menu_header "secondary" "Tunnel Mode" "Step 1b: Select Mode"
+        local default_mode_val="2"
+        local detected_loc_info=""
+        if [[ -n "$SERVER_COUNTRY" && "$SERVER_COUNTRY" != "N/A" ]]; then
+            if [[ "$SERVER_COUNTRY" == "IR" ]]; then
+                default_mode_val="1"
+                detected_loc_info="Detected server location: Iran (Suggesting Server Mode)"
+            else
+                detected_loc_info="Detected server location: $SERVER_COUNTRY (Suggesting Client Mode)"
+            fi
+            print_info "$detected_loc_info"
+        else
+            print_info "Server location unknown. Please choose mode carefully."
+        fi
+
+        local mode_options=("1. Server (Listens for connections - typically on Iran VPS)" "2. Client (Connects to a server - typically on Foreign VPS)")
+        _mode_help_mode() { # Renamed to avoid conflict if _setup_type_help is somehow in scope
+            print_info "Tunnel Mode Help:"
+            echo " - Server Mode: This machine will act as the entry point for users."
+            echo " - Client Mode: This machine will connect out to a Backhaul server."
+            echo "Use 'r' to go back to Setup Type, 'm' for main menu, 'x' to exit script."
+            press_any_key
+        }
+
+        menu_loop "Select tunnel mode (Default: $default_mode_val)" mode_options "_mode_help_mode"
+        menu_rc=$?
+        case "$menu_rc" in
+            0) # Numeric choice
+                if [[ "$MENU_CHOICE" == "1" ]]; then
+                    tunnel_mode_ref="server"
+                elif [[ "$MENU_CHOICE" == "2" ]]; then
+                    tunnel_mode_ref="client"
+                else
+                    handle_error "ERROR" "Invalid mode choice '$MENU_CHOICE' from menu_loop."
+                    print_warning "Please try selecting mode again."
+                    press_any_key
+                    continue 2 # Continue outer loop (Setup Type), effectively restarting Mode selection after Setup Type
+                fi
+                return 0 # Both parts successful
+                ;;
+            2) # '?' Help
+                continue 2 # Re-loop for Mode (effectively re-prompts Mode after re-printing Setup Type header and re-running Mode logic)
+                ;;
+            3) # 'm' Main Menu
+                print_info "Configuration cancelled: returning to Main Menu."
+                return 1 ;; # Signal cancel wizard
+            4) # 'x' Exit script
+                request_script_exit
+                return 1 ;;
+            5) # 'r' Return/Back (to Setup Type selection)
+                print_info "Going back to Setup Type selection."
+                # The outer loop `continue` will handle re-prompting Setup Type
+                continue 1 # Continue the outer while loop for Setup Type
+                ;;
+            6)  # Invalid input in menu_loop
+                print_info "Invalid mode selection, please try again."
+                # press_any_key handled by menu_loop
+                # Need to re-prompt Mode. `continue 2` goes to the Mode part of the outer loop.
+                # The '2' in 'continue 2' refers to the second enclosing loop, which is the 'while true'
+                # that starts right before "print_menu_header ... Tunnel Mode ... Step 1b".
+                # However, the current structure has only one `while true` loop at the top of the function.
+                # So, `continue` (or `continue 1`) will restart the whole function from "Setup Type".
+                # To re-prompt only "Mode", this sub-case needs to effectively loop back to its own menu_loop.
+                # This can be done by simply `continue` which will hit the outer loop, then setup type will be re-confirmed,
+                # then mode will be prompted again. This might be acceptable UX.
+                # For a true "re-prompt only mode", this section would need its own inner loop.
+                # Given the current structure, `continue` (same as `continue 1`) is the simplest.
+                continue ;; # Re-prompt from Setup Type, which will then lead to Mode
+            *)
+                handle_error "ERROR" "Unhandled menu_loop code $menu_rc in _prompt_setup_type_and_mode (Mode)"
+                return 1 ;; # Signal cancel wizard on error
         esac
+    done # End of while true for Setup Type
+}
+
+_prompt_transport_protocol() {
+    local setup_type_choice=$1   # 1 for Quick, 2 for Advanced
+    local -n transport_ref=$2    # Output: selected transport string (e.g., "tcp")
+
+    # Initial header print for this step
+    print_menu_header "secondary" "Transport Protocol" "Step 3 of N: Select Protocol"
+
+    local transport_options_arr=(
+        "tcp (Standard, reliable)"
+        "ws (WebSocket, good for CDNs/firewalls)"
+        "wss (Secure WebSocket, encrypted)"
+        "tcpmux (Multiplexed TCP)"
+        "wsmux (Multiplexed WebSocket)"
+        "wssmux (Multiplexed Secure WebSocket)"
+        "udp (For UDP-based applications)"
+    )
+    local all_transport_choices=()
+    for i in "${!transport_options_arr[@]}"; do
+        all_transport_choices+=("$(($i + 1)). ${transport_options_arr[$i]}")
     done
-
-    # --- Step 3: Transport Protocol ---
-    print_info "Select transport protocol:"
-    if [[ $setup_type_choice -eq 1 ]]; then
-        # Quick setup - simplified options
-        echo " 1. TCP (recommended) - Standard, reliable, works everywhere"
-        echo " 2. WebSocket (WS) - Good for bypassing firewalls"
-        echo " 3. Secure WebSocket (WSS) - Encrypted, most secure"
-        echo " 4. Show all options"
-        
-        local transport_choice
-        while true; do
-            read -p "Select transport [1-4] (default: 1): " transport_choice
-            transport_choice=${transport_choice:-1}
-            case $transport_choice in
-                1) transport="tcp"; break ;;
-                2) transport="ws"; break ;;
-                3) transport="wss"; break ;;
-                4) 
-                    # Show all options
-                    print_info "All transport options:"
-                    echo " 1. tcp - Standard TCP (recommended)"
-                    echo " 2. tcpmux - Multiplexed TCP"
-                    echo " 3. udp - UDP"
-                    echo " 4. ws - WebSocket"
-                    echo " 5. wsmux - Multiplexed WebSocket"
-                    echo " 6. wss - Secure WebSocket"
-                    echo " 7. wssmux - Multiplexed Secure WebSocket"
-                    read -p "Select transport [1-7] (default: 1): " transport_choice
-                    transport_choice=${transport_choice:-1}
-                    local transport_options=("tcp" "tcpmux" "udp" "ws" "wsmux" "wss" "wssmux")
-                    if [[ "$transport_choice" =~ ^[1-7]$ ]]; then
-                        transport="${transport_options[$((transport_choice-1))]}"
-                        break
-                    else
-                        print_warning "Invalid selection."
-                    fi
-                    ;;
-                *) print_warning "Invalid selection." ;;
-            esac
-        done
-    else
-        # Advanced setup - show all options
-        print_info "Available transports:"
-        local transport_options=("tcp" "tcpmux" "udp" "ws" "wsmux" "wss" "wssmux")
-        local transport_descriptions=(
-            "Standard TCP - Fast and reliable"
-            "Multiplexed TCP - Multiple connections over single TCP"
-            "UDP - For UDP-specific applications"
-            "WebSocket - Good for bypassing firewalls"
-            "Multiplexed WebSocket - Multiple connections over WS"
-            "Secure WebSocket - Encrypted with TLS"
-            "Multiplexed Secure WebSocket - Multiple connections over WSS"
-        )
-        
-        local i=1
-        for t in "${transport_options[@]}"; do
-            echo " $i. $t - ${transport_descriptions[$((i-1))]}"
-            ((i++))
-        done
-        
-        while true; do
-            read -p "Select transport protocol [1-${#transport_options[@]}]: " transport_choice
-            if [[ "$transport_choice" =~ ^[1-7]$ ]]; then
-                transport="${transport_options[$((transport_choice-1))]}"
-                break
-            else
-                print_warning "Invalid selection. Enter a number 1-${#transport_options[@]}."
-            fi
-        done
-    fi
-
-    # --- Step 4: Basic Configuration ---
-    print_info "--- Basic Configuration ---"
-    local tunnel_port server_ip token
     
-    if [[ "$setup_type" == "server" ]]; then
-        local default_tunnel_port=443
-        while true; do
-            read -p "Enter the main tunnel port to listen on [${default_tunnel_port}]: " tunnel_port
-            tunnel_port=${tunnel_port:-$default_tunnel_port}
-            if ! validate_port "$tunnel_port"; then
-                print_warning "Invalid port number."
-            elif ! check_port_availability "$tunnel_port"; then
-                read -p "Port $tunnel_port is in use. Auto-select a free port? (y/n): " autoport
-                if [[ "${autoport,,}" == "y" ]]; then
-                    for p in $(seq 20000 1 65000); do
-                        if check_port_availability "$p"; then
-                            tunnel_port="$p"
-                            print_success "Selected free port: $tunnel_port"
-                            break
-                        fi
-                    done
-                    break
-                else
-                    continue
-                fi
-            else
-                break
-            fi
-        done
-        
-        local_port="$tunnel_port"
-        server_ip=""
-        server_port=""
-        
-    else # client
-        print_info "--- Foreign Server Configuration ---"
-        print_info "This foreign server will connect to Iran server to provide VPN panel access."
-        print_info "Users will connect to Iran server, which forwards traffic to this foreign server."
-        
-        while true; do
-            read -p "Enter the public IP address of the Iran server: " server_ip
-            validate_ip "$server_ip" && break || print_warning "Invalid IP address format."
-        done
-        
-        # Optional: Offer to ping the server IP
-        read -p "Do you want to ping the Iran server IP to check connectivity? (y/n) [y]: " do_ping
-        do_ping=${do_ping:-y}
-        if [[ "${do_ping,,}" == "y" ]]; then
-            print_info "Pinging $server_ip..."
-            if ping -c 2 -W 2 "$server_ip" >/dev/null 2>&1; then
-                print_success "Ping successful! Iran server is reachable."
-            else
-                print_warning "Ping failed. The Iran server may be offline or unreachable."
-            fi
-        fi
-        
-        while true; do
-            local default_tunnel_port=443
-            read -p "Enter the tunnel port set on the Iran server [${default_tunnel_port}]: " tunnel_port
-            tunnel_port=${tunnel_port:-$default_tunnel_port}
-            if ! validate_port "$tunnel_port"; then
-                print_warning "Invalid port number."
-            elif ! check_port_availability "$tunnel_port"; then
-                read -p "Port $tunnel_port is in use. Auto-select a free port? (y/n): " autoport
-                if [[ "${autoport,,}" == "y" ]]; then
-                    for p in $(seq 20000 1 65000); do
-                        if check_port_availability "$p"; then
-                            tunnel_port="$p"
-                            print_success "Selected free port: $tunnel_port"
-                            break
-                        fi
-                    done
-                    break
-                else
-                    continue
-                fi
-            else
-                break
-            fi
-        done
-        
-        server_port="$tunnel_port"
-        local_port="1080"  # Default local port for client
-    fi
+    local quick_transport_choices=(
+        "1. ${transport_options_arr[0]}" # tcp
+        "2. ${transport_options_arr[1]}" # ws
+        "3. ${transport_options_arr[2]}" # wss
+        "4. Show all options"
+    )
 
-    # Token prompt (same for both server and client)
-    local default_token="vpn-tunnel-naxon"
-    while true; do
-        read -p "Enter a secure authentication token [default: $default_token, must match on both sides]: " token
-        # Use default token if input is empty
-        token=${token:-$default_token}
-        if [[ -n "$token" ]]; then
-            auth_token="$token"
-            break
-        else
-            print_warning "Token cannot be empty."
-        fi
-    done
-
-    # --- Step 5: Advanced Configuration (Conditional) ---
-    local log_level="info" nodelay="true" keepalive_period=75
-    local heartbeat=40 connection_pool=8 retry_interval=3 dial_timeout=10
-    local tls_cert="" tls_key="" edge_ip=""
-    local mux_version=1 mux_framesize=32768 mux_recievebuffer=4194304 mux_streambuffer=65536
-    local mux_con=8 accept_udp="false" channel_size=2048 aggressive_pool="false"
-    local sniffer="false" sniffer_log="/root/backhaul.json" web_port=0
-    
-    if [[ $setup_type_choice -eq 2 ]]; then
-        # Advanced setup - ask for all settings
-        print_info "--- Advanced & Transport-Specific Configuration ---"
-        
-        # Basic settings
-        while true; do
-            read -p "Log Level (debug, info, warn, error) [info]: " log_level
-            log_level=${log_level:-info}
-            if [[ "$log_level" =~ ^(debug|info|warn|error)$ ]]; then
-                break
-            else
-                print_warning "Invalid log level. Use: debug, info, warn, or error."
-            fi
-        done
-        
-        # Sniffer settings
-        while true; do
-            read -p "Enable sniffer (traffic logging)? (y/n) [n]: " sniffer_choice
-            sniffer_choice=${sniffer_choice:-n}
-            if [[ "${sniffer_choice,,}" =~ ^[yn]$ ]]; then
-                if [[ "${sniffer_choice,,}" == "y" ]]; then
-                    sniffer="true"
-                    while true; do
-                        read -p "Sniffer log file path [/root/backhaul.json]: " sniffer_log
-                        sniffer_log=${sniffer_log:-/root/backhaul.json}
-                        break
-                    done
-                else
-                    sniffer="false"
-                fi
-                break
-            else
-                print_warning "Please enter y or n."
-            fi
-        done
-        
-        # Web interface
-        while true; do
-            read -p "Web interface port (0 to disable) [0]: " web_port
-            web_port=${web_port:-0}
-            if [[ "$web_port" =~ ^[0-9]+$ ]] && [[ $web_port -ge 0 ]] && [[ $web_port -le 65535 ]]; then
-                break
-            else
-                print_warning "Please enter a number between 0 and 65535."
-            fi
-        done
-
-        # Transport-specific settings
-        if [[ "$transport" != "udp" ]]; then
-            while true; do
-                read -p "Enable TCP_NODELAY for lower latency? (y/n) [y]: " nodelay_choice
-                nodelay_choice=${nodelay_choice:-y}
-                if [[ "${nodelay_choice,,}" =~ ^[yn]$ ]]; then
-                    nodelay=$([[ "${nodelay_choice,,}" == "y" ]] && echo "true" || echo "false")
-                    break
-                else
-                    print_warning "Please enter y or n."
-                fi
-            done
-            
-            while true; do
-                read -p "Keep-alive period in seconds [75]: " keepalive_period
-                keepalive_period=${keepalive_period:-75}
-                if [[ "$keepalive_period" =~ ^[0-9]+$ ]] && [[ $keepalive_period -ge 1 ]] && [[ $keepalive_period -le 300 ]]; then
-                    break
-                else
-                    print_warning "Please enter a number between 1 and 300."
-                fi
-            done
-        fi
-        
-        # Server-specific settings
-        if [[ "$setup_type" == "server" ]]; then
-            while true; do
-                read -p "Heartbeat interval in seconds [40]: " heartbeat
-                heartbeat=${heartbeat:-40}
-                if [[ "$heartbeat" =~ ^[0-9]+$ ]] && [[ $heartbeat -ge 1 ]] && [[ $heartbeat -le 120 ]]; then
-                    break
-                else
-                    print_warning "Please enter a number between 1 and 120."
-                fi
-            done
-            
-            while true; do
-                read -p "Channel size [2048]: " channel_size
-                channel_size=${channel_size:-2048}
-                if [[ "$channel_size" =~ ^[0-9]+$ ]] && [[ $channel_size -ge 1024 ]] && [[ $channel_size -le 8192 ]]; then
-                    break
-                else
-                    print_warning "Please enter a number between 1024 and 8192."
-                fi
-            done
-            
-            if [[ "$transport" == "tcp" ]]; then
-                while true; do
-                    read -p "Accept UDP traffic over TCP? (y/n) [n]: " accept_udp_choice
-                    accept_udp_choice=${accept_udp_choice:-n}
-                    if [[ "${accept_udp_choice,,}" =~ ^[yn]$ ]]; then
-                        accept_udp=$([[ "${accept_udp_choice,,}" == "y" ]] && echo "true" || echo "false")
-                        break
-                    else
-                        print_warning "Please enter y or n."
-                    fi
-                done
-            fi
-        else # client
-            while true; do
-                read -p "Connection pool size [8]: " connection_pool
-                connection_pool=${connection_pool:-8}
-                if [[ "$connection_pool" =~ ^[0-9]+$ ]] && [[ $connection_pool -ge 1 ]] && [[ $connection_pool -le 32 ]]; then
-                    break
-                else
-                    print_warning "Please enter a number between 1 and 32."
-                fi
-            done
-            
-            while true; do
-                read -p "Enable aggressive pool management? (y/n) [n]: " aggressive_pool_choice
-                aggressive_pool_choice=${aggressive_pool_choice:-n}
-                if [[ "${aggressive_pool_choice,,}" =~ ^[yn]$ ]]; then
-                    aggressive_pool=$([[ "${aggressive_pool_choice,,}" == "y" ]] && echo "true" || echo "false")
-                    break
-                else
-                    print_warning "Please enter y or n."
-                fi
-            done
-            
-            while true; do
-                read -p "Connection retry interval in seconds [3]: " retry_interval
-                retry_interval=${retry_interval:-3}
-                if [[ "$retry_interval" =~ ^[0-9]+$ ]] && [[ $retry_interval -ge 1 ]] && [[ $retry_interval -le 30 ]]; then
-                    break
-                else
-                    print_warning "Please enter a number between 1 and 30."
-                fi
-            done
-            
-            while true; do
-                read -p "Connection dial timeout in seconds [10]: " dial_timeout
-                dial_timeout=${dial_timeout:-10}
-                if [[ "$dial_timeout" =~ ^[0-9]+$ ]] && [[ $dial_timeout -ge 1 ]] && [[ $dial_timeout -le 60 ]]; then
-                    break
-                else
-                    print_warning "Please enter a number between 1 and 60."
-                fi
-            done
-        fi
-
-        # Multiplexing settings for *mux protocols
-        if [[ "$transport" =~ ^(tcpmux|wsmux|wssmux)$ ]]; then
-            echo
-            print_info "--- Multiplexing (MUX) Parameters ---"
-            
-            while true; do 
-                read -p "Multiplexing concurrency [8]: " mux_con
-                mux_con=${mux_con:-8}
-                if [[ "$mux_con" =~ ^[0-9]+$ ]] && [[ $mux_con -ge 1 ]] && [[ $mux_con -le 64 ]]; then
-                    break
-                else
-                    print_warning "Please enter a number between 1 and 64."
-                fi
-            done
-            
-            while true; do
-                read -p "SMUX protocol version (1 or 2) [1]: " mux_version
-                mux_version=${mux_version:-1}
-                if [[ "$mux_version" =~ ^[12]$ ]]; then
-                    break
-                else
-                    print_warning "Please enter 1 or 2."
-                fi
-            done
-            
-            while true; do
-                read -p "Mux frame size in bytes [32768]: " mux_framesize
-                mux_framesize=${mux_framesize:-32768}
-                if [[ "$mux_framesize" =~ ^[0-9]+$ ]] && [[ $mux_framesize -ge 1024 ]] && [[ $mux_framesize -le 65536 ]]; then
-                    break
-                else
-                    print_warning "Please enter a number between 1024 and 65536."
-                fi
-            done
-            
-            while true; do
-                read -p "Mux receive buffer in bytes [4194304]: " mux_recievebuffer
-                mux_recievebuffer=${mux_recievebuffer:-4194304}
-                if [[ "$mux_recievebuffer" =~ ^[0-9]+$ ]] && [[ $mux_recievebuffer -ge 65536 ]] && [[ $mux_recievebuffer -le 16777216 ]]; then
-                    break
-                else
-                    print_warning "Please enter a number between 65536 and 16777216."
-                fi
-            done
-            
-            while true; do
-                read -p "Mux stream buffer in bytes [65536]: " mux_streambuffer
-                mux_streambuffer=${mux_streambuffer:-65536}
-                if [[ "$mux_streambuffer" =~ ^[0-9]+$ ]] && [[ $mux_streambuffer -ge 1024 ]] && [[ $mux_streambuffer -le 1048576 ]]; then
-                    break
-                else
-                    print_warning "Please enter a number between 1024 and 1048576."
-                fi
-            done
-        fi
-    fi
-    
-    # TLS certificate handling for secure protocols
-    if [[ "$transport" =~ ^(wss|wssmux)$ ]]; then
-        echo
-        print_info "--- TLS Certificate Configuration ---"
-        print_info "Secure protocols (WSS/WSSMUX) require TLS certificates."
-        
-        # Check for existing certificates
-        local CERT_DIR="/etc/backhaul/certs"
-        local existing_certs
-        existing_certs=$(find "$CERT_DIR" -maxdepth 1 -name '*.crt' 2>/dev/null)
-        
-        if [ -n "$existing_certs" ]; then
-            echo
-            print_info "Existing certificates found:"
-            local i=1
-            for cert in $existing_certs; do
-                echo " $i. $cert"
-                ((i++))
-            done
-            echo " 0. Generate a new certificate"
-            
-            local cert_choice
-            while true; do
-                read -p "Select certificate [0-$((i-1))]: " cert_choice
-                if [[ "$cert_choice" =~ ^[0-9]+$ ]] && [[ $cert_choice -le $((i-1)) ]]; then
-                    if [[ $cert_choice -eq 0 ]]; then
-                        generate_self_signed_cert
-                        # Get the newly generated certificate
-                        local new_certs
-                        new_certs=$(find "$CERT_DIR" -maxdepth 1 -name '*.crt' 2>/dev/null | sort | tail -1)
-                        if [[ -n "$new_certs" ]]; then
-                            tls_cert_path="$new_certs"
-                            tls_key_path="${new_certs%.crt}.key"
-                        fi
-                    else
-                        local chosen_cert
-                        chosen_cert=$(echo "$existing_certs" | sed -n "${cert_choice}p")
-                        tls_cert_path="$chosen_cert"
-                        tls_key_path="${chosen_cert%.crt}.key"
-                    fi
-                    break
-                else
-                    print_warning "Invalid selection."
-                fi
-            done
-        else
-            print_info "No existing certificates found. Generating a new one..."
-            generate_self_signed_cert
-            # Get the newly generated certificate
-            local new_certs
-            new_certs=$(find "$CERT_DIR" -maxdepth 1 -name '*.crt' 2>/dev/null | sort | tail -1)
-            if [[ -n "$new_certs" ]]; then
-                tls_cert_path="$new_certs"
-                tls_key_path="${new_certs%.crt}.key"
-            fi
-        fi
-    fi
-    
-    # --- Step 6: Generate Configuration ---
-    echo
-    print_info "--- Configuration Summary ---"
-    echo "Mode: $setup_type"
-    echo "Transport: $transport"
-    if [[ "$setup_type" == "server" ]]; then
-        echo "Listen Port: $local_port"
-    else
-        echo "Server IP: $server_ip"
-        echo "Server Port: $server_port"
-        echo "Local Port: $local_port"
-    fi
-    echo "Auth Token: $auth_token"
-    if [[ -n "$tls_cert_path" ]]; then
-        echo "TLS Certificate: $tls_cert_path"
-        echo "TLS Key: $tls_key_path"
-    fi
-    
-    if [[ $setup_type_choice -eq 2 ]]; then
-        echo "Log Level: $log_level"
-        echo "Sniffer: $sniffer"
-        if [[ "$sniffer" == "true" ]]; then
-            echo "Sniffer Log: $sniffer_log"
-        fi
-        if [[ $web_port -gt 0 ]]; then
-            echo "Web Interface: port $web_port"
-        fi
-    fi
-    
-    echo
-    read -p "Generate configuration with these settings? (y/n) [y]: " confirm
-    confirm=${confirm:-y}
-    if [[ "${confirm,,}" != "y" ]]; then
-        print_info "Configuration cancelled."
+    _transport_help() {
+        print_info "Transport Protocol Help:"
+        echo " - tcp: Standard, fast, and reliable."
+        echo " - ws: WebSocket, useful for proxying through CDNs like Cloudflare."
+        echo " - wss: Secure WebSocket (TLS/SSL encrypted), also good for CDNs."
+        echo " - *mux: Multiplexed versions allow multiple streams over one connection."
+        echo " - udp: For applications requiring UDP (e.g., some games, VoIP)."
+        echo "Use 'r' to return to Mode selection, 'c' to cancel configuration."
         press_any_key
-        return
+    }
+
+    local show_all_options_now=false
+    if [[ "$setup_type_choice" -ne 1 ]]; then # If not quick setup (i.e., advanced)
+        show_all_options_now=true
     fi
-    
-    # Generate the configuration
-    local config_content=""
-    config_content+="mode = \"$setup_type\"\n"
-    config_content+="transport = \"$transport\"\n"
-    config_content+="auth_token = \"$auth_token\"\n"
-    
-    if [[ "$setup_type" == "server" ]]; then
-        config_content+="listen = \":$local_port\"\n"
-    else
-        config_content+="server = \"$server_ip:$server_port\"\n"
-        config_content+="local = \":$local_port\"\n"
-    fi
-    
-    # Add TLS settings for secure protocols
-    if [[ -n "$tls_cert_path" && -n "$tls_key_path" ]]; then
-        config_content+="tls_cert = \"$tls_cert_path\"\n"
-        config_content+="tls_key = \"$tls_key_path\"\n"
-    fi
-    
-    # Add advanced settings if in advanced mode
-    if [[ $setup_type_choice -eq 2 ]]; then
-        config_content+="log_level = \"$log_level\"\n"
-        config_content+="sniffer = $sniffer\n"
-        if [[ "$sniffer" == "true" ]]; then
-            config_content+="sniffer_log = \"$sniffer_log\"\n"
+
+    local previous_menu_rc_for_header_logic="" # Used to help decide if header needs re-print after help
+
+    while true; do
+        local current_options_array_name
+        local current_prompt_msg="Select transport"
+        local current_header_title="Transport Protocol"
+        local current_header_subtitle="Step 2 of N: Select Protocol" # Adjusted step number
+
+        if $show_all_options_now; then
+            current_options_array_name="all_transport_choices"
+            current_header_title="All Transport Protocols"
+            current_header_subtitle="Step 2 of N (Detail)" # Adjusted step number
+        else
+            current_options_array_name="quick_transport_choices"
+            current_prompt_msg="Select transport (Default: 1 for TCP)"
         fi
-        if [[ $web_port -gt 0 ]]; then
-            config_content+="web_port = $web_port\n"
+
+        # Re-print header if we just switched to "all options" or if we are re-looping after help.
+        # Also, ensure the initial header for this function call is printed before the loop.
+        # The logic below tries to avoid redundant prints inside the loop.
+        if [[ -z "$previous_menu_rc_for_header_logic" ]]; then # First time in loop for this function call
+            print_menu_header "secondary" "$current_header_title" "$current_header_subtitle"
+        elif $show_all_options_now && [[ "$previous_menu_rc_for_header_logic" != "2" && "$previous_menu_rc_for_header_logic" != "0" ]]; then # Switched to all, and not coming from help or successful choice
+             print_menu_header "secondary" "$current_header_title" "$current_header_subtitle"
+        elif [[ "$previous_menu_rc_for_header_logic" == "2" ]]; then # Always re-print after help
+             print_menu_header "secondary" "$current_header_title" "$current_header_subtitle"
+        fi
+
+        menu_loop "$current_prompt_msg" "$current_options_array_name" "_transport_help"
+        local menu_rc=$?
+        previous_menu_rc_for_header_logic="$menu_rc" # Store for next iteration's header logic
+
+        case "$menu_rc" in
+            0) # Numeric choice
+                if $show_all_options_now; then
+                    if [[ "$MENU_CHOICE" -ge 1 && "$MENU_CHOICE" -le ${#transport_options_arr[@]} ]]; then
+                        transport_ref=$(echo "${transport_options_arr[$(($MENU_CHOICE-1))]}" | awk '{print $1}')
+                        log_message "INFO" "Selected transport: $transport_ref"
+                        return 0 # Success
+                    else
+                        print_warning "Invalid numeric choice from all options: $MENU_CHOICE"; press_any_key
+                        previous_menu_rc_for_header_logic="error" # Force header re-print
+                        continue
+                    fi
+                else # Quick setup options
+                    case "$MENU_CHOICE" in
+                        "1") transport_ref="tcp"; break ;; # Break from inner switch, then outer loop will be exited by return 0
+                        "2") transport_ref="ws"; break ;;
+                        "3") transport_ref="wss"; break ;;
+                        "4")
+                            show_all_options_now=true
+                            previous_menu_rc_for_header_logic="" # Force header re-print for "all options" view
+                            continue ;; # Re-loop to show all options
+                        *)
+                            print_warning "Invalid quick transport choice: $MENU_CHOICE."; press_any_key
+                            previous_menu_rc_for_header_logic="error" # Force header re-print
+                            continue;;
+                    esac
+                    log_message "INFO" "Selected transport: $transport_ref"
+                    return 0 # Success
+                fi
+                ;;
+            2) # '?' Help
+                # Header will be re-printed due to previous_menu_rc_for_header_logic being 2
+                continue ;;
+            3) # 'm' Main Menu
+                print_info "Configuration cancelled: returning to Main Menu."
+                return 1 ;; # Signal cancel wizard
+            4) # 'x' Exit script
+                request_script_exit
+                return 1 ;; # Should not be reached
+            5) # 'r' Return/Back
+                print_info "Going back to Setup Type/Mode selection."
+                return 2 ;; # Signal go back one step
+            6)  # Invalid input in menu_loop
+                # press_any_key handled by menu_loop
+                # previous_menu_rc_for_header_logic will be 6, so header might not reprint unless logic is adjusted.
+                # Setting it to "error" or similar to force header reprint.
+                previous_menu_rc_for_header_logic="error_redraw"
+                continue ;; # Re-prompt transport protocol
+            *)
+                handle_error "ERROR" "Unhandled menu_loop code $menu_rc in _prompt_transport_protocol"
+                return 1;; # Signal cancel wizard on error
+        esac
+    done # This while loop is technically now only exited by `return` statements.
+         # The `break` statements in numeric choice (0) for quick options were for the inner switch,
+         # but now directly lead to `return 0`.
+}
+
+_prompt_basic_config_params() {
+    local tunnel_mode="$1"      # "server" or "client"
+    local -n listen_port_ref=$2 # Output for server mode
+    local -n remote_ip_ref=$3   # Output for client mode
+    local -n remote_port_ref=$4 # Output for client mode
+    local -n local_fwd_port_ref=$5 # Output for client mode (local port to forward from)
+    local -n auth_token_ref=$6  # Output: auth token
+
+    print_menu_header "secondary" "Basic Configuration" "Step 3 of N" # N depends on if TLS is needed, step number adjusted
+
+    if [[ "$tunnel_mode" == "server" ]]; then
+        print_info "Server Mode: Configure listening port."
+        if [[ -z "$SERVER_IP" || "$SERVER_IP" == "N/A" ]]; then get_server_info; fi
+
+        if ! prompt_for_port "port for Backhaul server to listen on" "443" true listen_port_ref; then
+            print_error "Failed to get a valid listen port for server."
+            return 1
+        fi
+    else # client mode
+        print_info "Client Mode: Configure remote server details and local forwarding port."
+        if ! prompt_for_ip "the public IP address of the Backhaul SERVER" "" true remote_ip_ref; then
+            print_error "Failed to get a valid remote server IP for client."
+            return 1
         fi
         
-        if [[ "$transport" != "udp" ]]; then
-            config_content+="nodelay = $nodelay\n"
-            config_content+="keepalive_period = $keepalive_period\n"
+        if ! prompt_for_port "port the Backhaul SERVER is listening on" "443" false remote_port_ref; then
+            print_error "Failed to get a valid remote server port for client."
+            return 1
         fi
-        
-        if [[ "$setup_type" == "server" ]]; then
-            config_content+="heartbeat = $heartbeat\n"
-            config_content+="channel_size = $channel_size\n"
-            if [[ "$transport" == "tcp" ]]; then
-                config_content+="accept_udp = $accept_udp\n"
-            fi
-        else
-            config_content+="connection_pool = $connection_pool\n"
-            config_content+="aggressive_pool = $aggressive_pool\n"
-            config_content+="retry_interval = $retry_interval\n"
-            config_content+="dial_timeout = $dial_timeout\n"
-        fi
-        
-        if [[ "$transport" =~ ^(tcpmux|wsmux|wssmux)$ ]]; then
-            config_content+="mux_con = $mux_con\n"
-            config_content+="mux_version = $mux_version\n"
-            config_content+="mux_framesize = $mux_framesize\n"
-            config_content+="mux_recievebuffer = $mux_recievebuffer\n"
-            config_content+="mux_streambuffer = $mux_streambuffer\n"
+
+        print_info "Enter the local port this client will listen on to forward traffic."
+        if ! prompt_for_port "local forwarding port on THIS machine" "1080" true local_fwd_port_ref; then
+            print_error "Failed to get a valid local forwarding port for client."
+            return 1
         fi
     fi
-    
-    # Generate tunnel name
-    local timestamp
-    timestamp=$(date +%Y%m%d-%H%M%S)
-    tunnel_name="tunnel-${setup_type}-${transport}-${timestamp}"
-    
-    # Save configuration
-    local config_file="$CONFIG_DIR/config-${tunnel_name}.toml"
-    mkdir -p "$CONFIG_DIR"
-    echo -e "$config_content" > "$config_file"
-    chmod 600 "$config_file"
-    
-    print_success "Configuration saved to: $config_file"
-    
-    # Create systemd service
-    create_systemd_service "$tunnel_name" "$config_file"
-    
-    # Ask if user wants to start the tunnel
-    echo
-    read -p "Start the tunnel now? (y/n) [y]: " start_now
-    start_now=${start_now:-y}
-    if [[ "${start_now,,}" == "y" ]]; then
-        if systemctl start "backhaul-$tunnel_name"; then
-            print_success "Tunnel started successfully!"
-            print_info "You can now connect to this tunnel."
-        else
-            print_error "Failed to start tunnel. Check logs for details."
-        fi
-    else
-        print_info "Tunnel created but not started. You can start it later from the management menu."
-    fi
-    
-    press_any_key
-}
 
-update_config_file() {
-    local tunnel_name="$1"
-    local server_ip="$2"
-    local server_port="$3"
-    local local_port="$4"
-    local protocol="$5"
-    
-    # Input validation
-    if ! validate_tunnel_parameters "$server_ip" "$server_port" "$local_port" "$tunnel_name"; then
-        log_message "ERROR" "Invalid configuration parameters for tunnel $tunnel_name"
-        return 1
-    fi
-    
-    # Sanitize inputs
-    tunnel_name=$(sanitize_input "$tunnel_name" 50)
-    server_ip=$(sanitize_input "$server_ip" 15)
-    server_port=$(sanitize_input "$server_port" 5)
-    local_port=$(sanitize_input "$local_port" 5)
-    protocol=$(sanitize_input "$protocol" 3)
-    
-    # Create config directory if it doesn't exist
-    mkdir -p "$CONFIG_DIR"
-    harden_permissions "$CONFIG_DIR"
-    
-    # Read existing config or create new one
-    local temp_config=$(mktemp)
-    if [ -f "$CONFIG_FILE" ]; then
-        # Remove existing entry for this tunnel if it exists
-        grep -v "^$tunnel_name=" "$CONFIG_FILE" > "$temp_config" 2>/dev/null || true
-    fi
-    
-    # Add new tunnel entry
-    echo "$tunnel_name=$server_ip:$server_port:$local_port:$protocol" >> "$temp_config"
-    
-    # Securely write the updated config
-    secure_write "$CONFIG_FILE" "$(cat "$temp_config")"
-    secure_config_file "$CONFIG_FILE"
-    
-    # Clean up temp file
-    rm -f "$temp_config"
-    
-    secure_log_message "INFO" "Updated config for tunnel $tunnel_name"
-}
-
-remove_from_config() {
-    local tunnel_name="$1"
-    
-    # Input sanitization
-    tunnel_name=$(sanitize_input "$tunnel_name" 50)
-    
-    if [ ! -f "$CONFIG_FILE" ]; then
-        return 0
-    fi
-    
-    # Create temporary file with tunnel removed
-    local temp_config=$(mktemp)
-    grep -v "^$tunnel_name=" "$CONFIG_FILE" > "$temp_config" 2>/dev/null || true
-    
-    # Securely write the updated config
-    secure_write "$CONFIG_FILE" "$(cat "$temp_config")"
-    secure_config_file "$CONFIG_FILE"
-    
-    # Clean up temp file
-    rm -f "$temp_config"
-    
-    secure_log_message "INFO" "Removed tunnel $tunnel_name from config"
-}
-
-backup_configuration() {
-    print_info "=== Backup Configuration ==="
-    
-    local backup_dir="$CONFIG_DIR/backups"
-    mkdir -p "$backup_dir"
-    
-    local backup_file="$backup_dir/backhaul_config_$(date +%Y%m%d_%H%M%S).tar.gz"
-    
-    if tar -czf "$backup_file" -C "$CONFIG_DIR" . 2>/dev/null; then
-        print_success "Configuration backed up to: $backup_file"
-    else
-        print_error "Failed to create backup"
-    fi
-}
-
-restore_configuration() {
-    print_info "=== Restore Configuration ==="
-    
-    local backup_dir="$CONFIG_DIR/backups"
-    if [ ! -d "$backup_dir" ]; then
-        print_error "No backup directory found"
-        return 1
-    fi
-    
-    local backup_files=($(ls -t "$backup_dir"/*.tar.gz 2>/dev/null))
-    if [ ${#backup_files[@]} -eq 0 ]; then
-        print_error "No backup files found"
-        return 1
-    fi
-    
-    echo "Available backups:"
-    local i=1
-    for backup in "${backup_files[@]}"; do
-        echo " $i. $(basename "$backup") ($(stat -c %y "$backup" 2>/dev/null || stat -f %Sm "$backup" 2>/dev/null))"
-        ((i++))
-    done
-    
+    local default_auth_token="EasyBackhaulSecretToken"
+    print_info "Set an authentication token (must match on both server and client)."
     while true; do
-        read -p "Select backup to restore [1-${#backup_files[@]}, 0 to cancel]: " choice
-        if [[ "$choice" == "0" ]]; then
-            print_info "Restore cancelled."
-            return
-        elif [[ "$choice" =~ ^[0-9]+$ ]] && [[ $choice -ge 1 ]] && [[ $choice -le ${#backup_files[@]} ]]; then
-            local selected_backup="${backup_files[$((choice-1))]}"
-            
-            # Backup current config
-            backup_configuration
-            
-            if confirm_action "Proceed with restore?" "n"; then
-                if tar -xzf "$selected_backup" -C "$CONFIG_DIR" 2>/dev/null; then
-                    print_success "Configuration restored from: $(basename "$selected_backup")"
-                else
-                                          print_error "Failed to restore configuration"
-                fi
-            fi
-            break
-        else
-            print_warning "Invalid selection"
-        fi
-    done
-}
-
-# Export configuration
-export_configuration() {
-    local tunnel_name="$1"
-    local export_file="$CONFIG_DIR/${tunnel_name}_config_$(date +%Y%m%d_%H%M%S).toml"
-    
-    if [ -f "$CONFIG_DIR/config-${tunnel_name}.toml" ]; then
-        cp "$CONFIG_DIR/config-${tunnel_name}.toml" "$export_file"
-        print_success "Configuration exported to: $export_file"
-    else
-        print_error "Invalid configuration for tunnel $tunnel_name"
-    fi
-}
-
-# --- Advanced Configuration Function ---
-configure_advanced_settings() {
-    local config_content="$1"
-    local transport="$2"
-    local setup_type="$3"
-    
-    clear
-    print_info "=== Advanced Configuration ==="
-    print_info "Customize advanced parameters for your tunnel."
-    echo
-    
-    # Remove existing advanced settings from config_content
-    config_content=$(echo "$config_content" | grep -v -E "^(keepalive_period|nodelay|channel_size|heartbeat|mux_|connection_pool|aggressive_pool|dial_timeout|retry_interval|accept_udp|sniffer_log) =")
-    
-    # Basic settings for all protocols
-    echo
-    print_info "--- Basic Settings ---"
-    
-    # Keepalive period
-    local keepalive_period
-    while true; do
-        read -p "Keepalive period in seconds [75]: " keepalive_period
-        keepalive_period=${keepalive_period:-75}
-        if [[ "$keepalive_period" =~ ^[0-9]+$ ]] && [[ $keepalive_period -ge 1 ]] && [[ $keepalive_period -le 3600 ]]; then
-            break
-        else
-            print_warning "Please enter a number between 1 and 3600."
-        fi
-    done
-    config_content+="keepalive_period = $keepalive_period\n"
-    
-    # Channel size
-    local channel_size
-    while true; do
-        read -p "Channel size [2048]: " channel_size
-        channel_size=${channel_size:-2048}
-        if [[ "$channel_size" =~ ^[0-9]+$ ]] && [[ $channel_size -ge 1 ]] && [[ $channel_size -le 100000 ]]; then
-            break
-        else
-            print_warning "Please enter a number between 1 and 100000."
-        fi
-    done
-    config_content+="channel_size = $channel_size\n"
-    
-    # Heartbeat
-    local heartbeat
-    while true; do
-        read -p "Heartbeat interval in seconds [40]: " heartbeat
-        heartbeat=${heartbeat:-40}
-        if [[ "$heartbeat" =~ ^[0-9]+$ ]] && [[ $heartbeat -ge 1 ]] && [[ $heartbeat -le 300 ]]; then
-            break
-        else
-            print_warning "Please enter a number between 1 and 300."
-        fi
-    done
-    config_content+="heartbeat = $heartbeat\n"
-    
-    # TCP_NODELAY for TCP-based protocols
-    if [[ "$transport" =~ ^(tcp|tcpmux|ws|wss|wsmux|wssmux)$ ]]; then
-        local nodelay
-        while true; do
-            read -p "Enable TCP_NODELAY (y/n) [n]: " nodelay
-            nodelay=${nodelay:-n}
-            if [[ "$nodelay" =~ ^[YyNn]$ ]]; then
-                if [[ "$nodelay" =~ ^[Yy]$ ]]; then
-                    config_content+="nodelay = true\n"
-                else
-                    config_content+="nodelay = false\n"
-                fi
-                break
-            else
-                print_warning "Please enter y or n."
-            fi
-        done
-    fi
-    
-    # Accept UDP for TCP protocol
-    if [[ "$transport" == "tcp" ]]; then
-        local accept_udp
-        while true; do
-            read -p "Accept UDP connections (y/n) [n]: " accept_udp
-            accept_udp=${accept_udp:-n}
-            if [[ "$accept_udp" =~ ^[YyNn]$ ]]; then
-                if [[ "$accept_udp" =~ ^[Yy]$ ]]; then
-                    config_content+="accept_udp = true\n"
-                else
-                    config_content+="accept_udp = false\n"
-                fi
-                break
-            else
-                print_warning "Please enter y or n."
-            fi
-        done
-    fi
-    
-    # Client-specific settings
-    if [[ "$setup_type" == "client" ]]; then
+        read -r -s -p "Enter auth token (min 8 chars, or type 'cancel' to abort this step): " auth_token_val
         echo
-        print_info "--- Client-Specific Settings ---"
-        
-        # Connection pool
-        local connection_pool
-        while true; do
-            read -p "Connection pool size [8]: " connection_pool
-            connection_pool=${connection_pool:-8}
-            if [[ "$connection_pool" =~ ^[0-9]+$ ]] && [[ $connection_pool -ge 1 ]] && [[ $connection_pool -le 100 ]]; then
-                break
-            else
-                print_warning "Please enter a number between 1 and 100."
+        if [[ "$auth_token_val" == "cancel" ]]; then
+            print_info "Auth token input cancelled by user."
+            return 1 # Signal cancellation of this step to the caller
+        fi
+        auth_token_val=${auth_token_val:-$default_auth_token}
+        if [[ "${#auth_token_val}" -lt 8 ]]; then
+            print_warning "Token too short. Please use at least 8 characters for security."
+            if ! prompt_yes_no "Try entering token again?" "y"; then
+                 print_error "Auth token setup aborted by user."
+                 return 1
             fi
-        done
-        config_content+="connection_pool = $connection_pool\n"
-        
-        # Aggressive pool
-        local aggressive_pool
-        while true; do
-            read -p "Enable aggressive pool management (y/n) [n]: " aggressive_pool
-            aggressive_pool=${aggressive_pool:-n}
-            if [[ "$aggressive_pool" =~ ^[YyNn]$ ]]; then
-                if [[ "$aggressive_pool" =~ ^[Yy]$ ]]; then
-                    config_content+="aggressive_pool = true\n"
-                else
-                    config_content+="aggressive_pool = false\n"
-                fi
-                break
-            else
-                print_warning "Please enter y or n."
-            fi
-        done
-        
-        # Dial timeout
-        local dial_timeout
-        while true; do
-            read -p "Dial timeout in seconds [10]: " dial_timeout
-            dial_timeout=${dial_timeout:-10}
-            if [[ "$dial_timeout" =~ ^[0-9]+$ ]] && [[ $dial_timeout -ge 1 ]] && [[ $dial_timeout -le 60 ]]; then
-                break
-            else
-                print_warning "Please enter a number between 1 and 60."
-            fi
-        done
-        config_content+="dial_timeout = $dial_timeout\n"
-        
-        # Retry interval
-        local retry_interval
-        while true; do
-            read -p "Retry interval in seconds [3]: " retry_interval
-            retry_interval=${retry_interval:-3}
-            if [[ "$retry_interval" =~ ^[0-9]+$ ]] && [[ $retry_interval -ge 1 ]] && [[ $retry_interval -le 30 ]]; then
-                break
-            else
-                print_warning "Please enter a number between 1 and 30."
-            fi
-        done
-        config_content+="retry_interval = $retry_interval\n"
-    fi
-    
-    # Multiplexing settings for *mux protocols
-    if [[ "$transport" =~ ^(tcpmux|wsmux|wssmux)$ ]]; then
-        echo
-        print_info "--- Multiplexing Settings ---"
-        
-        # Mux concurrency
-        local mux_con
-        while true; do
-            read -p "Mux concurrency (number of connections) [8]: " mux_con
-            mux_con=${mux_con:-8}
-            if [[ "$mux_con" =~ ^[0-9]+$ ]] && [[ $mux_con -ge 1 ]] && [[ $mux_con -le 64 ]]; then
-                break
-            else
-                print_warning "Please enter a number between 1 and 64."
-            fi
-        done
-        config_content+="mux_con = $mux_con\n"
-        
-        # Mux version
-        local mux_version
-        while true; do
-            read -p "SMUX protocol version (1 or 2) [1]: " mux_version
-            mux_version=${mux_version:-1}
-            if [[ "$mux_version" =~ ^[12]$ ]]; then
-                break
-            else
-                print_warning "Please enter 1 or 2."
-            fi
-        done
-        config_content+="mux_version = $mux_version\n"
-        
-        # Mux frame size
-        local mux_framesize
-        while true; do
-            read -p "Mux frame size in bytes [32768]: " mux_framesize
-            mux_framesize=${mux_framesize:-32768}
-            if [[ "$mux_framesize" =~ ^[0-9]+$ ]] && [[ $mux_framesize -ge 1024 ]] && [[ $mux_framesize -le 65536 ]]; then
-                break
-            else
-                print_warning "Please enter a number between 1024 and 65536."
-            fi
-        done
-        config_content+="mux_framesize = $mux_framesize\n"
-        
-        # Mux receive buffer
-        local mux_recievebuffer
-        while true; do
-            read -p "Mux receive buffer in bytes [4194304]: " mux_recievebuffer
-            mux_recievebuffer=${mux_recievebuffer:-4194304}
-            if [[ "$mux_recievebuffer" =~ ^[0-9]+$ ]] && [[ $mux_recievebuffer -ge 65536 ]] && [[ $mux_recievebuffer -le 16777216 ]]; then
-                break
-            else
-                print_warning "Please enter a number between 65536 and 16777216."
-            fi
-        done
-        config_content+="mux_recievebuffer = $mux_recievebuffer\n"
-        
-        # Mux stream buffer
-        local mux_streambuffer
-        while true; do
-            read -p "Mux stream buffer in bytes [65536]: " mux_streambuffer
-            mux_streambuffer=${mux_streambuffer:-65536}
-            if [[ "$mux_streambuffer" =~ ^[0-9]+$ ]] && [[ $mux_streambuffer -ge 1024 ]] && [[ $mux_streambuffer -le 1048576 ]]; then
-                break
-            else
-                print_warning "Please enter a number between 1024 and 1048576."
-            fi
-        done
-        config_content+="mux_streambuffer = $mux_streambuffer\n"
-    fi
-    
-    # Optional features
-    echo
-    print_info "--- Optional Features ---"
-    
-    # Sniffer
-    local sniffer
-    while true; do
-        read -p "Enable network sniffing/monitoring (y/n) [n]: " sniffer
-        sniffer=${sniffer:-n}
-        if [[ "$sniffer" =~ ^[YyNn]$ ]]; then
-            if [[ "$sniffer" =~ ^[Yy]$ ]]; then
-                config_content+="sniffer = true\n"
-                
-                # Custom sniffer log path
-                local sniffer_log_path
-                read -p "Sniffer log file path [/var/log/backhaul-${tunnel_name}.json]: " sniffer_log_path
-                sniffer_log_path=${sniffer_log_path:-"/var/log/backhaul-${tunnel_name}.json"}
-                config_content+="sniffer_log = \"$sniffer_log_path\"\n"
-                
-                print_info "Sniffer enabled with log file: $sniffer_log_path"
-            else
-                config_content+="sniffer = false\n"
-            fi
-            break
         else
-            print_warning "Please enter y or n."
+            auth_token_ref="$auth_token_val"
+            break
         fi
     done
-    
-    # Web interface port
-    local web_port
-    while true; do
-        read -p "Web interface port (0 to disable) [0]: " web_port
-        web_port=${web_port:-0}
-        if [[ "$web_port" =~ ^[0-9]+$ ]] && [[ $web_port -ge 0 ]] && [[ $web_port -le 65535 ]]; then
-            if [[ $web_port -gt 0 ]]; then
-                config_content+="web_port = $web_port\n"
-            fi
-            break
-        else
-            print_warning "Please enter a number between 0 and 65535."
-        fi
-    done
-    
-    print_success "Advanced configuration completed."
-    echo
-    print_info "Configuration summary:"
-    echo "  - Keepalive: ${keepalive_period}s"
-    echo "  - Channel size: $channel_size"
-    echo "  - Heartbeat: ${heartbeat}s"
-    if [[ "$transport" =~ ^(tcp|tcpmux|ws|wss|wsmux|wssmux)$ ]]; then
-        echo "  - TCP_NODELAY: $([[ "$nodelay" =~ ^[Yy]$ ]] && echo "enabled" || echo "disabled")"
-    fi
-    if [[ "$transport" == "tcp" ]]; then
-        echo "  - Accept UDP: $([[ "$accept_udp" =~ ^[Yy]$ ]] && echo "enabled" || echo "disabled")"
-    fi
-    if [[ "$setup_type" == "client" ]]; then
-        echo "  - Connection pool: $connection_pool"
-        echo "  - Aggressive pool: $([[ "$aggressive_pool" =~ ^[Yy]$ ]] && echo "enabled" || echo "disabled")"
-        echo "  - Dial timeout: ${dial_timeout}s"
-        echo "  - Retry interval: ${retry_interval}s"
-    fi
-    if [[ "$transport" =~ ^(tcpmux|wsmux|wssmux)$ ]]; then
-        echo "  - Mux concurrency: $mux_con"
-        echo "  - Mux version: $mux_version"
-        echo "  - Mux frame size: $mux_framesize bytes"
-        echo "  - Mux receive buffer: $mux_recievebuffer bytes"
-        echo "  - Mux stream buffer: $mux_streambuffer bytes"
-    fi
-    echo "  - Sniffer: $([[ "$sniffer" =~ ^[Yy]$ ]] && echo "enabled" || echo "disabled")"
-    if [[ "$sniffer" =~ ^[Yy]$ ]]; then
-        echo "  - Sniffer log: $sniffer_log_path"
-    fi
-    if [[ $web_port -gt 0 ]]; then
-        echo "  - Web interface: port $web_port"
-    else
-        echo "  - Web interface: disabled"
-    fi
-    
-    press_any_key
-    echo "$config_content"
+    return 0
 }
 
-# --- Helper Functions ---
+_prompt_tls_config() {
+    local transport="$1"
+    local -n tls_cert_path_ref=$2
+    local -n tls_key_path_ref=$3
 
-# Note: All helper functions (validate_port, validate_ip, generate_self_signed_cert, etc.) 
-# are already implemented in helpers.sh and backhaul_core.sh modules.
-# These modules are concatenated together by build.sh, so we can use them directly.
+    if [[ ! "$transport" =~ ^(wss|wssmux)$ ]]; then
+        return 0 # Not applicable for this transport
+    fi
 
+    # Determine Step Number. Could be Step 4 (after Basic) or Step 5 (after Advanced if shown)
+    # This is tricky to get exact from within here without knowing if advanced was shown.
+    # Let's assume it's called with context, or use a generic "Step X of N"
+    print_menu_header "secondary" "TLS Certificate Configuration" "Step 4/5 of N: Secure Protocols"
+    print_info "Secure protocols (WSS/WSSMUX) require a TLS certificate and private key."
+
+    local cert_dir_global="${CERT_DIR:-/etc/easybackhaul/certs}"
+    ensure_dir "$cert_dir_global" "700"
+    
+    mapfile -t existing_certs < <(find "$cert_dir_global" -maxdepth 1 -name '*.pem' -o -name '*.crt' 2>/dev/null | sort)
+    
+    local tls_options=()
+    local cert_map=()
+
+    if [[ ${#existing_certs[@]} -gt 0 ]]; then
+        print_info "Existing certificates/keys found in $cert_dir_global:"
+        local count=1
+        for cert_file in "${existing_certs[@]}"; do
+            local potential_key_file="${cert_file%.*}.key"
+            if [[ ! -f "$potential_key_file" ]]; then potential_key_file="${cert_file%.*}.pem"; fi
+
+            if [[ -f "$potential_key_file" ]]; then
+                 tls_options+=("$count. Use: $(basename "$cert_file") + $(basename "$potential_key_file")")
+                 cert_map[$count]="$cert_file;$potential_key_file"
+                 ((count++))
+            else
+                print_warning "Certificate $(basename "$cert_file") found without a clearly matching .key file, skipping."
+            fi
+        done
+    fi
+    tls_options+=("$((${#cert_map[@]} + 1)). Generate New Self-Signed Certificate")
+    local generate_new_opt_num=$((${#cert_map[@]} + 1))
+    tls_options+=("$((${#cert_map[@]} + 2)). Skip TLS configuration (NOT RECOMMENDED)")
+    local skip_tls_opt_num=$((${#cert_map[@]} + 2))
+
+    _tls_help() {
+        print_info "TLS Configuration Help:"
+        echo " - Select an existing certificate/key pair if available."
+        echo " - Choose 'Generate New' to create a self-signed certificate."
+        echo " - 'Skip TLS' will proceed without TLS; WSS/WSSMUX will likely fail."
+        echo " - Certificate paths are stored in the tunnel's TOML config file."
+        echo "Use 'r' to return to Basic Params, 'c' to cancel configuration."
+        press_any_key
+    }
+
+    menu_loop "Select TLS certificate option" tls_options "_tls_help"
+    local menu_rc=$?
+    local user_choice="$MENU_CHOICE" # MENU_CHOICE is set by menu_loop on rc=0
+
+    case "$menu_rc" in
+        0) # Numeric choice
+            if (( user_choice == generate_new_opt_num )); then
+                # Attempt to generate certs. generate_self_signed_tls_cert handles its own user interaction.
+                # It returns 0 on success, 1 on failure/cancel.
+                if generate_self_signed_tls_cert; then
+                    local new_cert=$(find "$cert_dir_global" -name '*.pem' -o -name '*.crt' -print0 | xargs -0 stat -c "%Y %n" | sort -nr | head -n1 | awk '{print $2}')
+                    local new_key="${new_cert%.*}.key"
+                    if [[ ! -f "$new_key" ]]; then new_key="${new_cert%.*}.pem"; fi
+
+                    if [[ -f "$new_cert" && -f "$new_key" ]]; then
+                        tls_cert_path_ref="$new_cert"
+                        tls_key_path_ref="$new_key"
+                        print_success "Using newly generated cert: $tls_cert_path_ref and key: $tls_key_path_ref"
+                        # Fall through to return 0 at the end of the function
+                    else
+                        handle_error "ERROR" "Failed to identify newly generated certificate/key pair after successful generation."
+                        # Offer to retry this step? For now, treat as failure of this step.
+                        # This implies a problem with find/stat logic, not user cancellation.
+                        if prompt_yes_no "Error identifying generated files. Retry TLS setup step?" "y"; then
+                           _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $?
+                        else
+                           return 1 # Cancel wizard due to internal error
+                        fi
+                    fi
+                else
+                    # generate_self_signed_tls_cert failed or was cancelled by user within it.
+                    print_warning "Self-signed certificate generation failed or was cancelled."
+                    # Ask user if they want to retry the TLS config step or cancel wizard
+                    if prompt_yes_no "Retry TLS configuration, or cancel wizard? (Retry/Cancel)" "y"; then
+                        _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $?
+                    else
+                        return 1 # User chose to cancel wizard
+                    fi
+                fi
+            elif (( user_choice == skip_tls_opt_num )); then
+                print_warning "Skipping TLS configuration. WSS/WSSMUX will likely not work without it."
+                tls_cert_path_ref=""
+                tls_key_path_ref=""
+                # Fall through to return 0
+            elif [[ -n "${cert_map[$user_choice]}" ]]; then
+                IFS=';' read -r tls_cert_path_ref tls_key_path_ref <<< "${cert_map[$user_choice]}"
+                print_success "Using selected cert: $tls_cert_path_ref and key: $tls_key_path_ref"
+                # Fall through to return 0
+            else
+                handle_error "ERROR" "Invalid TLS certificate selection: $user_choice."
+                # Ask user to retry this step
+                if prompt_yes_no "Invalid selection. Retry TLS setup step?" "y"; then
+                    _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $?
+                else
+                    return 1 # User chose to cancel wizard
+                fi
+            fi
+            return 0 # Successful numeric choice processing
+            ;;
+        2) # '?' Help
+            _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $? ;; # Re-call current step
+        3) # 'm' Main Menu
+            print_info "Configuration cancelled: returning to Main Menu."
+            return 1 ;; # Signal cancel wizard
+        4) # 'x' Exit script
+            request_script_exit
+            return 1 ;; # Should not be reached
+        5) # 'r' Return/Back
+            print_info "Going back to previous step from TLS config."
+            return 2 ;; # Signal go back one step
+        6)  # Invalid input in menu_loop
+            # press_any_key handled by menu_loop
+            _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $? ;; # Re-call current step
+        *) # Includes unexpected menu_loop return codes
+            handle_error "ERROR" "Unhandled menu_loop code $menu_rc in _prompt_tls_config"
+            # Offer to retry or cancel
+            if prompt_yes_no "Unexpected error in TLS config. Retry this step?" "y"; then
+                _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $?
+            else
+                return 1 # Signal cancel wizard
+            fi
+    esac
+    # Should be unreachable if all paths in case either return or re-invoke.
+    # However, as a fallback for case 0 if it doesn't return explicitly:
+    # This implies a valid selection was made (or skipped).
+    return 0
+}
+
+# --- Main Configuration Wizard ---
+# Manages the overall flow of tunnel configuration.
+# Returns 0 if configuration is completed (even if not saved by user later),
+# Returns 1 if user cancels mid-way using navigation keys that bubble up as failure.
+configure_tunnel() {
+    local current_wizard_step=1
+
+    # Variables to store wizard state, passed by nameref or directly
+    local setup_choice_val tunnel_mode transport_protocol
+    local server_listen_port client_remote_ip client_remote_port client_local_fwd_port common_auth_token
+    local cfg_tls_cert_path cfg_tls_key_path
+    local setup_is_advanced=false
+
+    # Default advanced parameters (can be populated if an advanced step is added)
+    local cfg_log_level="info" cfg_sniffer="false"
+    local cfg_sniffer_log # Example: "/var/log/easybackhaul/${final_tunnel_name}-sniffer.json"
+    local cfg_web_port=0 cfg_nodelay="true" cfg_keepalive_period=75
+    local cfg_heartbeat=40 cfg_channel_size=2048 cfg_accept_udp="false"
+    local cfg_connection_pool=8 cfg_aggressive_pool="false" cfg_retry_interval=3 cfg_dial_timeout=10
+    local cfg_mux_con=8 cfg_mux_version=1 cfg_mux_framesize=32768
+    local cfg_mux_receivebuffer=4194304 cfg_mux_streambuffer=65536
+
+    # Wizard State Machine
+    # Returns 0 if configuration is completed and saved.
+    # Returns 1 if user cancels the wizard at any point.
+    while true; do # Loop for wizard steps, allowing "back" functionality
+        local step_rc=0 # Return code from the prompt functions
+
+        case "$current_wizard_step" in
+            1) # Step 1: Setup Type & Mode
+                _prompt_setup_type_and_mode setup_choice_val tunnel_mode
+                step_rc=$?
+                case "$step_rc" in
+                    0) # Success
+                        [[ "$setup_choice_val" -eq 2 ]] && setup_is_advanced=true
+                        log_message "INFO" "Setup type: $(if $setup_is_advanced; then echo "Advanced"; else echo "Quick"; fi), Mode: $tunnel_mode"
+                        ((current_wizard_step++))
+                        ;;
+                    1) # Cancel wizard
+                        print_info "Configuration wizard cancelled at Setup Type/Mode."
+                        return_from_menu # Ensure menu stack is correct
+                        return 1 ;;
+                    2) # 'r' Back - from first step, this is equivalent to cancel
+                        print_info "Configuration wizard cancelled (back from first step)."
+                        return_from_menu
+                        return 1 ;;
+                    *) handle_error "CRITICAL" "Unknown return code $step_rc from _prompt_setup_type_and_mode." ; return 1 ;;
+                esac
+                ;;
+            2) # Step 2: Transport Protocol
+                _prompt_transport_protocol "$setup_is_advanced" transport_protocol # Pass setup_is_advanced status
+                step_rc=$?
+                case "$step_rc" in
+                    0) ((current_wizard_step++));; # Success
+                    1) print_info "Configuration wizard cancelled at Transport Protocol selection."; return_from_menu; return 1 ;;
+                    2) ((current_wizard_step--)); continue ;; # Go back to Step 1
+                    *) handle_error "CRITICAL" "Unknown return code $step_rc from _prompt_transport_protocol." ; return 1 ;;
+                esac
+                ;;
+            3) # Step 3: Basic Configuration Parameters
+                _prompt_basic_config_params "$tunnel_mode" \
+                    server_listen_port client_remote_ip client_remote_port client_local_fwd_port \
+                    common_auth_token
+                step_rc=$?
+                case "$step_rc" in
+                    0) ((current_wizard_step++));; # Success
+                    1) # Cancel from basic params (e.g. typed 'cancel')
+                       # Decide if this should be "back" or "full cancel"
+                       # For now, let's treat explicit 'cancel' within basic_params as full wizard cancel.
+                       # 'r' key is not available in these prompts.
+                        print_info "Configuration wizard cancelled at Basic Parameters."
+                        return_from_menu; return 1 ;;
+                    # No '2' (back) returned by _prompt_basic_config_params currently
+                    *) handle_error "CRITICAL" "Unknown return code $step_rc from _prompt_basic_config_params." ; return 1 ;;
+                esac
+                ;;
+            4) # Step 4 (Conditional): Advanced Configuration
+                if $setup_is_advanced; then
+                    # TODO: Implement _prompt_advanced_config_params
+                    # This function should also return 0 (success), 1 (cancel wizard), 2 (back)
+                    # For now, we'll simulate success and provide a message.
+                    print_info "Advanced parameter configuration (currently using defaults)."
+                    log_message "INFO" "Advanced setup chosen - using default advanced parameters for now."
+                    # Example call:
+                    # _prompt_advanced_config_params "$tunnel_mode" "$transport_protocol" namerefs...
+                    # step_rc=$?
+                    # case "$step_rc" in
+                    #    0) ((current_wizard_step++));;
+                    #    1) print_info "Wizard cancelled at Advanced Params."; return_from_menu; return 1 ;;
+                    #    2) ((current_wizard_step--)); continue ;; # Back to Basic Config
+                    #    *) handle_error "CRITICAL" "Unknown rc $step_rc from _prompt_advanced_config_params." ; return 1 ;;
+                    # esac
+                    step_rc=0 # Simulate success for now
+                    if [[ "$step_rc" -eq 0 ]]; then ((current_wizard_step++)); else return 1; fi # Simplified for placeholder
+                else
+                    ((current_wizard_step++)) # Skip if not advanced setup
+                fi
+                ;;
+            5) # Step 5 (Conditional): TLS Configuration
+                cfg_tls_cert_path="" cfg_tls_key_path="" # Reset for this step
+                if [[ "$transport_protocol" =~ ^(wss|wssmux)$ ]]; then
+                    _prompt_tls_config "$transport_protocol" cfg_tls_cert_path cfg_tls_key_path
+                    step_rc=$?
+                    case "$step_rc" in
+                        0) ((current_wizard_step++));; # Success (includes user skipping TLS)
+                        1) print_info "Configuration wizard cancelled at TLS Configuration."; return_from_menu; return 1 ;;
+                        2) ((current_wizard_step--)); continue ;; # Go back to Advanced (or Basic if not advanced)
+                        *) handle_error "CRITICAL" "Unknown return code $step_rc from _prompt_tls_config." ; return 1 ;;
+                    esac
+                else
+                    ((current_wizard_step++)) # Skip if not WSS/WSSMUX
+                fi
+                ;;
+            6) # Step 6: Configuration Summary & Confirmation
+                print_menu_header "secondary" "Configuration Summary" "Review and Confirm"
+                echo "  Mode: $tunnel_mode"
+                echo "  Transport: $transport_protocol"
+                if [[ "$tunnel_mode" == "server" ]]; then
+                    echo "  Listen Port: $server_listen_port"
+                else
+                    echo "  Remote Server: $client_remote_ip:$client_remote_port"
+                    echo "  Local Forward Port: $client_local_fwd_port"
+                fi
+                echo "  Auth Token: [set]" # Assuming it's always set if we reach here
+
+                if $setup_is_advanced; then
+                    echo "  --- Advanced Settings (Defaults Used) ---"
+                    echo "  Log Level: $cfg_log_level"
+                    # Consider printing other relevant advanced params if they were configurable
+                fi
+                if [[ -n "$cfg_tls_cert_path" && -n "$cfg_tls_key_path" ]]; then
+                    echo "  TLS Certificate: $cfg_tls_cert_path"
+                    echo "  TLS Key: $cfg_tls_key_path"
+                elif [[ "$transport_protocol" =~ ^(wss|wssmux)$ ]]; then
+                    # Only show TLS: Skipped if it was applicable
+                    echo "  TLS: Skipped/Not Configured"
+                fi
+
+                if ! prompt_yes_no "Proceed with this configuration?" "y"; then
+                    # User does NOT want to proceed. Ask to edit from start or cancel wizard.
+                    if prompt_yes_no "Edit configuration from the beginning, or cancel wizard? (Enter 'y' to Edit, 'n' to Cancel)" "y"; then
+                        current_wizard_step=1 # Restart wizard from Step 1
+                        log_message "INFO" "User chose to edit configuration from start."
+                        # Consider resetting influential variables if they affect early steps.
+                        # For now, assuming _prompt_ functions will correctly overwrite them.
+                        # setup_is_advanced=false # Example, if needed for a clean restart.
+                        continue # Re-loop the main wizard 'while true' to go to step 1
+                    else
+                        # User chose to cancel the wizard.
+                        print_info "Configuration wizard cancelled at summary."
+                        return_from_menu # Ensure menu stack is correct before returning
+                        return 1 # Exit configure_tunnel with cancel status
+                    fi
+                else
+                    # User wants to proceed with this configuration.
+                    ((current_wizard_step++)) # Proceed to Save step (Step 7)
+                fi
+                ;;
+            7) # Step 7: Generate Tunnel Name and Save Configuration (was Step 8)
+                local tunnel_name_suffix
+                # Renumbering comments for steps for clarity from here:
+                # Current step is 7 (Save), next is 8 (Post-create)
+                tunnel_name_suffix="${tunnel_mode}-${transport_protocol}-$(date +%s | tail -c 5)"
+                local final_tunnel_name="bh-$tunnel_name_suffix"
+                cfg_sniffer_log="/var/log/easybackhaul/${final_tunnel_name}-sniffer.json" # Set specific sniffer log path
+
+                local config_file_path="$CONFIG_DIR/config-${final_tunnel_name}.toml"
+                ensure_dir "$CONFIG_DIR"
+                : > "$config_file_path"
+
+                update_toml_value "$config_file_path" "mode" "$tunnel_mode" "string"
+                update_toml_value "$config_file_path" "transport" "$transport_protocol" "string"
+                update_toml_value "$config_file_path" "auth_token" "$common_auth_token" "string"
+
+                if [[ "$tunnel_mode" == "server" ]]; then
+                    update_toml_value "$config_file_path" "listen" ":$server_listen_port" "string"
+                else
+                    update_toml_value "$config_file_path" "server" "${client_remote_ip}:${client_remote_port}" "string"
+                    update_toml_value "$config_file_path" "local" ":$client_local_fwd_port" "string"
+                fi
+
+                if $setup_is_advanced; then
+                    update_toml_value "$config_file_path" "log_level" "$cfg_log_level" "string"
+                    update_toml_value "$config_file_path" "sniffer" "$cfg_sniffer" "boolean"
+                    if [[ "$cfg_sniffer" == "true" ]]; then
+                        update_toml_value "$config_file_path" "sniffer_log" "$cfg_sniffer_log" "string"
+                    fi
+                    if (( cfg_web_port > 0 )); then
+                         update_toml_value "$config_file_path" "web_port" "$cfg_web_port" "numeric"
+                    fi
+                    if [[ "$transport_protocol" != "udp" ]]; then
+                         update_toml_value "$config_file_path" "nodelay" "$cfg_nodelay" "boolean"
+                         update_toml_value "$config_file_path" "keepalive_period" "$cfg_keepalive_period" "numeric"
+                    fi
+                    if [[ "$tunnel_mode" == "server" ]]; then
+                        update_toml_value "$config_file_path" "heartbeat" "$cfg_heartbeat" "numeric"
+                        update_toml_value "$config_file_path" "channel_size" "$cfg_channel_size" "numeric"
+                        if [[ "$transport_protocol" == "tcp" || "$transport_protocol" == "tcpmux" ]]; then # accept_udp for TCP server
+                            update_toml_value "$config_file_path" "accept_udp" "$cfg_accept_udp" "boolean"
+                        fi
+                    else # client
+                        update_toml_value "$config_file_path" "connection_pool" "$cfg_connection_pool" "numeric"
+                        update_toml_value "$config_file_path" "aggressive_pool" "$cfg_aggressive_pool" "boolean"
+                        update_toml_value "$config_file_path" "retry_interval" "$cfg_retry_interval" "numeric"
+                        update_toml_value "$config_file_path" "dial_timeout" "$cfg_dial_timeout" "numeric"
+                    fi
+                    if [[ "$transport_protocol" =~ mux$ ]]; then # MUX specific
+                        update_toml_value "$config_file_path" "mux_con" "$cfg_mux_con" "numeric"
+                        update_toml_value "$config_file_path" "mux_version" "$cfg_mux_version" "numeric"
+                        update_toml_value "$config_file_path" "mux_framesize" "$cfg_mux_framesize" "numeric"
+                        update_toml_value "$config_file_path" "mux_receivebuffer" "$cfg_mux_receivebuffer" "numeric"
+                        update_toml_value "$config_file_path" "mux_streambuffer" "$cfg_mux_streambuffer" "numeric"
+                    fi
+                fi
+
+                if [[ -n "$cfg_tls_cert_path" && -n "$cfg_tls_key_path" ]]; then
+                    update_toml_value "$config_file_path" "tls_cert" "$cfg_tls_cert_path" "string"
+                    update_toml_value "$config_file_path" "tls_key" "$cfg_tls_key_path" "string"
+                fi
+
+                set_secure_file_permissions "$config_file_path" "600"
+                handle_success "Configuration saved: $config_file_path"
+                ((current_wizard_step++)) # Proceed to Post-Creation (Step 8)
+                ;;
+            8) # Step 8: Post-creation (Systemd, Start) (was Step 9)
+                if type create_systemd_service &>/dev/null; then
+                    if create_systemd_service "$final_tunnel_name" "$config_file_path"; then
+                        if prompt_yes_no "Start the tunnel '$final_tunnel_name' now?" "y"; then
+                            if run_with_spinner "Starting tunnel $final_tunnel_name..." systemctl start "backhaul-${final_tunnel_name}.service"; then
+                                handle_success "Tunnel '$final_tunnel_name' started."
+                            else
+                                handle_error "ERROR" "Failed to start tunnel '$final_tunnel_name'. Check logs: journalctl -u backhaul-${final_tunnel_name}.service"
+                            fi
+                        else
+                            print_info "Tunnel '$final_tunnel_name' created but not started."
+                        fi
+                    else
+                         handle_error "ERROR" "Failed to create systemd service for '$final_tunnel_name'."
+                    fi
+                else
+                    handle_error "WARNING" "Function 'create_systemd_service' not found. Cannot create service automatically."
+                fi
+                press_any_key
+                return_from_menu
+                return 0
+                ;;
+            *)
+                handle_error "CRITICAL" "Invalid wizard step in configure_tunnel: $current_wizard_step"
+                return 1
+                ;;
+        esac
+    done
+}
+
+
+# --- Decommissioned/Old Functions ---
+# update_config_file() { log_message "WARN" "DEPRECATED: update_config_file called. Use TOML-based config."; }
+# remove_from_config() { log_message "WARN" "DEPRECATED: remove_from_config called. Use TOML-based config."; }
+# backup_configuration() { log_message "WARN" "DEPRECATED: backup_configuration called. Use backup_configuration_path from helpers.sh."; }
+# restore_configuration() { log_message "WARN" "DEPRECATED: restore_configuration called."; }
+# export_configuration() { log_message "WARN" "DEPRECATED: export_configuration called."; }
+# configure_advanced_settings() { log_message "WARN" "DEPRECATED: configure_advanced_settings called."; }
+
+
+true # Ensure script is valid if sourced.

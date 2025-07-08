@@ -1,523 +1,509 @@
-# backhaul_core.sh
+# modules/backhaul_core.sh
 # Download, install, and update Backhaul binary; get server info 
 
-# --- Core Logic ---
-SERVER_IP=""
-SERVER_COUNTRY=""
-SERVER_ISP=""
+# Global variables for server info - to be populated by get_server_info
+SERVER_IP="N/A"
+SERVER_COUNTRY="N/A"
+SERVER_ISP="N/A"
 
+# Fetches server's public IP and geo-information.
+# Populates SERVER_IP, SERVER_COUNTRY, SERVER_ISP global variables.
 get_server_info() {
-    # Set default values first
+    log_message "INFO" "Attempting to fetch server IP and geo-information..."
     SERVER_IP="N/A"
     SERVER_COUNTRY="N/A"
     SERVER_ISP="N/A"
-    
-    # Try multiple IP info services with shorter timeouts
-    local response=""
-    local services=(
-        "http://ip-api.com/json"
-        "https://ipapi.co/json"
+
+    local services_to_try=(
+        "http://ip-api.com/json/?fields=query,country,isp"
+        "https://ipapi.co/json/"
         "https://ipinfo.io/json"
     )
-    
-    for service in "${services[@]}"; do
-        print_info "Fetching server info from $service..."
+    local response_json
+
+    for service_url in "${services_to_try[@]}"; do
+        log_message "DEBUG" "Trying IP service: $service_url"
         
-        # Use timeout command to ensure curl doesn't hang indefinitely
-        if command -v timeout >/dev/null 2>&1; then
-            response=$(timeout 10 curl -s --connect-timeout 3 --max-time 8 "$service" 2>/dev/null)
-        else
-            # Fallback without timeout command
-            if response=$(curl -s --connect-timeout 3 --max-time 8 "$service" 2>/dev/null) && [ -n "$response" ]; then
-            # Try to parse the response
-            local ip=""
-            local country=""
-            local isp=""
-            
-            # Handle different JSON formats from different services
-            if echo "$response" | jq -e . >/dev/null 2>&1; then
-                # ip-api.com format
-                if echo "$response" | jq -e '.query' >/dev/null 2>&1; then
-                    ip=$(echo "$response" | jq -r '.query // "N/A"')
-                    country=$(echo "$response" | jq -r '.country // "N/A"')
-                    isp=$(echo "$response" | jq -r '.isp // "N/A"')
-                # ipapi.co format
-                elif echo "$response" | jq -e '.ip' >/dev/null 2>&1; then
-                    ip=$(echo "$response" | jq -r '.ip // "N/A"')
-                    country=$(echo "$response" | jq -r '.country_name // "N/A"')
-                    isp=$(echo "$response" | jq -r '.org // "N/A"')
-                # ipinfo.io format
-                elif echo "$response" | jq -e '.ip' >/dev/null 2>&1; then
-                    ip=$(echo "$response" | jq -r '.ip // "N/A"')
-                    country=$(echo "$response" | jq -r '.country // "N/A"')
-                    isp=$(echo "$response" | jq -r '.org // "N/A"')
-                fi
-                
-                if [ "$ip" != "N/A" ] && [ "$ip" != "null" ]; then
+        # Use run_with_spinner for curl command with timeout
+        # Create a temporary file to capture curl output
+        local temp_output_file
+        temp_output_file=$(mktemp)
+
+        # Using a subshell to capture output for response_json
+        if response_json=$(timeout 10s curl -s --connect-timeout 3 --max-time 8 "$service_url" 2>"$temp_output_file"); then
+            if [[ -n "$response_json" ]] && echo "$response_json" | jq -e . >/dev/null 2>&1; then
+                # Attempt to parse common fields
+                local ip country isp
+                ip=$(echo "$response_json" | jq -r '.ip // .query // "N/A"')
+                country=$(echo "$response_json" | jq -r '.country // .country_name // "N/A"')
+                isp=$(echo "$response_json" | jq -r '.isp // .org // "N/A"')
+
+                if [[ "$ip" != "N/A" && "$ip" != "null" ]]; then
                     SERVER_IP="$ip"
                     SERVER_COUNTRY="$country"
                     SERVER_ISP="$isp"
-                    print_success "Server info fetched successfully"
+                    log_message "INFO" "Server info fetched from $service_url: IP=$SERVER_IP, Country=$SERVER_COUNTRY, ISP=$SERVER_ISP"
+                    rm -f "$temp_output_file"
                     return 0
+                else
+                    log_message "WARN" "Successfully fetched from $service_url, but IP address was null or N/A."
                 fi
+            else
+                log_message "WARN" "Invalid or empty JSON response from $service_url. Error: $(cat "$temp_output_file")"
             fi
+        else
+            log_message "WARN" "Failed to fetch from $service_url. Error: $(cat "$temp_output_file")"
         fi
-        
-        print_warning "Failed to fetch from $service, trying next..."
+        rm -f "$temp_output_file"
     done
-    
-    # If all services fail, try to get IP from local commands
-    print_warning "All external IP services failed. Trying local IP detection..."
-    
-    # Try different methods to get local IP
-    local local_ip=""
-    if command -v curl >/dev/null 2>&1; then
-        local_ip=$(curl -s --connect-timeout 3 --max-time 5 https://icanhazip.com 2>/dev/null | tr -d '\n\r')
-    elif command -v wget >/dev/null 2>&1; then
-        local_ip=$(wget -qO- --timeout=5 https://icanhazip.com 2>/dev/null | tr -d '\n\r')
-    fi
-    
-    if [ -n "$local_ip" ] && [[ "$local_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        SERVER_IP="$local_ip"
-        print_success "Local IP detected: $SERVER_IP"
+
+    log_message "WARN" "All external IP services failed. Attempting fallback using icanhazip.com..."
+    local fallback_ip
+    if fallback_ip=$(curl -s --connect-timeout 3 --max-time 5 https://icanhazip.com 2>/dev/null | tr -d '\n\r'); then
+         if [[ -n "$fallback_ip" ]] && validate_ip "$fallback_ip"; then # Use helper
+            SERVER_IP="$fallback_ip"
+            # SERVER_COUNTRY and SERVER_ISP will remain N/A
+            log_message "INFO" "Fallback successful. Server IP detected as: $SERVER_IP (Country/ISP unknown)."
+            return 0
+        else
+            log_message "WARN" "Fallback icanhazip.com returned invalid IP: $fallback_ip"
+        fi
     else
-        print_warning "Could not fetch server info. Continuing without it."
+        log_message "ERROR" "Could not fetch server IP from any source."
     fi
+    
+    # If still N/A, log it.
+    if [[ "$SERVER_IP" == "N/A" ]]; then
+        log_message "ERROR" "Unable to determine server IP address."
+    fi
+    return 1
 }
 
-# Note: Banner functions are now defined in helpers.sh to avoid duplication
-
-# Verify binary installation
+# Verifies the Backhaul binary installation and version.
+# Uses global BIN_PATH.
 verify_binary_installation() {
+    log_message "INFO" "Verifying Backhaul binary at: $BIN_PATH"
     if [[ ! -f "$BIN_PATH" ]]; then
-        print_error "Binary not found at expected location: $BIN_PATH"
+        handle_error "ERROR" "Binary not found at expected location: $BIN_PATH"
         return 1
     fi
     
     if [[ ! -x "$BIN_PATH" ]]; then
-        print_error "Binary is not executable. Attempting to fix permissions..."
+        handle_error "WARNING" "Binary at $BIN_PATH is not executable. Attempting to fix..."
         chmod +x "$BIN_PATH"
         if [[ ! -x "$BIN_PATH" ]]; then
-            print_error "Failed to make binary executable."
+            handle_error "ERROR" "Failed to make binary $BIN_PATH executable."
             return 1
         fi
+        log_message "INFO" "Binary permissions fixed for $BIN_PATH."
     fi
     
-    # Test if binary works - try both -v and --version flags
     local version_output=""
-    if "$BIN_PATH" -v >/dev/null 2>&1; then
-        version_output=$("$BIN_PATH" -v 2>/dev/null | head -n1)
-    elif "$BIN_PATH" --version >/dev/null 2>&1; then
-        version_output=$("$BIN_PATH" --version 2>/dev/null | head -n1)
+    # Try -v first, then --version
+    if version_output=$("$BIN_PATH" -v 2>&1 | head -n1); then
+        : # Command succeeded, version_output captured
+    elif version_output=$("$BIN_PATH" --version 2>&1 | head -n1); then
+        : # Command succeeded, version_output captured
     else
-        print_warning "Binary exists but version check failed."
-        print_info "This might indicate an incompatible or corrupted binary."
-        print_info "You can still try to use it, but some features might not work."
+        handle_error "WARNING" "Binary exists at $BIN_PATH but version check command failed. It might be incompatible or corrupted."
         return 1
     fi
-    print_success "Binary verification successful: $version_output"
+
+    if [[ -z "$version_output" ]] || echo "$version_output" | grep -qiE "command not found|no such file|error"; then
+        handle_error "WARNING" "Binary at $BIN_PATH version output seems invalid: $version_output"
+        return 1
+    fi
+
+    handle_success "Backhaul binary verification successful. Version: $version_output"
     return 0
 }
 
-# Test network connectivity to various sources
-run_network_diagnostics_menu() {
-    clear
-    print_secondary_menu_header "Network Connectivity Test"
-    
-    print_info "Testing connectivity to various sources..."
-    echo
-    
-    local test_urls=(
-        "https://api.github.com"
-        "https://github.com"
-        "https://google.com"
-        "https://cloudflare.com"
-    )
-    
-    local test_names=(
-        "GitHub API"
-        "GitHub Main"
-        "Google (general internet)"
-        "Cloudflare (CDN)"
-    )
-    
-    local accessible_count=0
-    local total_count=${#test_urls[@]}
-    
-    for i in "${!test_urls[@]}"; do
-        local url="${test_urls[$i]}"
-        local name="${test_names[$i]}"
-        
-        print_info "Testing $name ($url)..."
-        if curl -s --connect-timeout 5 --max-time 10 "$url" >/dev/null 2>&1; then
-            print_success "$name is accessible"
-            ((accessible_count++))
-        else
-            print_error "$name is not accessible"
-        fi
-    done
-    
-    echo
-    print_info "--- Test Results ---"
-    print_info "Accessible: $accessible_count/$total_count sources"
-    
-    if [[ $accessible_count -eq 0 ]]; then
-        print_error "No sources are accessible. Check your VPS network configuration."
-    elif [[ $accessible_count -lt $total_count ]]; then
-        print_warning "Some sources are not accessible."
-        echo
-        print_info "If GitHub is not accessible but other sites are, this might indicate:"
-        echo "- GitHub is blocked in your region"
-        echo "- Your VPS provider has restrictions"
-        echo "- DNS resolution issues for GitHub"
-        echo "- Firewall rules blocking GitHub"
-    else
-        print_success "All sources are accessible!"
+# Installs the downloaded Backhaul binary.
+# Assumes binary is at /tmp/backhaul.tar.gz
+# Uses global BIN_PATH.
+install_downloaded_binary() {
+    local archive_path="/tmp/backhaul.tar.gz"
+    local target_bin_dir
+    target_bin_dir=$(dirname "$BIN_PATH")
+    local target_bin_name
+    target_bin_name=$(basename "$BIN_PATH")
+
+    log_message "INFO" "Starting installation of Backhaul binary from $archive_path to $BIN_PATH"
+
+    if [[ ! -f "$archive_path" ]]; then
+        handle_error "ERROR" "Downloaded archive $archive_path not found."
+        return 1
     fi
+
+    if ! tar -tzf "$archive_path" >/dev/null 2>&1; then
+        handle_error "ERROR" "File $archive_path is not a valid tar.gz archive."
+        secure_delete "$archive_path"
+        return 1
+    fi
+
+    local temp_extract_dir
+    temp_extract_dir=$(mktemp -d /tmp/backhaul_extract_XXXXXX)
+
+    log_message "INFO" "Extracting $archive_path to $temp_extract_dir..."
+    if ! tar -xzf "$archive_path" -C "$temp_extract_dir"; then
+        handle_error "ERROR" "Extraction of $archive_path failed."
+        rm -rf "$temp_extract_dir"
+        secure_delete "$archive_path"
+        return 1
+    fi
+
+    # Find the binary - could be 'backhaul' or 'backhaul_os_arch/backhaul' etc.
+    local found_binary_path
+    found_binary_path=$(find "$temp_extract_dir" -type f \( -name "backhaul" -o -name "$target_bin_name" \) -executable 2>/dev/null | head -n1)
+
+    if [[ -z "$found_binary_path" ]]; then
+        # If not executable, try finding by name only
+        found_binary_path=$(find "$temp_extract_dir" -type f \( -name "backhaul" -o -name "$target_bin_name" \) 2>/dev/null | head -n1)
+        if [[ -z "$found_binary_path" ]]; then
+            handle_error "ERROR" "Could not find 'backhaul' binary within the extracted archive."
+            rm -rf "$temp_extract_dir"
+            secure_delete "$archive_path"
+            return 1
+        fi
+        log_message "WARN" "Found binary '$found_binary_path' but it was not marked executable initially."
+    fi
+
+    log_message "INFO" "Found binary at '$found_binary_path'. Moving to $BIN_PATH."
     
-    echo
-    print_menu_footer
+    ensure_dir "$target_bin_dir" "755" # Ensure target directory exists
+    
+    if ! mv "$found_binary_path" "$BIN_PATH"; then
+        handle_error "ERROR" "Failed to move binary from $found_binary_path to $BIN_PATH."
+        rm -rf "$temp_extract_dir"
+        secure_delete "$archive_path"
+        return 1
+    fi
+
+    chmod +x "$BIN_PATH"
+    set_secure_file_permissions "$BIN_PATH" "755" # Executable for owner, readable for others
+
+    rm -rf "$temp_extract_dir"
+    secure_delete "$archive_path"
+    
+    log_message "INFO" "Backhaul binary extracted and placed at $BIN_PATH."
+
+    if verify_binary_installation; then
+        handle_success "Backhaul binary installation completed and verified!"
+        print_info "Summary: 📁 $BIN_PATH | 🔒 $(stat -c %a "$BIN_PATH") | 📊 $(du -h "$BIN_PATH" | cut -f1)"
+    else
+        handle_error "WARNING" "Binary installed to $BIN_PATH, but verification failed. It may be incompatible."
+    fi
+    return 0
+}
+
+
+# --- Download Backhaul Binary Workflow ---
+_download_menu_help() {
+    print_info "Backhaul Installation Help:"
+    echo " - GitHub Download: Attempts to fetch the latest release directly."
+    echo " - Local File: Install from a .tar.gz you've already downloaded."
+    echo " - Alt. Source: Provide a custom URL for the .tar.gz binary archive."
+    echo " - Network Diagnostics: Test connectivity if downloads fail."
+    echo " - Skip: Continue without installing (you can install later)."
     press_any_key
 }
 
-download_backhaul() {
-    clear
-    print_primary_menu_header "Backhaul Binary Installation"
+download_backhaul_binary_workflow() {
+    print_menu_header "primary" "Backhaul Binary Installation"
     
-    # Server info is already shown in the banner, no need to fetch and print again
-    echo
-    
-    print_info "--> Identifying system architecture..."
-    local ARCH
-    ARCH=$(uname -m)
-    local OS
-    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    log_message "INFO" "Identifying system architecture..."
+    local system_os system_arch detected_arch_suffix
+    system_os=$(uname -s | tr '[:upper:]' '[:lower:]')
+    system_arch=$(uname -m)
 
-    case $ARCH in
-        x86_64) ARCH="amd64" ;;
-        aarch64) ARCH="arm64" ;;
+    case "$system_arch" in
+        x86_64) detected_arch_suffix="amd64" ;;
+        aarch64) detected_arch_suffix="arm64" ;;
+        armv7l) detected_arch_suffix="armv7" ;; # Common for RPi
         *) 
-            print_error "Unsupported architecture: $ARCH"
+            handle_error "CRITICAL" "Unsupported architecture: $system_arch. Cannot automatically download."
             press_any_key
             return 1
             ;;
     esac
-    
-    print_success "Detected: $OS/$ARCH"
+    print_success "Detected System: $system_os / $detected_arch_suffix (raw: $system_arch)"
     echo
 
-    # Try to fetch latest version from GitHub
-    print_info "--> Fetching latest version from GitHub..."
-    local LATEST_VERSION_JSON
-    local curl_exit_code
-    if LATEST_VERSION_JSON=$(curl -s --connect-timeout 10 "https://api.github.com/repos/Musixal/Backhaul/releases/latest") && [ -n "$LATEST_VERSION_JSON" ]; then
-        # Check if the response is valid JSON and contains tag_name
-        if echo "$LATEST_VERSION_JSON" | jq -e . >/dev/null 2>&1; then
-            LATEST_VERSION=$(echo "$LATEST_VERSION_JSON" | jq -r .tag_name)
-            if [ -z "$LATEST_VERSION" ] || [ "$LATEST_VERSION" == "null" ]; then
-                print_warning "Could not determine latest version from GitHub. Using fallback v0.6.6."
-                LATEST_VERSION="v0.6.6"
+    local menu_options=(
+        "1. Automatic GitHub Download (Recommended)"
+        "2. Install from Local File"
+        "3. Install from Alternative URL"
+        "4. Run Network Diagnostics"
+        "5. Skip Installation (Advanced)"
+    )
+    # local current_exit_details=("0" "Cancel Installation") # No longer needed
+    local user_choice menu_rc
+
+    while true; do
+        print_menu_header "primary" "Backhaul Binary Installation" "Choose Installation Method"
+        menu_loop "Select option" menu_options "_download_menu_help"
+        local menu_rc=$?
+        local user_choice="$MENU_CHOICE" # Capture MENU_CHOICE after $?
+        
+        local install_attempted=false
+        local install_succeeded=false
+
+        case "$menu_rc" in
+            0) # Numeric choice
+                install_attempted=true
+                case "$user_choice" in
+                    "1") # GitHub Download
+                        if _download_from_github "$system_os" "$detected_arch_suffix"; then install_succeeded=true; fi
+                        ;;
+                    "2") # Local File
+                        if _download_from_local_file "$system_os" "$detected_arch_suffix"; then install_succeeded=true; fi
+                        ;;
+                    "3") # Alternative URL
+                        if _download_from_alternative_source "$system_os" "$detected_arch_suffix"; then install_succeeded=true; fi
+                        ;;
+                    "4") # Network Diagnostics
+                        if type run_network_diagnostics_menu &>/dev/null; then
+                            navigate_to_menu "run_network_diagnostics_menu"
+                            return 0 # Let main loop call it; run_network_diagnostics_menu will return here
+                        else
+                            handle_error "ERROR" "Network diagnostics function not available."; press_any_key
+                        fi
+                        install_attempted=false # Not an install attempt
+                        ;;
+                    "5") # Skip
+                        print_warning "Skipping binary installation."
+                        print_info "You can install the binary later using the main menu."
+                        print_info "Ensure it's placed at: $BIN_PATH"
+                        press_any_key
+                        return 0 # Successfully skipped
+                        ;;
+                    *)
+                        print_warning "Invalid option selected in download workflow: $user_choice"; press_any_key
+                        install_attempted=false
+                        ;;
+                esac
+                ;;
+            2) # '?' Help
+                # Help function already called by menu_loop. Loop again to show menu.
+                continue ;;
+            3) # 'm' Main Menu
+                # Treat 'm' as cancel for this specific workflow, as main menu might not be fully set up
+                # if this is called during initial installation.
+                print_info "Installation workflow cancelled via 'm' key (treated as return/cancel)."
+                press_any_key
+                return 1 ;; # Return 1 to indicate cancellation of the workflow
+            4) # 'x' Exit script
+                request_script_exit
+                return 0 ;; # Return to main script loop to process exit
+            5) # 'r' Return/Back/Cancel (cancel installation workflow)
+               print_info "Installation workflow cancelled via 'r' key."
+               press_any_key
+               return 1 ;; # Return 1 to indicate cancellation
+            6)  # Invalid input in menu_loop
+                continue ;; # Re-display menu options
+            *)
+                print_warning "Unexpected menu_loop return code in download_backhaul_binary_workflow: $menu_rc (Choice: $user_choice)"
+                press_any_key
+                continue ;; # Re-display menu options
+        esac
+
+        if $install_attempted; then
+            if $install_succeeded; then
+                # install_downloaded_binary (called by _download_* helpers) already verifies.
+                # If it returns success, we assume verification passed.
+                return 0 # Overall success for download_backhaul_binary_workflow
+            else
+                # Error messages are handled within _download_* or install_downloaded_binary
+                # Loop will continue to re-prompt installation method.
+                # press_any_key is already called if install_succeeded is false by now
+                # or if an invalid numeric choice was made.
+                : # No additional press_any_key needed here, already handled.
             fi
+        fi
+        # If not an install attempt (like diagnostics or invalid option that didn't take action), loop continues.
+        # The main case statement's default or specific error paths should call press_any_key if needed.
+    done
+}
+
+_download_from_github() {
+    local os="$1"
+    local arch_suffix="$2"
+    local latest_version=""
+    
+    log_message "INFO" "Fetching latest Backhaul version from GitHub API..."
+    local api_response
+    api_response=$(curl -s --connect-timeout 10 "https://api.github.com/repos/Musixal/Backhaul/releases/latest")
+
+    if [[ -n "$api_response" ]] && echo "$api_response" | jq -e .tag_name >/dev/null 2>&1; then
+        latest_version=$(echo "$api_response" | jq -r .tag_name)
+        if [[ -z "$latest_version" || "$latest_version" == "null" ]]; then
+            log_message "WARN" "Could not parse tag_name from GitHub API response. Will try a common fallback."
+            latest_version="v0.6.6" # Fallback, consider making this more dynamic or removing
         else
-            print_warning "Invalid JSON response from GitHub API. Using fallback v0.6.6."
-            LATEST_VERSION="v0.6.6"
+            log_message "INFO" "Latest version from GitHub: $latest_version"
         fi
     else
-        print_warning "Failed to contact GitHub API. This might be due to network restrictions."
-        echo
-        print_info "GitHub access issues detected. Please choose an alternative method:"
-        echo
-        
-        # Standardized menu structure
-        echo " 1. Automatic GitHub Download:"
-        echo "    Downloads and installs the latest version from GitHub"
-        echo "    (Requires GitHub access)"
-        echo
-        echo " 2. Local File Installation:"
-        echo "    Install from a local binary file you've already downloaded"
-        echo "    (Useful if GitHub is blocked)"
-        echo
-        echo " 3. Alternative Download Source:"
-        echo "    Use a custom download URL or mirror"
-        echo "    (For advanced users)"
-        echo
-        echo " 4. Network Diagnostics:"
-        echo "    Test connectivity to various sources"
-        echo "    (Helps troubleshoot network issues)"
-        echo
-        echo " 5. Skip Installation:"
-        echo "    Continue without installing the binary"
-        echo "    (You can install later from the main menu)"
-        echo " 0. Cancel installation"
-        echo " ?. Show help"
-        echo
-        
-        # Standardized menu loop with validation
-        menu_loop "Select installation method" "0" "5" "?" download_installation_choice
-        
-        case $download_choice in
-            1) download_from_github "$LATEST_VERSION" "$OS" "$ARCH" ;;
-            2) download_from_local_file "$OS" "$ARCH" ;;
-            3) download_from_alternative_source "$OS" "$ARCH" ;;
-            4) 
-                run_network_diagnostics_menu
-                # After testing, ask again
-                download_backhaul
-                return 0
-                ;;
-            5) 
-                print_info "Installation skipped."
-                return 0
-                ;;
-            0) 
-                print_info "Installation cancelled."
-                return 1
-                ;;
-            *) 
-                print_error "Invalid option. Installation cancelled."
-                return 1
-                ;;
-        esac
-        return 0
+        handle_error "WARNING" "Failed to fetch latest version from GitHub API. Check connectivity or API rate limits."
+        log_message "WARN" "Using fallback version v0.6.6 due to API fetch failure."
+        latest_version="v0.6.6"
     fi
 
-    # If we got here, GitHub is accessible
-    download_from_github "$LATEST_VERSION" "$OS" "$ARCH"
-}
+    local download_url="https://github.com/Musixal/Backhaul/releases/download/${latest_version}/backhaul_${os}_${arch_suffix}.tar.gz"
+    print_info "Attempting to download Backhaul ${latest_version} for ${os}/${arch_suffix}..."
+    echo "URL: $download_url"
 
-# Helper function for installation menu choice
-download_installation_choice() {
-    local choice="$1"
-    download_choice="$choice"
-}
-
-# Helper function for fallback menu choice
-download_fallback_choice() {
-    local choice="$1"
-    fallback_choice="$choice"
-}
-
-download_from_github() {
-    local version="$1"
-    local os="$2"
-    local arch="$3"
-    
-    local download_url="https://github.com/Musixal/Backhaul/releases/download/${version}/backhaul_${os}_${arch}.tar.gz"
-    print_info "--> Downloading Backhaul version ${version} from GitHub..."
-    
-    with_spinner "Downloading from GitHub" wget -q --show-progress --connect-timeout=15 --tries=3 --retry-connrefused -O /tmp/backhaul.tar.gz "$download_url"
-    if [ $? -ne 0 ]; then
-        print_error "GitHub download failed. Trying alternative methods..."
-        echo
-        print_info "GitHub download failed. Please choose an alternative method:"
-        echo
-        
-        # Standardized menu structure
-        echo " 1. Use local binary file (if you have downloaded it manually)"
-        echo " 2. Use alternative download source"
-        echo " 0. Cancel installation"
-        echo " ?. Show help"
-        echo
-        
-        # Standardized menu loop with validation
-        menu_loop "Select alternative method" "0" "2" "?" download_fallback_choice
-        
-        case $fallback_choice in
-            1) download_from_local_file "$os" "$arch" ;;
-            2) download_from_alternative_source "$os" "$arch" ;;
-            0) 
-                print_info "Installation cancelled."
-                return 1
-                ;;
-            *) 
-                print_error "Invalid option. Installation cancelled."
-                return 1
-                ;;
-        esac
-        return 0
+    if run_with_spinner "Downloading from GitHub..." \
+        wget --progress=dot:giga -O /tmp/backhaul.tar.gz "$download_url"; then
+        if install_downloaded_binary; then # install_downloaded_binary returns 0 on success
+            return 0 # Overall success
+        else
+            handle_error "ERROR" "Binary installation failed after download."
+            return 1 # Installation part failed
+        fi
+    else
+        handle_error "ERROR" "Download from GitHub failed. URL: $download_url"
+        return 1
     fi
-
-    install_downloaded_binary
 }
 
-download_from_local_file() {
-    local os="$1"
-    local arch="$2"
+_download_from_local_file() {
+    local os="$1" # For informational purposes
+    local arch_suffix="$2" # For informational purposes
     
-    clear
-    print_secondary_menu_header "Local File Installation"
+    print_menu_header "secondary" "Local File Installation" \
+        "Install Backhaul from a pre-downloaded file."
     
-    print_info "Please provide the path to your local Backhaul binary file."
-    print_info "Supported formats: .tar.gz, .zip, or direct binary file"
-    echo
-    print_info "Expected filename pattern: backhaul_${os}_${arch}.tar.gz"
-    echo
+    print_info "Provide the full path to your local Backhaul .tar.gz archive."
+    print_info "(e.g., /path/to/your/backhaul_${os}_${arch_suffix}.tar.gz)"
     
-    # Standardized input loop with validation
+    local local_file_path
     while true; do
-        read -e -p "Enter path to local file: " local_file_path
-        
+        read -e -r -p "Enter path to local .tar.gz file (or '0' to cancel): " local_file_path
+        if [[ "$local_file_path" == "0" ]]; then print_info "Cancelled."; return 1; fi
         if [[ -z "$local_file_path" ]]; then
-            print_warning "No file path provided."
-            if confirm_action "Would you like to cancel installation?" "y"; then
-                return 1
-            fi
+            if prompt_yes_no "Path cannot be empty. Cancel local file installation?" "y"; then return 1; fi
             continue
         fi
-        
         if [[ ! -f "$local_file_path" ]]; then
-            print_error "File not found: $local_file_path"
-            if confirm_action "Would you like to try again?" "y"; then
-                continue
-            else
-                return 1
-            fi
+            if prompt_yes_no "File not found: '$local_file_path'. Try again?" "y"; then continue; else return 1; fi
         fi
-        
+        # Relaxed check for .tar.gz, install_downloaded_binary will verify archive integrity.
+        # if [[ "$local_file_path" != *.tar.gz ]]; then
+        #     if prompt_yes_no "File does not end with .tar.gz. Proceed anyway?" "n"; then break; else continue; fi
+        # fi
         break
     done
-    
-    # Determine file type and handle accordingly
-    local file_extension
-    file_extension=$(echo "$local_file_path" | sed 's/.*\.//' | tr '[:upper:]' '[:lower:]')
-    
-    case $file_extension in
-        tar.gz|tgz)
-            print_info "--> Detected .tar.gz file, copying to temporary location..."
-            cp "$local_file_path" /tmp/backhaul.tar.gz
-            ;;
-        zip)
-            print_info "--> Detected .zip file, extracting to temporary location..."
-            if ! unzip -q "$local_file_path" -d /tmp/ 2>/dev/null; then
-                print_error "Failed to extract .zip file. Please check if the file is valid."
-                return 1
-            fi
-            # Look for the binary in the extracted contents
-            if [[ -f "/tmp/backhaul" ]]; then
-                # Create a tar.gz structure for consistency
-                tar -czf /tmp/backhaul.tar.gz -C /tmp backhaul
-                rm -f /tmp/backhaul
-            else
-                print_error "Could not find 'backhaul' binary in the extracted .zip file."
-                rm -rf /tmp/backhaul*
-                return 1
-            fi
-            ;;
-        *)
-            # Assume it's a direct binary file
-            print_info "--> Detected direct binary file, creating archive structure..."
-            if [[ -x "$local_file_path" ]] || [[ -f "$local_file_path" ]]; then
-                # Create a tar.gz with the binary
-                tar -czf /tmp/backhaul.tar.gz -C "$(dirname "$local_file_path")" "$(basename "$local_file_path")"
-            else
-                print_error "File is not executable or readable. Please check permissions."
-                return 1
-            fi
-            ;;
-    esac
-    
-    if [[ $? -ne 0 ]]; then
-        print_error "Failed to prepare local file for installation."
+
+    log_message "INFO" "Copying local file '$local_file_path' to /tmp/backhaul.tar.gz"
+    if cp "$local_file_path" /tmp/backhaul.tar.gz; then
+        if install_downloaded_binary; then return 0; else return 1; fi
+    else
+        handle_error "ERROR" "Failed to copy local file '$local_file_path' to temporary location."
         return 1
     fi
-    
-    install_downloaded_binary
 }
 
-download_from_alternative_source() {
-    local os="$1"
-    local arch="$2"
+_download_from_alternative_source() {
+    local os="$1" # For informational purposes
+    local arch_suffix="$2" # For informational purposes
+
+    print_menu_header "secondary" "Alternative Download Source" \
+        "Install Backhaul from a custom URL."
     
-    clear
-    print_secondary_menu_header "Alternative Download Source"
-    
-    print_info "Please provide an alternative download URL for the Backhaul binary."
-    print_info "The URL should point to a .tar.gz file containing the binary."
-    echo
-    print_info "Expected filename pattern: backhaul_${os}_${arch}.tar.gz"
-    echo
-    print_info "Example sources:"
-    echo "- Your own server: https://your-server.com/backhaul_${os}_${arch}.tar.gz"
-    echo "- Alternative CDN: https://cdn.example.com/backhaul_${os}_${arch}.tar.gz"
-    echo "- Direct file server: http://files.example.com/backhaul_${os}_${arch}.tar.gz"
-    echo
-    
-    # Standardized input loop with validation
+    print_info "Provide the full URL to the Backhaul .tar.gz archive."
+    print_info "(e.g., https://your-mirror.com/backhaul_${os}_${arch_suffix}.tar.gz)"
+
+    local alt_url
     while true; do
-        read -p "Enter alternative download URL: " alt_url
-        
+        read -e -r -p "Enter alternative download URL (or '0' to cancel): " alt_url
+        if [[ "$alt_url" == "0" ]]; then print_info "Cancelled."; return 1; fi
         if [[ -z "$alt_url" ]]; then
-            print_warning "No URL provided."
-            if confirm_action "Would you like to cancel installation?" "y"; then
-                return 1
-            fi
+            if prompt_yes_no "URL cannot be empty. Cancel alternative source installation?" "y"; then return 1; fi
             continue
         fi
-        
-        # Basic URL validation
-        if [[ ! "$alt_url" =~ ^https?:// ]]; then
-            print_error "Invalid URL format. Please include http:// or https://"
-            if confirm_action "Would you like to try again?" "y"; then
-                continue
-            else
-                return 1
-            fi
+        if [[ ! "$alt_url" =~ ^https?:// ]]; then # Basic URL check
+            if prompt_yes_no "URL does not look valid. Try again?" "y"; then continue; else return 1; fi
         fi
-        
         break
     done
-    
-    print_info "--> Downloading from alternative source..."
-    wget -q --show-progress --connect-timeout=15 --tries=3 --retry-connrefused -O /tmp/backhaul.tar.gz "$alt_url"
-    
-    if [[ $? -ne 0 ]]; then
-        print_error "Alternative download failed. Please check the URL and try again."
+
+    if run_with_spinner "Downloading from $alt_url..." \
+        wget --progress=dot:giga -O /tmp/backhaul.tar.gz "$alt_url"; then
+        if install_downloaded_binary; then return 0; else return 1; fi
+    else
+        handle_error "ERROR" "Download from alternative source '$alt_url' failed."
         return 1
     fi
-    
-    install_downloaded_binary
 }
 
-install_downloaded_binary() {
-    print_info "--> Extracting binary to $BIN_PATH..."
-    
-    # Check if the downloaded file is actually a tar.gz
-    if ! tar -tzf /tmp/backhaul.tar.gz >/dev/null 2>&1; then
-        print_error "The downloaded file is not a valid tar.gz archive."
-        print_info "Please check your download source and try again."
-        rm -f /tmp/backhaul.tar.gz
-        return 1
-    fi
-    
-    # Extract the binary
-    tar -xzf /tmp/backhaul.tar.gz -C "$(dirname "$BIN_PATH")" "$(basename "$BIN_PATH")" 
-    if [[ $? -ne 0 ]]; then
-        print_error "Extraction failed. The archive might be corrupted or contain unexpected files."
-        rm -f /tmp/backhaul.tar.gz
-        return 1
-    fi
-    
-    # Clean up and set permissions
-    rm -f /tmp/backhaul.tar.gz
-    chmod +x "$BIN_PATH"
-    
-    # Verify the binary works
-    if verify_binary_installation; then
-        print_success "Backhaul binary installation completed successfully!"
-        echo
-        print_info "Installation Summary:"
-        print_info "  📁 Binary location: $BIN_PATH"
-        print_info "  🔒 Permissions: $(ls -l "$BIN_PATH" | awk '{print $1}')"
-        print_info "  📊 Size: $(du -h "$BIN_PATH" | cut -f1)"
-        echo
-        print_info "Press any key to continue..."
-        read -n 1 -s
-    else
-        print_warning "Binary installation completed but verification failed."
-        print_info "The binary might be incompatible or corrupted."
-        print_info "You can still try to use it, but some features might not work correctly."
-        echo
-        print_info "Press any key to continue..."
-        read -n 1 -s
-    fi
-} 
+# Network diagnostics menu (moved from menu.sh potentially, or refined)
+run_network_diagnostics_menu() {
+    _network_diag_help() {
+        print_info "Network Diagnostics Help:"
+        echo " This tests connectivity to common internet services and GitHub."
+        echo " Failures can indicate network configuration issues on your VPS,"
+        echo " DNS problems, or regional blocks."
+        press_any_key
+    }
+
+    local diag_menu_options=("1. Run All Network Tests")
+    # local diag_exit_details=("0" "Back to Installation Options") # No longer needed
+    local user_choice diag_rc
+
+    while true; do
+        print_menu_header "secondary" "Network Connectivity Diagnostics"
+        menu_loop "Select option" diag_menu_options "_network_diag_help"
+        local diag_rc=$? # Capture $? first
+        local user_choice="$MENU_CHOICE" # Then MENU_CHOICE
+
+        case "$diag_rc" in
+            0) # Numeric choice
+                case "$user_choice" in
+                    "1")
+                        print_info "--- Testing General Internet Connectivity ---"
+                        check_basic_connectivity
+                        echo
+                        print_info "--- Testing GitHub Connectivity ---"
+                        local github_hosts=("github.com" "api.github.com" "objects.githubusercontent.com")
+                        local gh_success_count=0
+                        for gh_host in "${github_hosts[@]}"; do
+                            if run_with_spinner "Pinging $gh_host..." ping -c 1 -W 2 "$gh_host"; then
+                                ((gh_success_count++))
+                            fi
+                        done
+                        if (( gh_success_count == ${#github_hosts[@]} )); then
+                            print_success "All GitHub hosts pingable."
+                        elif (( gh_success_count > 0 )); then
+                            print_warning "Some GitHub hosts not pingable. Downloads might be affected."
+                        else
+                            print_error "Cannot ping any GitHub hosts. Downloads from GitHub will likely fail."
+                        fi
+                        press_any_key
+                        ;;
+                    *) print_warning "Invalid option in network diagnostics: $user_choice"; press_any_key;;
+                esac
+                ;;
+            2) # '?' Help
+                # Help function already called by menu_loop. Loop again to show menu.
+                continue ;;
+            3) # 'm' Main Menu
+                go_to_main_menu
+                return 0 ;; # Return to main script loop
+            4) # 'x' Exit script
+                request_script_exit
+                return 0 ;; # Return to main script loop
+            5) # 'r' Return/Back/Cancel (to previous menu - download_backhaul_binary_workflow)
+                return_from_menu # This pops the stack
+                return 0 ;; # Return to main script loop
+            6)  # Invalid input in menu_loop
+                continue ;; # Re-display this menu
+            *)
+                print_warning "Unexpected menu_loop return code in run_network_diagnostics_menu: $diag_rc (Choice: $user_choice)"
+                press_any_key
+                continue ;; # Re-display this menu
+        esac
+    done
+}
+
+
+true # Ensure script is valid

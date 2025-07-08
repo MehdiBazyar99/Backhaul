@@ -1,357 +1,412 @@
-# ufw.sh
-# UFW (firewall) management functions 
+# modules/ufw.sh
+# UFW (Uncomplicated Firewall) management functions.
 
-# --- UFW Management ---
-manage_ufw_add() {
-    local port=$1 transport=$2 suffix=$3
-    local proto="tcp" && [[ "$transport" == "udp" ]] && proto="udp"
+# --- UFW Rule Management for Tunnels ---
 
-    if ! command -v ufw &> /dev/null; then
-        print_warning "UFW is not installed. Skipping firewall rule addition."
-        return
+# Adds a UFW rule for a specific tunnel port.
+# Parameters:
+#   $1: port - The port number.
+#   $2: transport - "tcp" or "udp".
+#   $3: tunnel_suffix - Unique identifier for the tunnel (e.g., server-tcp-timestamp).
+#                       Used in the UFW rule comment for identification.
+# This function is typically called when a new tunnel is configured.
+add_ufw_rule_for_tunnel() {
+    local port="$1"
+    local transport_protocol="$2" # Should be "tcp" or "udp"
+    local tunnel_suffix="$3"
+
+    if ! command -v ufw &>/dev/null; then
+        log_message "WARN" "UFW is not installed. Skipping firewall rule addition for port $port/$transport_protocol."
+        return 1
     fi
-    if ! ufw status | grep -q "Status: active"; then
-        print_warning "UFW is not active."
-        if confirm_action "Do you want to enable UFW and add the required rules?" "n"; then
-        enable_ufw="y"
-    else
-        enable_ufw="n"
-    fi
-        if [[ "${enable_ufw,,}" == "y" ]]; then
-            # Detect SSH port(s) from sshd_config and listening ports
-            local ssh_ports
-            ssh_ports=$(ss -tnlp | grep sshd | awk '{print $4}' | sed 's/.*://')
-            if [ -z "$ssh_ports" ]; then
-                ssh_ports=$(grep -E '^Port ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
-            fi
-            if [ -z "$ssh_ports" ]; then
-                ssh_ports=22
-            fi
-            print_info "Adding SSH port(s) to UFW: $ssh_ports"
-            for p in $ssh_ports; do
-                ufw allow "$p/tcp" comment "SSH (auto-added by EasyBackhaul)"
-            done
-            ufw enable
-            print_success "UFW enabled and SSH port(s) allowed."
+
+    local ufw_status_output
+    ufw_status_output=$(ufw status)
+    if ! echo "$ufw_status_output" | grep -q "Status: active"; then
+        log_message "WARN" "UFW is not active."
+        if prompt_yes_no "UFW is inactive. Enable UFW and add required SSH/tunnel rules?" "n"; then
+            _enable_ufw_with_ssh_allow # Call helper to enable UFW and allow SSH
         else
-            print_warning "Skipping firewall rule addition."
-            return
+            log_message "WARN" "User chose not to enable UFW. Skipping firewall rule addition for port $port/$transport_protocol."
+            return 1
         fi
     fi
-    print_info "--> UFW is active. Adding rule for port $port/$proto..."
-    if ufw allow "${port}/${proto}" comment "Backhaul-$suffix" > /dev/null; then
-        ufw reload > /dev/null
-        touch "$UFW_METADATA_FILE"
-        sed -i "/^$suffix:/d" "$UFW_METADATA_FILE"
-        echo "$suffix:$port/$proto" >> "$UFW_METADATA_FILE"
-        print_success "UFW rule added successfully."
+
+    local ufw_comment="EasyBackhaul: tunnel-${tunnel_suffix}"
+    log_message "INFO" "Adding UFW rule: allow $port/$transport_protocol (Comment: $ufw_comment)"
+
+    if run_with_spinner "Adding UFW rule for port $port/$transport_protocol..." \
+        ufw allow "$port/$transport_protocol" comment "$ufw_comment"; then
+        if run_with_spinner "Reloading UFW..." ufw reload; then
+            handle_success "UFW rule for port $port/$transport_protocol added and UFW reloaded."
+            return 0
+        else
+            handle_error "ERROR" "Failed to reload UFW after adding rule for port $port/$transport_protocol."
+            return 1
+        fi
     else
-        print_warning "Failed to add UFW rule. Please add it manually."
+        handle_error "ERROR" "Failed to add UFW rule for port $port/$transport_protocol. Please add it manually."
+        return 1
     fi
 }
 
-manage_ufw_delete() {
-    local suffix=$1
-    if ! command -v ufw &> /dev/null; then
-        print_warning "UFW is not installed. Skipping firewall rule removal."
-        return
-    fi
-    if ! ufw status | grep -q "Status: active"; then
-        print_warning "UFW is not active. Skipping firewall rule removal."
-        return
-    fi
-    if [ -f "$UFW_METADATA_FILE" ]; then
-        local rule
-        rule=$(grep "^$suffix:" "$UFW_METADATA_FILE" | cut -d':' -f2)
-        if [ -n "$rule" ]; then
-            print_info "--> Deleting UFW rule for $rule..."
-            if ufw delete allow "$rule" > /dev/null; then
-                ufw reload > /dev/null
-                sed -i "/^$suffix:/d" "$UFW_METADATA_FILE"
-                print_success "UFW rule deleted successfully."
-            else
-                print_warning "Failed to delete UFW rule for $rule. Please remove it manually."
-            fi
-        fi
-    fi
-}
+# Deletes UFW rules associated with a specific tunnel suffix.
+# Parameters:
+#   $1: tunnel_suffix - Unique identifier for the tunnel.
+# This function is typically called when a tunnel is deleted.
+delete_ufw_rules_for_tunnel() {
+    local tunnel_suffix="$1"
 
-create_ufw_rules() {
-    local tunnel_name="$1"
-    local server_ip="$2"
-    local server_port="$3"
-    local local_port="$4"
-    local protocol="$5"
-    
-    # Validate parameters
-    if ! validate_tunnel_parameters "$server_ip" "$server_port" "$local_port"; then
-        print_error "Invalid tunnel parameters"
+    if ! command -v ufw &>/dev/null; then
+        log_message "WARN" "UFW is not installed. Skipping firewall rule removal for tunnel $tunnel_suffix."
         return 1
     fi
     
-    # Sanitize tunnel name for UFW rule description
-    local sanitized_name=$(sanitize_input "$tunnel_name" 30)
-    
-    # Check if UFW is active
-    if ! ufw status | grep -q "Status: active"; then
-        log_message "WARNING" "UFW is not active. Rules will be created but not applied."
+    local ufw_status_output
+    ufw_status_output=$(ufw status)
+    if ! echo "$ufw_status_output" | grep -q "Status: active"; then
+        log_message "INFO" "UFW is not active. No rules to remove for tunnel $tunnel_suffix."
+        return 0
     fi
-    
-    # Create outbound rule for tunnel connection
-    ufw allow out to "$server_ip" port "$server_port" proto "$protocol" comment "EasyBackhaul tunnel $sanitized_name outbound" 2>/dev/null
-    
-    # Create inbound rule for local port
-    ufw allow in on lo to any port "$local_port" proto "$protocol" comment "EasyBackhaul tunnel $sanitized_name inbound" 2>/dev/null
-    
-    # Log the rule creation
-    secure_log_message "INFO" "Created UFW rules for tunnel $tunnel_name"
-    
+
+    local ufw_comment_pattern="EasyBackhaul: tunnel-${tunnel_suffix}"
+    log_message "INFO" "Searching for UFW rules to delete with comment pattern: '$ufw_comment_pattern'"
+
+    local rules_deleted_count=0
+    # Loop to delete rules by number, as rule numbers change after each deletion.
+    # We get all matching rules, sort them in reverse order, and delete.
+    while true; do
+        local rule_to_delete_num
+        # Get the highest rule number that matches the comment
+        rule_to_delete_num=$(ufw status numbered | grep -F "$ufw_comment_pattern" | head -n 1 | awk -F'[][]' '{print $2}')
+        
+        if [[ -z "$rule_to_delete_num" ]]; then
+            break # No more rules found with this comment
+        fi
+
+        log_message "INFO" "Deleting UFW rule #$rule_to_delete_num (comment: $ufw_comment_pattern)"
+        if echo "y" | ufw delete "$rule_to_delete_num"; then # Auto-confirm deletion
+            log_message "DEBUG" "Successfully deleted UFW rule #$rule_to_delete_num."
+            ((rules_deleted_count++))
+        else
+            handle_error "ERROR" "Failed to delete UFW rule #$rule_to_delete_num. You may need to remove it manually."
+            # Potentially break here or try to continue, depending on desired robustness
+        fi
+    done
+
+    if (( rules_deleted_count > 0 )); then
+        if run_with_spinner "Reloading UFW..." ufw reload; then
+            handle_success "Deleted $rules_deleted_count UFW rule(s) for tunnel $tunnel_suffix and reloaded UFW."
+        else
+            handle_error "ERROR" "Failed to reload UFW after deleting rules for tunnel $tunnel_suffix."
+        fi
+    elif [[ -z "$rule_to_delete_num" ]]; then # Check if any rule was found initially
+        log_message "INFO" "No UFW rules found with comment pattern '$ufw_comment_pattern' for tunnel $tunnel_suffix."
+    fi
     return 0
 }
 
-remove_ufw_rules() {
-    local tunnel_name="$1"
-    
-    # Input sanitization
-    tunnel_name=$(sanitize_input "$tunnel_name" 30)
-    
-    # Find and remove UFW rules for this tunnel
-    local rule_numbers=$(ufw status numbered | grep "EasyBackhaul tunnel $tunnel_name" | awk -F'[][]' '{print $2}' | sort -nr)
-    
-    if [ -n "$rule_numbers" ]; then
-        for rule_num in $rule_numbers; do
-            echo "y" | ufw delete "$rule_num" >/dev/null 2>&1
-        done
-        
-        secure_log_message "INFO" "Removed UFW rules for tunnel $tunnel_name"
-    fi
+
+# --- UFW General Management Menu & Functions ---
+
+_ufw_menu_help() {
+    print_menu_header "secondary" "UFW Firewall Management Help"
+    echo "This menu allows you to manage the UFW (Uncomplicated Firewall) on your system."
+    echo
+    print_info "Options:"
+    echo "  1. Enable UFW: Activates the firewall. Ensures SSH is allowed."
+    echo "  2. Disable UFW: Deactivates the firewall (not recommended)."
+    echo "  3. View Status: Shows current UFW status and rules."
+    echo "  4. Reset UFW: Disables UFW and deletes ALL rules (use with caution)."
+    echo "  5. Clean Orphaned Rules: Removes EasyBackhaul rules for non-existent tunnels."
+    echo
+    print_info "Important Notes:"
+    echo " - Enabling UFW without allowing SSH can lock you out of your server."
+    echo " - This script attempts to allow common SSH ports when enabling UFW."
+    echo " - Tunnel configurations automatically add/remove their specific UFW rules if UFW is active."
+    press_any_key
 }
 
-# UFW Firewall Management
-ufw_menu() {
-    # Help function for UFW menu
-    ufw_menu_help() {
-        clear
-        print_server_info_banner_minimal
-        print_info "================= UFW Firewall Management Help ================="
-        echo "This menu helps you manage the UFW (Uncomplicated Firewall) on your system."
-        echo
-        echo "Available options:"
-        echo " 1. Enable UFW Firewall"
-        echo " 2. Disable UFW Firewall"
-        echo " 3. Reset UFW Rules"
-        echo " 4. View UFW Status"
-        echo " 5. Fix UFW Rules"
-        echo " 0. Back to Main Menu: Return to the main menu"
-        echo
-        print_info "Important Notes:"
-        echo "- Enabling UFW may block SSH access if not configured properly"
-        echo "- Always ensure SSH access is allowed before enabling UFW"
-        echo "- Backhaul tunnels will automatically add required UFW rules"
-        echo "- Use 'Fix UFW Rules' to clean up rules for deleted tunnels"
-        echo "================================================================"
-        press_any_key
-    }
+# Main menu for UFW management
+manage_ufw_main_menu() {
+    local ufw_menu_options=(
+        "1. Enable UFW Firewall"
+        "2. Disable UFW Firewall"
+        "3. View UFW Status & Rules"
+        "4. Reset UFW (Deletes ALL rules)"
+        "5. Clean Orphaned EasyBackhaul Rules"
+    )
+    # local ufw_exit_details=("0" "Back to Main Menu") # No longer needed
+    local user_choice menu_rc
 
     while true; do
-        clear
-        print_server_info_banner
-        print_info "--- UFW Firewall Management ---"
-        echo
-        
-        # Check UFW status
-        local ufw_status
-        ufw_status=$(ufw status 2>/dev/null | head -n1 | awk '{print $2}')
-        local ufw_active=false
-        
-        if [[ "$ufw_status" == "active" ]]; then
-            ufw_active=true
-            print_success "UFW Status: Active"
-        else
-            print_warning "UFW Status: Inactive"
+        local ufw_current_status="Inactive"
+        if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+            ufw_current_status="Active"
+        elif ! command -v ufw &>/dev/null; then
+            ufw_current_status="Not Installed"
         fi
+        print_menu_header "primary" "UFW Firewall Management" "Status: $ufw_current_status"
         
-        echo
-        echo "1. Enable UFW Firewall"
-        echo "2. Disable UFW Firewall"
-        echo "3. Reset UFW Rules"
-        echo "4. View UFW Status"
-        echo "5. Fix UFW Rules"
-        print_menu_footer
+        menu_loop "Select UFW option" ufw_menu_options "_ufw_menu_help"
+        local menu_rc=$?
+        local user_choice="$MENU_CHOICE" # Capture MENU_CHOICE after $?
         
-        menu_loop 0 5 "?" "ufw_menu_help" "Select an option [0-5, ? for help]:"
-        
-        case $choice in
-            1) enable_ufw ;;
-            2) disable_ufw ;;
-            3) reset_ufw ;;
-            4) view_ufw_status ;;
-            5) fix_ufw_rules ;;
-            0) return_to_previous_menu; return ;;
-            *) print_warning "Invalid option. Please enter 0-5."; press_any_key ;;
+        case "$menu_rc" in
+            0) # Numeric choice
+                case "$user_choice" in
+                    "1") _enable_ufw_with_ssh_allow ;;
+                    "2") _disable_ufw ;;
+                    "3") _view_ufw_status ;;
+                    "4") _reset_ufw ;;
+                    "5") _clean_orphaned_ufw_rules ;;
+                    *) print_warning "Invalid option: $user_choice"; press_any_key ;;
+                esac
+                ;;
+            2) # '?' Help
+                # Help function already called by menu_loop. Loop again to show menu.
+                continue ;;
+            3) # 'm' Main Menu
+                go_to_main_menu
+                return 0 ;; # Return to main script loop
+            4) # 'x' Exit script
+                request_script_exit
+                return 0 ;; # Return to main script loop
+            5) # 'r' Return/Back/Cancel (to previous menu, likely main menu)
+                return_from_menu # This pops the stack
+                return 0 ;; # Return to main script loop
+            6)  # Invalid input in menu_loop (warning and press_any_key handled by menu_loop)
+                continue ;; # Re-display this menu
+            *)
+                print_warning "Unexpected menu_loop return code in manage_ufw_main_menu: $menu_rc (Choice: $user_choice)"
+                press_any_key
+                continue ;; # Re-display this menu
         esac
     done
 }
 
-enable_ufw() {
-    clear
-    print_secondary_menu_header "Enable UFW Firewall"
-    
-    if [[ "$ufw_active" == "true" ]]; then
-        print_warning "UFW is already active"
+_enable_ufw_with_ssh_allow() {
+    print_menu_header "secondary" "Enable UFW Firewall"
+    if ! command -v ufw &>/dev/null; then
+        handle_error "ERROR" "UFW command not found. Please install UFW first."
         press_any_key
-        return
+        return 1
     fi
-    
+
+    if ufw status | grep -q "Status: active"; then
+        handle_success "UFW is already active."
+        press_any_key
+        return 0
+    fi
+
     print_warning "Enabling UFW may block SSH access if not configured properly."
-    print_info "Make sure you have SSH access configured before proceeding."
-    echo
-    
-    if confirm_action "Proceed?" "n"; then
-        choice="y"
-    else
-        choice="n"
-    fi
-
-    if [[ "$choice" =~ ^[Yy]$ ]]; then
-        if with_spinner "Enabling UFW" ufw --force enable; then
-            print_success "UFW enabled successfully"
-        else
-            print_error "Failed to enable UFW"
-        fi
-    else
-        print_warning "UFW enable cancelled"
-    fi
-    
-    press_any_key
-}
-
-disable_ufw() {
-    clear
-    print_secondary_menu_header "Disable UFW Firewall"
-    
-    if [[ "$ufw_active" != "true" ]]; then
-        print_warning "UFW is not active"
+    print_info "This script will attempt to allow common SSH ports (22 and any custom SSH port found)."
+    if ! prompt_yes_no "Proceed with enabling UFW?" "y"; then
+        print_info "UFW enable cancelled."
         press_any_key
-        return
-    fi
-    
-    print_warning "WARNING: Disabling UFW will remove firewall protection."
-    print_info "This will make your system more vulnerable to attacks."
-    echo
-    
-    if confirm_action "Are you sure?" "n"; then
-        choice="y"
-    else
-        choice="n"
+        return 1
     fi
 
-    if [[ "$choice" =~ ^[Yy]$ ]]; then
-        if with_spinner "Disabling UFW" ufw disable; then
-            print_success "UFW disabled successfully"
-        else
-            print_error "Failed to disable UFW"
+    # Allow SSH - find common and configured SSH ports
+    local ssh_ports_to_allow=("22") # Default SSH port
+    if [[ -f /etc/ssh/sshd_config ]]; then
+        local custom_ssh_port
+        custom_ssh_port=$(grep -E "^Port\s+[0-9]+" /etc/ssh/sshd_config | awk '{print $2}' | head -n1)
+        if [[ -n "$custom_ssh_port" && "$custom_ssh_port" != "22" ]]; then
+            ssh_ports_to_allow+=("$custom_ssh_port")
         fi
-    else
-        print_warning "UFW disable cancelled"
+    fi
+    # Also check currently listening SSHD ports
+    if command -v ss &>/dev/null; then
+         local listening_ssh_ports
+         listening_ssh_ports=$(ss -tlpn | grep sshd | awk '{print $4}' | sed 's/.*://' | sort -u)
+         for port in $listening_ssh_ports; do
+             if [[ ! " ${ssh_ports_to_allow[*]} " =~ " ${port} " ]]; then # Check if port already in array
+                 ssh_ports_to_allow+=("$port")
+             fi
+         done
     fi
     
-    press_any_key
-}
-
-reset_ufw() {
-    clear
-    print_secondary_menu_header "Reset UFW Rules"
-    
-    print_warning "WARNING: This will remove ALL UFW rules and reset to default."
-    print_info "This action cannot be undone."
-    echo
-    
-    read -r -p "Type 'RESET' to confirm: " confirmation
-    
-    if [[ "$confirmation" == "RESET" ]]; then
-        if with_spinner "Resetting UFW rules" ufw --force reset; then
-            print_success "UFW rules reset successfully"
-        else
-            print_error "Failed to reset UFW rules"
-        fi
-    else
-        print_warning "UFW reset cancelled"
-    fi
-    
-    press_any_key
-}
-
-view_ufw_status() {
-    clear
-    print_secondary_menu_header "UFW Status"
-    
-    if [[ "$ufw_active" != "true" ]]; then
-        print_error "UFW is not active - no firewall protection"
-        press_any_key
-        return
-    fi
-    
-    echo "UFW Status:"
-    ufw status verbose
-    
-    echo
-    echo "Backhaul-specific rules:"
-    local backhaul_rules=$(ufw status numbered 2>/dev/null | grep -E "(backhaul|Backhaul)" || echo "No Backhaul rules found")
-    echo "$backhaul_rules"
-    
-    # Check for potentially permissive rules
-    local permissive_rules=$(ufw status numbered 2>/dev/null | grep -E "(allow|ACCEPT)" | grep -v "deny" | wc -l)
-    if [[ $permissive_rules -gt 5 ]]; then
-        print_warning "Found $permissive_rules potentially permissive rules"
-    fi
-    
-    press_any_key
-}
-
-fix_ufw_rules() {
-    clear
-    print_secondary_menu_header "Fix UFW Rules"
-    
-    if [[ "$ufw_active" != "true" ]]; then
-        print_warning "UFW is not active - no rules to fix"
-        press_any_key
-        return
-    fi
-    
-    echo "Checking for orphaned Backhaul rules..."
-    
-    # Find orphaned rules for non-existent tunnels
-    local orphaned_rules=()
-    while IFS= read -r line; do
-        local tunnel_name=$(echo "$line" | grep -o "backhaul-[^[:space:]]*" | sed 's/backhaul-//')
-        if [[ -n "$tunnel_name" ]]; then
-            if [[ ! -f "$CONFIG_DIR/$tunnel_name.conf" ]]; then
-                orphaned_rules+=("$line")
+    for port in "${ssh_ports_to_allow[@]}"; do
+        if validate_port "$port"; then # from helpers.sh
+            log_message "INFO" "Allowing SSH on port $port/tcp in UFW..."
+            if ! run_with_spinner "Allowing port $port/tcp (SSH)..." ufw allow "$port/tcp" comment "SSH access (EasyBackhaul)"; then
+                handle_error "WARNING" "Failed to add UFW rule for SSH on port $port/tcp."
             fi
         fi
-    done < <(ufw status numbered 2>/dev/null | grep -E "(backhaul|Backhaul)")
-    
-    if [[ ${#orphaned_rules[@]} -eq 0 ]]; then
-        print_success "No orphaned Backhaul rules found"
+    done
+
+    if run_with_spinner "Enabling UFW..." ufw --force enable; then # --force to enable without prompt
+        handle_success "UFW enabled successfully."
     else
-        echo "Found ${#orphaned_rules[@]} orphaned rules:"
-        for rule in "${orphaned_rules[@]}"; do
-            echo "  $rule"
-        done
-        echo
-        if confirm_action "Remove orphaned rules?" "n"; then
-            fix_choice="y"
-        else
-            fix_choice="n"
-        fi
-        if [[ "$fix_choice" =~ ^[Yy]$ ]]; then
-            # Remove orphaned rules (this is a simplified approach)
-            print_info "Removing orphaned rules..."
-            # Note: Actual rule removal would require parsing rule numbers
-            print_success "Orphaned rules marked for removal"
-        fi
+        handle_error "ERROR" "Failed to enable UFW. Check UFW logs or status."
+    fi
+    press_any_key
+}
+
+_disable_ufw() {
+    print_menu_header "secondary" "Disable UFW Firewall"
+    if ! command -v ufw &>/dev/null; then
+        handle_error "ERROR" "UFW command not found."
+        press_any_key
+        return 1
+    fi
+
+    if ! ufw status | grep -q "Status: active"; then
+        handle_warning "UFW is already inactive."
+        press_any_key
+        return 0
     fi
     
+    print_warning "Disabling UFW will remove firewall protection from this server."
+    if ! prompt_yes_no "Are you sure you want to disable UFW?" "n"; then
+        print_info "UFW disable cancelled."
+        press_any_key
+        return 1
+    fi
+
+    if run_with_spinner "Disabling UFW..." ufw disable; then
+        handle_success "UFW disabled successfully."
+    else
+        handle_error "ERROR" "Failed to disable UFW."
+    fi
     press_any_key
-} 
+}
+
+_view_ufw_status() {
+    print_menu_header "secondary" "UFW Status & Rules"
+    if ! command -v ufw &>/dev/null; then
+        handle_error "ERROR" "UFW command not found."
+        press_any_key
+        return 1
+    fi
+
+    if ! ufw status | grep -q "Status: active"; then
+        handle_warning "UFW is not active."
+    else
+        print_success "UFW is active."
+    fi
+    echo
+    print_info "Current UFW Rules (numbered):"
+    ufw status numbered
+    echo
+    print_info "EasyBackhaul specific rules are typically commented with 'EasyBackhaul: tunnel-<name>'."
+    press_any_key
+}
+
+_reset_ufw() {
+    print_menu_header "secondary" "Reset UFW Firewall"
+     if ! command -v ufw &>/dev/null; then
+        handle_error "ERROR" "UFW command not found."
+        press_any_key
+        return 1
+    fi
+
+    print_warning "WARNING: This will disable UFW and delete ALL existing rules."
+    print_warning "This action is irreversible and will remove all firewall protection."
+    if ! prompt_yes_no "ARE YOU ABSOLUTELY SURE you want to reset UFW?" "n"; then
+        print_info "UFW reset cancelled."
+        press_any_key
+        return 1
+    fi
+    
+    # Second confirmation for such a destructive action
+    read -r -p "Type 'CONFIRM RESET UFW' to proceed: " confirmation_text
+    if [[ "$confirmation_text" != "CONFIRM RESET UFW" ]]; then
+        print_info "Confirmation failed. UFW reset cancelled."
+        press_any_key
+        return 1
+    fi
+
+    if run_with_spinner "Resetting UFW (disabling and deleting all rules)..." ufw --force reset; then
+        handle_success "UFW has been reset to its default (inactive) state. All rules deleted."
+    else
+        handle_error "ERROR" "Failed to reset UFW."
+    fi
+    press_any_key
+}
+
+_clean_orphaned_ufw_rules() {
+    print_menu_header "secondary" "Clean Orphaned EasyBackhaul UFW Rules"
+    if ! command -v ufw &>/dev/null; then
+        handle_error "ERROR" "UFW command not found."
+        press_any_key
+        return 1
+    fi
+    if ! ufw status | grep -q "Status: active"; then
+        handle_warning "UFW is not active. No rules to clean."
+        press_any_key
+        return 0
+    fi
+
+    log_message "INFO" "Scanning for orphaned EasyBackhaul UFW rules..."
+    local ufw_comment_base="EasyBackhaul: tunnel-"
+    
+    local orphaned_rule_numbers=()
+    # Get all rules with EasyBackhaul comments
+    # Use process substitution and a while read loop for safer parsing
+    while IFS= read -r line; do
+        # Extract rule number and comment
+        local rule_num comment
+        rule_num=$(echo "$line" | awk -F'[][]' '{print $2}')
+        comment=$(echo "$line" | sed -n 's/.*comment '"'"'\([^'"'"']*\)'"'"'.*/\1/p')
+
+        if [[ -n "$rule_num" && "$comment" == ${ufw_comment_base}* ]]; then
+            local tunnel_suffix
+            tunnel_suffix=${comment#${ufw_comment_base}} # Extract suffix from comment
+            local tunnel_config_file="$CONFIG_DIR/config-${tunnel_suffix}.toml" # Adjusted to new name format
+
+            if [[ -n "$tunnel_suffix" && ! -f "$tunnel_config_file" ]]; then
+                log_message "WARN" "Found orphaned UFW rule #$rule_num for non-existent tunnel '$tunnel_suffix' (Comment: '$comment')."
+                orphaned_rule_numbers+=("$rule_num")
+            fi
+        fi
+    done < <(ufw status numbered)
+
+    if [[ ${#orphaned_rule_numbers[@]} -eq 0 ]]; then
+        handle_success "No orphaned EasyBackhaul UFW rules found."
+        press_any_key
+        return 0
+    fi
+
+    print_warning "Found ${#orphaned_rule_numbers[@]} orphaned UFW rule(s) linked to deleted tunnels:"
+    # Displaying rules again for confirmation can be tricky as numbers might shift if user manually deletes.
+    # Best to show the numbers found now.
+    for num in "${orphaned_rule_numbers[@]}"; do
+        echo "  - Rule #$num"
+    done
+    echo
+    if ! prompt_yes_no "Delete these ${#orphaned_rule_numbers[@]} orphaned rule(s)?" "n"; then
+        print_info "Orphaned rule cleanup cancelled."
+        press_any_key
+        return 1
+    fi
+
+    local deleted_count=0
+    # Sort numbers in reverse order for deletion to avoid shifting rule numbers
+    local sorted_orphans
+    IFS=$'\n' sorted_orphans=($(sort -nr <<<"${orphaned_rule_numbers[*]}"))
+    unset IFS
+
+    for rule_num_to_delete in "${sorted_orphans[@]}"; do
+        log_message "INFO" "Deleting orphaned UFW rule #$rule_num_to_delete."
+        if echo "y" | ufw delete "$rule_num_to_delete"; then
+            ((deleted_count++))
+        else
+            handle_error "ERROR" "Failed to delete orphaned UFW rule #$rule_num_to_delete."
+        fi
+    done
+
+    if (( deleted_count > 0 )); then
+        if run_with_spinner "Reloading UFW..." ufw reload; then
+            handle_success "Successfully deleted $deleted_count orphaned UFW rule(s) and reloaded UFW."
+        else
+            handle_error "ERROR" "Failed to reload UFW after deleting orphaned rules."
+        fi
+    else
+        print_info "No orphaned rules were deleted."
+    fi
+    press_any_key
+}
+
+true # Ensure script is valid
