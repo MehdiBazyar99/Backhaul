@@ -493,126 +493,210 @@ _prompt_tls_config() {
     return 0
 }
 
-# Validates a single port or a port range (e.g., "80", "400-500")
+# Validates a single port or a port range (e.g., "80", "400-500").
+# Also handles optional /udp suffix on the port/range string.
+# Output: Sets global array _VALIDATED_PORT_RANGE_PARTS to (type, port1, port2, protocol_suffix) on success.
 # Returns 0 if valid, 1 if invalid.
-_validate_port_or_range() {
-    local port_spec="$1"
-    if [[ "$port_spec" =~ ^[0-9]+$ ]]; then # Single port
-        validate_port "$port_spec" # Uses existing helper
-        return $?
-    elif [[ "$port_spec" =~ ^([0-9]+)-([0-9]+)$ ]]; then # Port range
+_VALIDATED_PORT_RANGE_PARTS=()
+_validate_port_or_range_with_udp() {
+    local port_spec_full="$1"
+    local port_spec_no_udp="$port_spec_full"
+    local protocol_suffix=""
+
+    _VALIDATED_PORT_RANGE_PARTS=() # Reset
+
+    if [[ "$port_spec_full" == */udp ]]; then
+        protocol_suffix="/udp"
+        port_spec_no_udp="${port_spec_full%/udp}"
+    fi
+
+    if [[ "$port_spec_no_udp" =~ ^[0-9]+$ ]]; then # Single port
+        if validate_port "$port_spec_no_udp"; then # validate_port is from helpers.sh
+            _VALIDATED_PORT_RANGE_PARTS=("single" "$port_spec_no_udp" "" "$protocol_suffix")
+            return 0
+        fi
+        # validate_port prints its own error
+        return 1
+    elif [[ "$port_spec_no_udp" =~ ^([0-9]+)-([0-9]+)$ ]]; then # Port range
         local start_port="${BASH_REMATCH[1]}"
         local end_port="${BASH_REMATCH[2]}"
         if validate_port "$start_port" && validate_port "$end_port"; then
-            if (( start_port < end_port )); then
+            if (( start_port <= end_port )); then # Allow start_port == end_port for single port range
+                _VALIDATED_PORT_RANGE_PARTS=("range" "$start_port" "$end_port" "$protocol_suffix")
                 return 0
             else
-                print_warning "Invalid range: Start port $start_port must be less than end port $end_port."
+                print_warning "Invalid range: Start port $start_port must be less than or equal to end port $end_port."
                 return 1
             fi
-        else
-            # validate_port would have printed specific error
-            return 1
         fi
+        # validate_port prints its own error
+        return 1
     else
-        print_warning "Invalid port/range format: '$port_spec'. Use 'port' or 'start_port-end_port'."
+        print_warning "Invalid port/range format: '$port_spec_full'. Use 'port', 'port/udp', 'start-end', or 'start-end/udp'."
         return 1
     fi
 }
 
-# Prompts user for server port forwarding rules with validation for various formats.
-# Replaces _prompt_server_ports_array
+
+# Prompts user for server port forwarding rules using a single comma-separated input.
+# Arguments:
+#   $1 (nameref): Output array for TOML-formatted rule strings.
+#   $2 (nameref): Output flag (boolean string "true"/"false") indicating if any UDP rules were specified.
+# Returns: 0 on success (rules processed, could be empty), 1 on unrecoverable input error or cancellation.
 _configure_server_forwarding_rules() {
-    local -n rules_array_ref=$1 # Output: array of rule strings
-    rules_array_ref=() # Initialize
+    local -n out_rules_array_ref=$1
+    local -n out_any_udp_rules_ref=$2
+
+    out_rules_array_ref=() # Initialize output array
+    out_any_udp_rules_ref="false" # Initialize UDP flag
 
     print_menu_header "secondary" "Server Port Forwarding" "Step 4: Configure Forwarding Rules"
-    print_info "Define rules for how the server listens for and forwards traffic."
-    print_info "Type 'help' for format examples, 'done' when finished."
+    echo "Enter server ports to forward traffic from."
+    echo "Examples:"
+    echo "  - Single port (TCP): 80 (forwards server's public port 80 to client's port 80)"
+    echo "  - Single port (UDP): 53/udp (forwards server's 53/udp to client's 53/udp; requires 'accept_udp=true')"
+    echo "  - Port to specific client port: 8080:80 (forwards server's 8080 to client's port 80)"
+    echo "  - Port range: 7000-7010 (forwards server range 7000-7010 to client's range 7000-7010)"
+    echo "  - Port range to single client port: 7000-7010:6000 (forwards server range 7000-7010 to client's single port 6000)"
+    echo "  - To specific client IP & port: 2222=192.168.0.10:22 (forwards server's 2222 to 192.168.0.10:22 on client side)"
+    echo "Use comma to separate multiple rules. E.g.: 80, 443:8443, 7000-7010, 53/udp"
+    echo "Leave blank for no forwarding."
     echo
 
-    while true; do
-        local user_input
-        read -r -p "Enter forwarding rule (or 'help'/'done'): " user_input
-        user_input=$(echo "$user_input" | tr '[:upper:]' '[:lower:]') # Normalize
+    local user_input_str
+    read -r -p "Enter forwarding rules: " user_input_str
 
-        if [[ "$user_input" == "done" ]]; then
-            if [[ ${#rules_array_ref[@]} -eq 0 ]]; then
-                print_warning "No port forwarding rules defined. Server will not forward any traffic."
-                if ! prompt_yes_no "Are you sure you want to continue without any forwarding rules?" "n"; then
-                    continue
-                fi
-            fi
-            break
-        elif [[ "$user_input" == "help" ]]; then
-            echo "Supported rule formats (listen_spec can be port or port-range):"
-            echo "  1. listen_spec                  (e.g., '443', '5201/udp', '600-700')"
-            echo "     => Forwards from server's listen_spec to client's same port/range."
-            echo "  2. listen_spec:dest_port        (e.g., '80:8080', '443-450:3000')"
-            echo "     => Forwards from server's listen_spec to client's dest_port."
-            echo "  3. listen_spec=dest_ip:dest_port (e.g., '443=10.0.0.5:8443', '1000-1005=10.0.0.5:8000')"
-            echo "     => Forwards from server's listen_spec to specific IP and port from client."
-            echo "Note: UDP forwarding is specified by appending '/udp' to the listen_spec, e.g., '53/udp'."
-            echo
-            continue
-        fi
+    if [[ -z "$user_input_str" ]]; then
+        print_info "No port forwarding rules entered."
+        return 0 # Success, but no rules
+    fi
 
-        if [[ -z "$user_input" ]]; then
-            continue
-        fi
+    local IFS=',' # Set Internal Field Separator to comma for splitting
+    read -ra raw_rules <<< "$user_input_str" # Split into array
+    local IFS=$' \t\n' # Reset IFS
 
-        local listen_spec dest_ip dest_port protocol_suffix=""
-        local valid_rule=false
-        local original_rule_for_adding="$user_input" # Save original input for adding if valid
+    local rule_valid
+    for rule_str_raw in "${raw_rules[@]}"; do
+        local rule_str
+        rule_str=$(echo "$rule_str_raw" | xargs) # Trim whitespace
 
-        # Check for /udp suffix first
-        if [[ "$user_input" == */udp ]]; then
-            protocol_suffix="/udp"
-            user_input="${user_input%/udp}" # Remove /udp for further parsing
-        fi
+        if [[ -z "$rule_str" ]]; then continue; fi # Skip empty rules if user entered ",,"
+
+        local listen_spec listen_type listen_port1 listen_port2 listen_protocol_suffix
+        local dest_ip dest_port
+        local toml_rule=""
+        rule_valid=false
 
         # Try to parse listen_spec=dest_ip:dest_port format
-        if [[ "$user_input" =~ ^([^=]+)=([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}):([0-9]+)$ ]]; then
+        if [[ "$rule_str" =~ ^([^=]+)=([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}):([0-9]+(/udp)?)$ ]]; then
             listen_spec="${BASH_REMATCH[1]}"
             dest_ip="${BASH_REMATCH[2]}"
-            dest_port="${BASH_REMATCH[3]}"
-            if _validate_port_or_range "$listen_spec" && validate_ip "$dest_ip" && validate_port "$dest_port"; then
-                valid_rule=true
+            local dest_port_full="${BASH_REMATCH[3]}" # e.g., "22" or "22/udp"
+
+            local dest_port_no_udp="$dest_port_full"
+            local dest_protocol_suffix=""
+            if [[ "$dest_port_full" == */udp ]]; then
+                dest_protocol_suffix="/udp"
+                dest_port_no_udp="${dest_port_full%/udp}"
             fi
+
+            if _validate_port_or_range_with_udp "$listen_spec" && \
+               validate_ip "$dest_ip" && \
+               validate_port "$dest_port_no_udp"; then
+
+                listen_type="${_VALIDATED_PORT_RANGE_PARTS[0]}"
+                listen_port1="${_VALIDATED_PORT_RANGE_PARTS[1]}"
+                listen_port2="${_VALIDATED_PORT_RANGE_PARTS[2]}"
+                listen_protocol_suffix="${_VALIDATED_PORT_RANGE_PARTS[3]}"
+
+                if [[ "$listen_protocol_suffix" == "/udp" || "$dest_protocol_suffix" == "/udp" ]]; then
+                    out_any_udp_rules_ref="true"
+                    # Backhaul's `ports` array does not seem to use /udp. `accept_udp=true` handles it.
+                fi
+
+                local toml_listen_part="$listen_port1"
+                if [[ "$listen_type" == "range" ]]; then toml_listen_part="${listen_port1}-${listen_port2}"; fi
+
+                toml_rule="${toml_listen_part}=${dest_ip}:${dest_port_no_udp}" # UDP suffix not part of TOML rule string
+                rule_valid=true
+            fi
+
         # Try to parse listen_spec:dest_port format
-        elif [[ "$user_input" =~ ^([^:]+):([0-9]+)$ ]]; then
+        elif [[ "$rule_str" =~ ^([^:]+):([0-9]+(/udp)?)$ ]]; then
             listen_spec="${BASH_REMATCH[1]}"
-            dest_port="${BASH_REMATCH[2]}"
-            if _validate_port_or_range "$listen_spec" && validate_port "$dest_port"; then
-                valid_rule=true
+            local dest_port_full="${BASH_REMATCH[2]}"
+
+            local dest_port_no_udp="$dest_port_full"
+            local dest_protocol_suffix=""
+            if [[ "$dest_port_full" == */udp ]]; then
+                dest_protocol_suffix="/udp"
+                dest_port_no_udp="${dest_port_full%/udp}"
             fi
-        # Try to parse listen_spec (single port or range) format
-        elif _validate_port_or_range "$user_input"; then # user_input here is listen_spec without /udp
-            listen_spec="$user_input"
-            valid_rule=true
-        else
-            # _validate_port_or_range or other regexes would have printed an error.
-            # If no specific error printed, give a generic one.
-            # This path is less likely if _validate_port_or_range is comprehensive.
-            if $valid_rule; then : ; else print_warning "Invalid rule format: '$original_rule_for_adding'"; fi
+
+            if _validate_port_or_range_with_udp "$listen_spec" && \
+               validate_port "$dest_port_no_udp"; then
+
+                listen_type="${_VALIDATED_PORT_RANGE_PARTS[0]}"
+                listen_port1="${_VALIDATED_PORT_RANGE_PARTS[1]}"
+                listen_port2="${_VALIDATED_PORT_RANGE_PARTS[2]}"
+                listen_protocol_suffix="${_VALIDATED_PORT_RANGE_PARTS[3]}"
+
+                if [[ "$listen_protocol_suffix" == "/udp" || "$dest_protocol_suffix" == "/udp" ]]; then
+                    out_any_udp_rules_ref="true"
+                fi
+
+                local toml_listen_part="$listen_port1"
+                if [[ "$listen_type" == "range" ]]; then toml_listen_part="${listen_port1}-${listen_port2}"; fi
+
+                toml_rule="${toml_listen_part}:${dest_port_no_udp}" # UDP suffix not part of TOML rule string
+                rule_valid=true
+            fi
+
+        # Try to parse listen_spec (single port or range, with optional /udp)
+        elif _validate_port_or_range_with_udp "$rule_str"; then
+            listen_type="${_VALIDATED_PORT_RANGE_PARTS[0]}"
+            listen_port1="${_VALIDATED_PORT_RANGE_PARTS[1]}"
+            listen_port2="${_VALIDATED_PORT_RANGE_PARTS[2]}"
+            listen_protocol_suffix="${_VALIDATED_PORT_RANGE_PARTS[3]}"
+
+            if [[ "$listen_protocol_suffix" == "/udp" ]]; then
+                out_any_udp_rules_ref="true"
+            fi
+
+            # For 'local_port' or 'local_range' shorthand, Backhaul expects just the port/range.
+            # Example: "443" implies "443:443". "443-600" implies "443-600:443-600" (effectively).
+            if [[ "$listen_type" == "single" ]]; then
+                toml_rule="$listen_port1"
+            elif [[ "$listen_type" == "range" ]]; then
+                toml_rule="${listen_port1}-${listen_port2}"
+            fi
+            rule_valid=true
         fi
 
-        if $valid_rule; then
-            # Re-append /udp if it was present
-            # The original_rule_for_adding already contains /udp if it was there.
-            # No, original_rule_for_adding is the raw input. We need to add protocol_suffix to the validated listen_spec part
-            # if we were to reconstruct. Better to add the user's original valid input.
-            rules_array_ref+=("$original_rule_for_adding")
-            print_success "Rule added: \"$original_rule_for_adding\""
+        if $rule_valid; then
+            out_rules_array_ref+=("$toml_rule")
+            print_success "  Rule parsed: \"$rule_str\" -> TOML: \"$toml_rule\""
         else
-            # Errors should have been printed by validation functions
-            print_warning "Rule '$original_rule_for_adding' NOT added due to errors."
+            print_warning "  Invalid rule format or component: '$rule_str'. Skipping."
+            # Optionally, ask user to retry this specific rule or continue?
+            # For now, just skip invalid parts of the comma-separated string.
         fi
-        echo
     done
+
+    if [[ ${#out_rules_array_ref[@]} -eq 0 && -n "$user_input_str" ]]; then
+        print_warning "No valid forwarding rules were extracted from the input."
+        # No 'return 1' here, let it proceed with empty rules if all were invalid.
+    elif [[ ${#out_rules_array_ref[@]} -gt 0 ]]; then
+        print_success "All rules processed. Total valid rules: ${#out_rules_array_ref[@]}"
+    fi
+
+    if [[ "$out_any_udp_rules_ref" == "true" ]]; then
+        print_info "Note: UDP rules specified. Ensure 'accept_udp = true' is set in server's advanced options if not using UDP transport directly."
+    fi
+
+    press_any_key # Allow user to see results before continuing wizard
     return 0
 }
-
 
 # Prompts user for advanced optional parameters
 # Populates an associative array with chosen values.
@@ -636,20 +720,26 @@ _prompt_advanced_parameters() {
     # Usage: _handle_single_adv_param "description" "toml_key" "default_value_var_name"
     _handle_single_adv_param() {
         local desc="$1" toml_key="$2" default_val_var_name="$3"
-        local default_val="${!default_val_var_name}" # Indirect expansion
+        # Default value can be pre-set in params_ref (e.g. accept_udp by configure_tunnel)
+        # or fallback to BH_DEFAULT_* global.
+        local current_default_val="${params_ref[$toml_key]:-${!default_val_var_name}}"
         local input_val
 
         if [[ "$is_interactive" == "true" ]]; then
-            while true; do
-                read -r -p "Configure '$desc' ($toml_key) [Default: $default_val]: " input_val
-                input_val="${input_val:-$default_val}" # Apply default if empty
+            # Special handling for accept_udp prompt if it was pre-set
+            if [[ "$toml_key" == "accept_udp" && "${params_ref[$toml_key]}" == "true" ]]; then
+                print_info "Note: UDP port forwarding rules were specified, so 'accept_udp = true' is recommended."
+            fi
 
-                # Basic validation can be added here if needed, e.g., numeric, boolean
-                # Example for boolean (can be expanded for numeric ranges too):
+            while true; do
+                read -r -p "Configure '$desc' ($toml_key) [Default: $current_default_val]: " input_val
+                input_val="${input_val:-$current_default_val}" # Apply default if empty
+
+                # Basic validation
                 if [[ "$toml_key" == "nodelay" || "$toml_key" == "sniffer" || "$toml_key" == "accept_udp" || "$toml_key" == "aggressive_pool" ]]; then
                     if [[ "$input_val" != "true" && "$input_val" != "false" ]]; then
                         print_warning "Invalid boolean. Must be 'true' or 'false'."
-                        continue # Re-prompt
+                        continue
                     fi
                 elif [[ "$toml_key" =~ port$ || "$toml_key" =~ _period$ || "$toml_key" =~ _interval$ || "$toml_key" =~ _timeout$ || "$toml_key" =~ _size$ || "$toml_key" =~ _con$ || "$toml_key" =~ _version$ || "$toml_key" =~ buffer$ ]]; then
                      if ! [[ "$input_val" =~ ^[0-9]+$ ]]; then
@@ -662,9 +752,13 @@ _prompt_advanced_parameters() {
                 break
             done
             echo
-        else # Not interactive, just set the default
-            params_ref["$toml_key"]="$default_val"
-            log_message "DEBUG" "Quick Setup: $toml_key set to default: $default_val"
+        else # Not interactive
+            # If params_ref[$toml_key] is already set (e.g. accept_udp from UDP rules), keep it.
+            # Otherwise, set the BH_DEFAULT_* global.
+            if [[ -z "${params_ref[$toml_key]}" ]]; then
+                 params_ref["$toml_key"]="${!default_val_var_name}"
+            fi
+            log_message "DEBUG" "Advanced Param: $toml_key set to: ${params_ref[$toml_key]}"
         fi
     }
 
@@ -673,7 +767,7 @@ _prompt_advanced_parameters() {
     _handle_single_adv_param "Enable Traffic Sniffer" "sniffer" "BH_DEFAULT_SNIFFER"
     # sniffer_log is handled during save config if sniffer is true
 
-    if [[ "$transport_protocol" != "udp" ]]; then
+    if [[ "$transport_protocol" != "udp" ]]; then # These don't apply to raw UDP transport
         _handle_single_adv_param "TCP NoDelay" "nodelay" "BH_DEFAULT_NODELAY"
         _handle_single_adv_param "Keepalive Period (s)" "keepalive_period" "BH_DEFAULT_KEEPALIVE_PERIOD"
     fi
@@ -681,11 +775,23 @@ _prompt_advanced_parameters() {
 
     if [[ "$tunnel_mode" == "server" ]]; then
         if [[ "$is_interactive" == "true" ]]; then print_info "--- Server-Specific Advanced Parameters ---"; fi
-        _handle_single_adv_param "Heartbeat Interval (s)" "heartbeat" "BH_DEFAULT_HEARTBEAT"
-        _handle_single_adv_param "Channel Size" "channel_size" "BH_DEFAULT_CHANNEL_SIZE"
-        if [[ "$transport_protocol" == "tcp" || "$transport_protocol" == "tcpmux" ]]; then
-            _handle_single_adv_param "Accept UDP over TCP" "accept_udp" "BH_DEFAULT_ACCEPT_UDP"
+        if [[ "$transport_protocol" != "udp" ]]; then # Heartbeat not in UDP server example
+             _handle_single_adv_param "Heartbeat Interval (s)" "heartbeat" "BH_DEFAULT_HEARTBEAT"
         fi
+        _handle_single_adv_param "Channel Size" "channel_size" "BH_DEFAULT_CHANNEL_SIZE"
+
+        # accept_udp is only relevant if the main transport is TCP-based (tcp, tcpmux, ws, wss, wsmux, wssmux)
+        # If main transport is "udp", then accept_udp is not a valid parameter for backhaul server.
+        if [[ "$transport_protocol" != "udp" ]]; then
+            # `accept_udp` might have been pre-set to "true" by configure_tunnel if UDP port rules were added.
+            # _handle_single_adv_param will use this pre-set value as the current_default_val.
+            _handle_single_adv_param "Accept UDP over non-UDP transport" "accept_udp" "BH_DEFAULT_ACCEPT_UDP"
+        elif [[ -n "${params_ref[accept_udp]}" ]]; then
+            # If transport is UDP, but accept_udp was somehow set (e.g. by earlier UDP rules before transport change), unset it.
+            unset params_ref["accept_udp"]
+            log_message "DEBUG" "Removed accept_udp as transport is UDP."
+        fi
+
     else # client mode
         if [[ "$is_interactive" == "true" ]]; then print_info "--- Client-Specific Advanced Parameters ---"; fi
         _handle_single_adv_param "Connection Pool Size" "connection_pool" "BH_DEFAULT_CONNECTION_POOL"
@@ -811,50 +917,46 @@ configure_tunnel() {
             # NEW STEP for Server Port Forwarding Rules (Step 4)
             4)
                 if [[ "$tunnel_mode" == "server" ]]; then
-                    _configure_server_forwarding_rules server_port_rules # Pass the array by nameref
-                    step_rc=$? # _configure_server_forwarding_rules returns 0 on 'done'
-                    # This function handles its own internal looping, 'help', and 'done'.
-                    # It doesn't have a 'back' option to a previous wizard step.
-                    # If it needs to signal a full wizard cancel, it would return non-zero.
-                    # For now, assume it completes or user confirms empty rules.
-                    if [[ "$step_rc" -eq 0 ]]; then
-                        ((current_wizard_step++))
-                    else
-                        # Handle cancellation/back from _prompt_server_ports_array if implemented
-                        # For now, this path isn't taken by _prompt_server_ports_array's current design.
-                        print_info "Port forwarding configuration was cancelled or an error occurred."
-                        # Decide if this means full wizard cancel or back to basic params
-                        # For now, assume it means back to basic params (step 3)
-                        current_wizard_step=3
-                        continue
+                    local any_udp_rules_specified="false" # Initialize local flag
+                    # _configure_server_forwarding_rules now takes the rules array and the udp flag nameref
+                    # It will prompt the user for a comma-separated string of rules.
+                    _configure_server_forwarding_rules server_port_rules any_udp_rules_specified
+                    step_rc=$? # This function now returns 0 for success (even if no rules), 1 for critical error.
+                               # It handles its own user interaction including 'press_any_key'.
+
+                    if [[ "$step_rc" -ne 0 ]]; then
+                        print_error "Failed to configure server port forwarding rules. Aborting wizard."
+                        return_from_menu; return 1
                     fi
+
+                    # If UDP rules were specified, and transport is not UDP itself,
+                    # pre-set accept_udp to true in advanced_params_map.
+                    # This will be picked up by _prompt_advanced_parameters later.
+                    if [[ "$any_udp_rules_specified" == "true" && "$transport_protocol" != "udp" ]]; then
+                        print_info "UDP port rules detected. Setting 'accept_udp = true' as a recommended default."
+                        advanced_params_map["accept_udp"]="true"
+                        # This ensures that even in Quick Setup, if UDP rules are added, accept_udp is true.
+                        # In Advanced Setup, _prompt_advanced_parameters will see this and can use it as default.
+                    fi
+                    ((current_wizard_step++))
                 else
                     # Not a server, skip this step
                     ((current_wizard_step++))
                 fi
                 ;;
-            5) # Step 5 (Was 4): Advanced Configuration Prompts / Default Population
-                if $setup_is_advanced; then
-                    # Interactive prompting for Advanced Setup
-                    _prompt_advanced_parameters advanced_params_map "$tunnel_mode" "$transport_protocol" true
-                    step_rc=$?
-                    if [[ "$step_rc" -ne 0 ]]; then
-                        print_info "Advanced configuration cancelled or failed."
-                        return 1 # Exit wizard
-                    fi
-                else
-                    # Non-interactive population of defaults for Quick Setup
-                    _prompt_advanced_parameters advanced_params_map "$tunnel_mode" "$transport_protocol" false
-                    step_rc=$? # Should always be 0 if logic is correct
-                    if [[ "$step_rc" -ne 0 ]]; then
-                        handle_error "CRITICAL" "Failed to populate default advanced parameters for Quick Setup."
-                        return 1 # Exit wizard
-                    fi
+            5) # Step 5: Advanced Configuration Prompts / Default Population
+                # For Quick Setup (is_interactive=false), this populates advanced_params_map with script defaults.
+                # For Advanced Setup (is_interactive=true), this prompts user for each.
+                # It needs to be aware of any pre-set values in advanced_params_map (like accept_udp).
+                _prompt_advanced_parameters advanced_params_map "$tunnel_mode" "$transport_protocol" "$setup_is_advanced"
+                step_rc=$?
+                if [[ "$step_rc" -ne 0 ]]; then
+                    print_info "Advanced parameter configuration cancelled or failed."
+                    return_from_menu; return 1 # Exit wizard
                 fi
-                # Common path after populating advanced_params_map one way or another
                 ((current_wizard_step++))
                 ;;
-            6) # Step 6 (Was 5): TLS Configuration
+            6) # Step 6: TLS Configuration
                 cfg_tls_cert_path="" cfg_tls_key_path="" # Reset for this step
                 if [[ "$transport_protocol" =~ ^(wss|wssmux)$ ]]; then
                     _prompt_tls_config "$transport_protocol" cfg_tls_cert_path cfg_tls_key_path
