@@ -149,8 +149,8 @@ manage_ufw_main_menu() {
         print_menu_header "primary" "UFW Firewall Management" "Status: $ufw_current_status"
         
         menu_loop "Select UFW option" ufw_menu_options "_ufw_menu_help"
-        user_choice="$MENU_CHOICE"
-        menu_rc=$?
+        local menu_rc=$?
+        local user_choice="$MENU_CHOICE" # Capture MENU_CHOICE after $?
         
         case "$menu_rc" in
             0) # Numeric choice
@@ -163,18 +163,24 @@ manage_ufw_main_menu() {
                     *) print_warning "Invalid option: $user_choice"; press_any_key ;;
                 esac
                 ;;
-            2) # '?' Help shown
+            2) # '?' Help
+                # Help function already called by menu_loop. Loop again to show menu.
                 continue ;;
             3) # 'm' Main Menu
-                go_to_main_menu; return 0 ;;
+                go_to_main_menu
+                return 0 ;; # Return to main script loop
             4) # 'x' Exit script
-                request_script_exit; return 0 ;;
-            5) # 'r' Return/Back (to main menu)
-                return_from_menu; return 0 ;;
-            6) # 'c' Cancel (acts like 'r' here)
-                return_from_menu; return 0 ;;
+                request_script_exit
+                return 0 ;; # Return to main script loop
+            5) # 'r' Return/Back/Cancel (to previous menu, likely main menu)
+                return_from_menu # This pops the stack
+                return 0 ;; # Return to main script loop
+            6)  # Invalid input in menu_loop (warning and press_any_key handled by menu_loop)
+                continue ;; # Re-display this menu
             *)
-                handle_error "ERROR" "Unhandled menu_loop code $menu_rc in manage_ufw_main_menu"; press_any_key; continue ;;
+                print_warning "Unexpected menu_loop return code in manage_ufw_main_menu: $menu_rc (Choice: $user_choice)"
+                press_any_key
+                continue ;; # Re-display this menu
         esac
     done
 }

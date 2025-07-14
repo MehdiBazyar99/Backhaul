@@ -36,7 +36,6 @@ system_health_monitor_menu() {
         echo "  1. Refresh: Reloads all the displayed health information."
         echo "  2. Clean Stale Processes & Temp Files: Attempts to remove known temporary files or orphaned processes."
         echo "  3. View System Logs: Access logs like easybackhaul.log or performance.log."
-        # ... (full help text)
         press_any_key
     }
 
@@ -45,7 +44,6 @@ system_health_monitor_menu() {
         "2. Clean Stale Processes & Temp Files"
         "3. View System Logs (e.g., easybackhaul.log, performance.log)"
     )
-    # local health_exit_details=("0" "Back to Main Menu") # No longer needed
     local user_choice menu_rc
 
     while true; do
@@ -65,37 +63,52 @@ system_health_monitor_menu() {
             print_info "  Summary: $healthy_tunnels / ${#tunnel_config_files[@]} tunnels appear healthy."; fi; echo
         print_info "--- Recent Performance Log ---"
         if [[ -n "$PERFORMANCE_LOG_FILE" && -f "$PERFORMANCE_LOG_FILE" ]]; then tail -n 5 "$PERFORMANCE_LOG_FILE" | sed 's/^/    /' || print_warning "  Could not read performance log."; else print_warning "  Performance log file not configured or not found."; fi; echo
-        print_info "--- Active Watcher Processes (Summary) ---" # Corrected from Chinese characters
-        if pgrep -f "$EASYBACKHAUL_TMP_DIR/backhaul-watcher-.*\.sh" >/dev/null; then pgrep -af "$EASYBACKHAUL_TMP_DIR/backhaul-watcher-.*\.sh" | sed 's/^/    /'; else print_info "  No active watcher processes found."; fi
+        print_info "--- Active Watcher Processes (Summary) ---"
+        if pgrep -f "${EASYBACKHAUL_TMP_DIR:-/tmp}/backhaul-watcher-.*\.sh" >/dev/null; then pgrep -af "${EASYBACKHAUL_TMP_DIR:-/tmp}/backhaul-watcher-.*\.sh" | sed 's/^/    /'; else print_info "  No active watcher processes found."; fi
 
-        menu_loop "Select action" health_menu_options health_exit_details "_health_monitor_menu_help"
-        user_choice="$MENU_CHOICE"; menu_rc=$?
+        menu_loop "Select action" health_menu_options "_health_monitor_menu_help"
+        local menu_rc=$?
+        local user_choice="$MENU_CHOICE" # Capture MENU_CHOICE after $? is captured
 
         case "$menu_rc" in
-            0) # Numeric or "0"
+            0) # Numeric choice
                 case "$user_choice" in
                     "1") continue ;; # Refresh by re-looping
                     "2") run_with_spinner "Cleaning stale processes and files..." cleanup_stale_processes_and_files; press_any_key ;;
                     "3")
                         if [[ -n "$LOG_DIR" ]]; then
-                            # This should ideally be a navigable menu if there are multiple logs.
-                            # For now, just view one. If view_system_log becomes a menu, use navigate_to_menu.
-                            view_system_log "file" "$LOG_DIR/easybackhaul.log" "EasyBackhaul Main Log"
+                            # navigate_to_menu will push to stack, then current function returns 0
+                            # main loop will pick up the new function from stack.
+                            navigate_to_menu "view_system_log \"file\" \"$LOG_DIR/easybackhaul.log\" \"EasyBackhaul Main Log\""
+                            return 0 # Return to main script loop to process navigation
                         else
                             handle_error "WARNING" "LOG_DIR not defined."
                             press_any_key
                         fi
                         ;;
-                    "0") return_from_menu; return 0 ;; # Back to Main Menu
-                    *) print_warning "Invalid option."; press_any_key ;;
+                    *) print_warning "Invalid option: $user_choice"; press_any_key ;;
                 esac
                 ;;
-            1) print_warning "Invalid selection."; press_any_key ;;
-            2) continue ;; # Help shown
-            3) go_to_main_menu; return 0 ;;
-            4) request_script_exit; return 0 ;;
-            5) return_from_menu; return 0 ;; # 'r' (Back) is same as "0" here
-            *) print_warning "Unexpected menu_loop return."; press_any_key ;;
+            2) # '?' Help
+                # Help function already called by menu_loop. Loop again to show menu.
+                continue ;;
+            3) # 'm' Main Menu
+                go_to_main_menu
+                return 0 ;; # Return to main script loop
+            4) # 'x' Exit script
+                request_script_exit
+                return 0 ;; # Return to main script loop
+            5) # 'r' Return/Back/Cancel (to previous menu, likely main menu)
+                return_from_menu
+                return 0 ;; # Return to main script loop
+            6) # Invalid input in menu_loop (warning already printed by menu_loop)
+                # press_any_key was already handled by menu_loop before returning 6.
+                # Loop again to show the health monitor menu.
+                continue ;;
+            *)
+                print_warning "Unexpected menu_loop return code in system_health_monitor_menu: $menu_rc (Choice: $user_choice)"
+                press_any_key
+                continue ;; # Re-draw menu on unexpected code
         esac
     done
 }
@@ -105,13 +118,15 @@ _perform_full_uninstall() {
     print_warning "WARNING: This will PERMANENTLY REMOVE EasyBackhaul and ALL related data!"
     echo "This includes:"
     echo "  - The Backhaul binary ($BIN_PATH)"
-    echo "  - All tunnel configurations ($CONFIG_DIR)"
+    echo "  - All tunnel configurations (from $CONFIG_DIR, likely /etc/easybackhaul/configs)"
+    echo "  - The main configuration directory structure (e.g., /etc/easybackhaul)"
     echo "  - All systemd services (e.g., backhaul-*.service in $SERVICE_DIR)"
     echo "  - All UFW rules managed by EasyBackhaul (if UFW is used)"
     echo "  - All EasyBackhaul-managed cron jobs."
-    echo "  - Temporary files and watcher scripts (typically in $EASYBACKHAUL_TMP_DIR or /tmp)"
+    echo "  - Temporary files and watcher scripts (typically in ${EASYBACKHAUL_TMP_DIR:-/tmp})"
     echo "  - Backup files ($BACKUP_DIR)"
-    echo "  - Potentially log files ($LOG_DIR) - you will be asked about this."
+    echo "  - Log files and directory (from $LOG_DIR, likely /var/log/easybackhaul) - you will be asked about this."
+    echo "  - Logrotate configuration (/etc/logrotate.d/easybackhaul)"
     
     if ! prompt_yes_no "Are you absolutely sure you want to proceed with uninstallation?" "n"; then
         print_info "Uninstallation cancelled."; press_any_key; return 1; fi
@@ -132,32 +147,29 @@ _perform_full_uninstall() {
             run_with_spinner "Disabling $service_name..." systemctl disable "$service_name"
             local suffix_to_clean
             if [[ "$service_name" == backhaul-bh-*.service ]]; then
-                suffix_to_clean=${service_name#backhaul-} # bh-server-tcp-xxxx.service
-                suffix_to_clean=${suffix_to_clean%.service} # bh-server-tcp-xxxx
-                 # Also clean up watcher files for this main tunnel suffix
-                cleanup_watcher_files "$suffix_to_clean" "true" # Quietly
+                suffix_to_clean=${service_name#backhaul-}
+                suffix_to_clean=${suffix_to_clean%.service}
+                cleanup_watcher_files "$suffix_to_clean" "true"
             elif [[ "$service_name" == backhaul-watcher-*.service ]]; then
-                suffix_to_clean=${service_name#backhaul-watcher-} # server-tcp-xxxx.service (example)
-                suffix_to_clean=${suffix_to_clean%.service} # server-tcp-xxxx
-                cleanup_watcher_files "$suffix_to_clean" "true" # Quietly
+                suffix_to_clean=${service_name#backhaul-watcher-}
+                suffix_to_clean=${suffix_to_clean%.service}
+                cleanup_watcher_files "$suffix_to_clean" "true"
             fi
         done
     else
         print_info "No 'backhaul-bh-*.service' or 'backhaul-watcher-*.service' services found."
     fi
     
-    log_message "INFO" "Performing general watcher file cleanup from $EASYBACKHAUL_TMP_DIR (and /tmp for legacy)..."
+    log_message "INFO" "Performing general watcher file cleanup from ${EASYBACKHAUL_TMP_DIR:-/tmp}..."
     find "${EASYBACKHAUL_TMP_DIR:-/tmp}" -maxdepth 1 \( -name 'backhaul-watcher-*' -o -name 'restart_ack_*' \) -print -exec rm -rf {} \; &>/dev/null
-    # Legacy /tmp cleanup if EASYBACKHAUL_TMP_DIR is different and not /tmp
-    if [[ -n "$EASYBACKHAUL_TMP_DIR" && "$EASYBACKHAUL_TMP_DIR" != "/tmp" ]]; then
+    if [[ -n "$EASYBACKHAUL_TMP_DIR" && "$EASYBACKHAUL_TMP_DIR" != "/tmp" && "$EASYBACKHAUL_TMP_DIR" != "/tmp/" ]]; then # Check if it's a different dir
         find "/tmp" -maxdepth 1 \( -name 'backhaul-watcher-*' -o -name 'restart_ack_*' \) -print -exec rm -rf {} \; &>/dev/null
     fi
 
     print_info "Removing systemd service files..."
     if [[ -d "$SERVICE_DIR" ]]; then
         secure_delete "${SERVICE_DIR}/backhaul-bh-*.service"
-        secure_delete "${SERVICE_DIR}/backhaul-watcher-*.service" # Remove watcher services too
-        # General cleanup for any other backhaul service that might have been missed.
+        secure_delete "${SERVICE_DIR}/backhaul-watcher-*.service"
         secure_delete "${SERVICE_DIR}/backhaul-*.service"
     fi
     run_with_spinner "Reloading systemd daemon..." systemctl daemon-reload
@@ -189,16 +201,30 @@ _perform_full_uninstall() {
     
     print_info "Removing files and directories..."
     if [[ -n "$BIN_PATH" && -f "$BIN_PATH" ]]; then secure_delete "$BIN_PATH"; fi
-    if [[ -n "$CONFIG_DIR" && -d "$CONFIG_DIR" ]]; then secure_delete "$CONFIG_DIR"; fi
+    # CONFIG_DIR is now /etc/easybackhaul/configs. Remove its parent /etc/easybackhaul as well.
+    if [[ -n "$CONFIG_DIR" && -d "$(dirname "$CONFIG_DIR")" ]]; then # Check parent dir
+        secure_delete "$(dirname "$CONFIG_DIR")" # This removes /etc/easybackhaul (and configs within)
+        log_message "INFO" "Removed main config directory structure: $(dirname "$CONFIG_DIR")"
+    elif [[ -n "$CONFIG_DIR" && -d "$CONFIG_DIR" ]]; then # Fallback if parent wasn't as expected
+         secure_delete "$CONFIG_DIR"
+         log_message "INFO" "Removed config directory: $CONFIG_DIR"
+    fi
+
     if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then secure_delete "$BACKUP_DIR"; fi
-    # Remove EASYBACKHAUL_TMP_DIR if it was set and is a directory
-    if [[ -n "$EASYBACKHAUL_TMP_DIR" && -d "$EASYBACKHAUL_TMP_DIR" && "$EASYBACKHAUL_TMP_DIR" != "/tmp" ]]; then
+    if [[ -n "$EASYBACKHAUL_TMP_DIR" && -d "$EASYBACKHAUL_TMP_DIR" && "$EASYBACKHAUL_TMP_DIR" != "/tmp" && "$EASYBACKHAUL_TMP_DIR" != "/tmp/" ]]; then
         secure_delete "$EASYBACKHAUL_TMP_DIR"
     fi
 
+    # Remove logrotate configuration
+    local logrotate_conf_file="/etc/logrotate.d/easybackhaul"
+    if [[ -f "$logrotate_conf_file" ]]; then
+        secure_delete "$logrotate_conf_file"
+        log_message "INFO" "Removed logrotate configuration file: $logrotate_conf_file"
+    fi
 
+    # LOG_DIR is now /var/log/easybackhaul
     if [[ -n "$LOG_DIR" && -d "$LOG_DIR" ]]; then
-        if prompt_yes_no "Also delete the main log directory $LOG_DIR and its contents?" "n"; then
+        if prompt_yes_no "Also delete the main log directory ($LOG_DIR) and all its contents?" "n"; then
             secure_delete "$LOG_DIR"
             handle_success "Log directory $LOG_DIR deleted."
         else
@@ -207,9 +233,19 @@ _perform_full_uninstall() {
     fi
     
     handle_success "EasyBackhaul uninstallation completed."
-    print_info "Some manual cleanup of system logs (journalctl) might be desired."
+    print_info "Some manual cleanup of system logs (journalctl) might be desired if services were problematic."
     print_info "Exiting now."
-    exit 0 # Successful exit after uninstallation
+    exit 0
+}
+
+# --- Global Ctrl+C Handler ---
+_global_ctrl_c_handler() {
+    print_error "\n\nCtrl+C pressed. Exiting EasyBackhaul script."
+    log_message "WARN" "Ctrl+C interrupt received. Exiting script."
+    if type request_script_exit &>/dev/null; then
+        request_script_exit
+    fi
+    exit 130
 }
 
 main_menu_entry() {
@@ -235,7 +271,6 @@ main_menu_entry() {
         "7. Manage UFW Firewall (if installed)"
         "8. Uninstall EasyBackhaul"
     )
-    # local main_exit_details=("0" "Exit EasyBackhaul") # No longer needed
     local user_choice menu_rc
 
     local help_func_name="show_main_application_help"
@@ -252,7 +287,8 @@ main_menu_entry() {
     fi
 
     menu_loop "Select option" main_menu_options "$help_func_name"
-    user_choice="$MENU_CHOICE"; menu_rc=$?
+    local menu_rc=$?
+    local user_choice="$MENU_CHOICE" # Capture MENU_CHOICE after $? is captured
     
     case "$menu_rc" in
         0) # Numeric choice
@@ -260,20 +296,25 @@ main_menu_entry() {
                 "1") navigate_to_menu "configure_tunnel" ;;
                 "2") navigate_to_menu "manage_tunnels_menu" ;;
                 "3")
-                    if download_backhaul_binary_workflow; then
-                        handle_success "Backhaul binary update/re-install process completed."
-                    else
-                        handle_error "WARNING" "Backhaul binary update/re-install was cancelled or failed."
+                    # download_backhaul_binary_workflow handles its own user feedback and press_any_key.
+                    # It returns 0 for actual install success, 1 for failure/cancel,
+                    # and will be updated to return 2 if only diagnostics were run then cancelled.
+                    local workflow_rc
+                    download_backhaul_binary_workflow
+                    workflow_rc=$?
+                    if [[ "$workflow_rc" -eq 0 ]]; then
+                        # Optionally, a very brief confirmation here if needed, but primary feedback is in workflow.
+                        log_message "INFO" "Backhaul binary workflow completed successfully (main_menu_entry)."
+                    elif [[ "$workflow_rc" -eq 1 ]]; then
+                        log_message "WARN" "Backhaul binary workflow cancelled or failed (main_menu_entry)."
+                    # else # e.g. rc=2, diagnostics run then cancelled - no specific message here needed yet
                     fi
-                    press_any_key
+                    # No generic handle_success/error or press_any_key here.
                     ;;
                 "4")
-                    if generate_self_signed_tls_cert; then
-                        handle_success "TLS certificate generation process completed."
-                    else
-                        handle_error "WARNING" "TLS certificate generation was cancelled or failed."
-                    fi
-                    press_any_key
+                    # generate_self_signed_tls_cert handles its own user feedback and press_any_key.
+                    generate_self_signed_tls_cert
+                    # No generic handle_success/error or press_any_key here.
                     ;;
                 "5") navigate_to_menu "system_health_monitor_menu" ;;
                 "6") run_with_spinner "Cleaning stale processes and temporary files..." cleanup_stale_processes_and_files; press_any_key ;;
@@ -287,81 +328,62 @@ main_menu_entry() {
                     ;;
                 "8")
                     _perform_full_uninstall
-                    # If _perform_full_uninstall is cancelled, it returns 1.
-                    # If it completes, it exits the script.
-                    # If it returns 1, we want to re-display the main menu.
-                    if [[ $? -eq 1 ]]; then main_menu_entry; return 0; fi
+                    # If uninstallation was cancelled (returns 1), we want to stay in the main menu loop.
+                    # main_menu_entry will be called again by the main script loop.
+                    if [[ $? -eq 1 ]]; then return 0; fi
+                    # If uninstallation happened (returns 0), script exits, so this path isn't critical.
                     ;;
                  *) print_warning "Invalid selection from main_menu_entry: $user_choice"; press_any_key ;;
             esac
             ;;
-        2) # '?' Help shown
-            return 0 ;; # Re-render main menu
-        3) # 'm' Main Menu - effectively a refresh
-            go_to_main_menu; return 0 ;;
-        4) # 'x' Exit script
-            request_script_exit; return 0 ;;
-        5) # 'r' Return/Back from main menu also means exit
-            request_script_exit; return 0 ;;
-        6) # 'c' Cancel from main menu also means exit
-            request_script_exit; return 0;;
+        2) # '?' Help
+            # Help function was already called by menu_loop.
+            # Loop again to show the main menu.
+            return 0 ;;
+        3) # 'm' Main Menu
+            # Already in main menu, so just re-display.
+            return 0 ;;
+        4) # 'x' Exit Script
+            request_script_exit
+            return 0 ;;
+        5) # 'r' Return/Back/Cancel
+            # In main menu, 'r' acts as 'x' (exit).
+            request_script_exit
+            return 0 ;;
+        6)  # Invalid input from menu_loop (warning and press_any_key already done by menu_loop)
+            # Just need to ensure main_menu_entry is re-displayed.
+            return 0 ;; # Fall through to the end of function's return 0 is fine.
         *)
-            print_warning "Unexpected menu_loop return in main_menu_entry: $menu_rc, choice: $user_choice"
-            press_any_key ;;
+            print_warning "Unexpected menu_loop return code in main_menu_entry: $menu_rc (Choice: $user_choice)"
+            press_any_key ;; # Fall through to the end of function's return 0.
     esac
-    return 0 # Allow the main script loop to call this function again if not exited
+    return 0
 }
 
 main_script_entry_point() {
-# --- Global Ctrl+C Handler ---
-_global_ctrl_c_handler() {
-    print_error "\n\nCtrl+C pressed. Exiting EasyBackhaul script."
-    log_message "WARN" "Ctrl+C interrupt received. Exiting script."
-    # Perform any essential cleanup if needed here, though individual functions might have their own.
-    # For a clean exit via the menu system's exit path:
-    if type request_script_exit &>/dev/null; then
-        request_script_exit # This will clear MENU_STACK and CURRENT_MENU_FUNCTION
-    fi
-    # The main loop in main_script_entry_point will then terminate.
-    # Directly exiting here might bypass some cleanup or final messages from main loop.
-    # However, for an explicit Ctrl+C, immediate clean exit is often desired.
-    # Let's ensure the main loop's exit condition is met.
-    # Setting CURRENT_MENU_FUNCTION to empty should be sufficient if request_script_exit was called.
-    exit 130 # Standard exit code for Ctrl+C
-}
 
-main_script_entry_point() {
-    # Initialize logging as the very first step
     if type init_logging &>/dev/null; then
-        init_logging # Sets up LOG_FILE, EASYBACKHAUL_TMP_DIR etc.
+        init_logging
     else
         echo "FATAL ERROR: init_logging function not found. Cannot proceed." >&2
         exit 1
     fi
 
-    # Global Ctrl+C trap
     trap '_global_ctrl_c_handler' INT
 
     log_message "INFO" "EasyBackhaul script started."
 
-    # Default global variables (some might be overridden by init_logging or user config later)
-    # These are fallbacks if not set by init_logging from a config file or defaults.
     : "${CONFIG_DIR:=$EASYBACKHAUL_APP_DIR/config}"
     : "${BACKUP_DIR:=$EASYBACKHAUL_APP_DIR/backup}"
     : "${BIN_PATH:=$EASYBACKHAUL_APP_DIR/bin/easybackhaul_binary}"
-    : "${SERVICE_DIR:=/etc/systemd/system}" # Standard systemd location
-    # LOG_DIR, LOG_LEVEL, LOG_FORMAT should be definitively set by init_logging
+    : "${SERVICE_DIR:=/etc/systemd/system}"
     : "${CRON_COMMENT_TAG:=EasyBackhaul}"
-    # HEALTH_LOG_FILE and PERFORMANCE_LOG_FILE path depends on LOG_DIR
     : "${HEALTH_LOG_FILE:=${LOG_DIR:-/var/log/easybackhaul}/easybackhaul_health.log}"
     : "${PERFORMANCE_LOG_FILE:=${LOG_DIR:-/var/log/easybackhaul}/easybackhaul_performance.log}"
 
-    # Ensure critical directories exist after globals are established
-    # This needs to happen after init_logging which sets EASYBACKHAUL_APP_DIR
-    # and potentially custom CONFIG_DIR, LOG_DIR.
     ensure_dir_wrapper() {
         local dir_path="$1"
-        local permissions="${2:-700}" # Default permissions
+        local permissions="${2:-700}"
         if [[ -z "$dir_path" ]]; then
             log_message "WARN" "ensure_dir_wrapper: Directory path is empty. Skipping."
             return
@@ -369,31 +391,27 @@ main_script_entry_point() {
         if type ensure_dir &>/dev/null; then
             ensure_dir "$dir_path" "$permissions"
         else
-            # Basic fallback if ensure_dir is missing (should not happen if helpers are sourced)
             mkdir -p "$dir_path" && chmod "$permissions" "$dir_path"
             log_message "WARN" "ensure_dir function not found. Used basic mkdir -p."
         fi
     }
     
-    ensure_dir_wrapper "$EASYBACKHAUL_APP_DIR" "755" # Main app dir
-    ensure_dir_wrapper "$(dirname "$BIN_PATH")" "755" # Binary directory
+    ensure_dir_wrapper "$EASYBACKHAUL_APP_DIR" "755"
+    ensure_dir_wrapper "$(dirname "$BIN_PATH")" "755"
     ensure_dir_wrapper "$CONFIG_DIR" "700"
     ensure_dir_wrapper "$BACKUP_DIR" "700"
-    ensure_dir_wrapper "$LOG_DIR" "700" # Log directory
+    ensure_dir_wrapper "$LOG_DIR" "700"
 
-    if [[ $EUID -ne 0 ]]; then handle_critical_error "This script must be run as root or with sudo."; fi # Exits
+    if [[ $EUID -ne 0 ]]; then handle_critical_error "This script must be run as root or with sudo."; fi
     
-    if type check_dependencies &>/dev/null; then check_dependencies; # Exits on critical missing deps
+    if type check_dependencies &>/dev/null; then check_dependencies;
     else handle_critical_error "check_dependencies function not found."; fi
 
     if type get_server_info &>/dev/null; then get_server_info; else log_message "WARN" "get_server_info not found."; fi
 
-    # Binary installation check
     if [[ ! -f "$BIN_PATH" ]] || ! verify_binary_installation "quiet"; then
         log_message "WARN" "Backhaul binary not found or failed verification at $BIN_PATH. Starting installation wizard."
-        # _initial_installation_wizard returns 0 on success, 1 on failure/cancel
         if ! _initial_installation_wizard; then
-            # Check again, as user might have cancelled but binary exists from previous attempt
             if [[ ! -f "$BIN_PATH" ]] || ! verify_binary_installation "quiet"; then
                  handle_critical_error "Backhaul binary installation was not completed or is invalid. Exiting."
             else
@@ -402,30 +420,28 @@ main_script_entry_point() {
         fi
     fi
 
-    # Initialize menu navigation stack
     CURRENT_MENU_FUNCTION="main_menu_entry"
-    MENU_STACK=("main_menu_entry") # Stack of menu function names
+    MENU_STACK=("main_menu_entry")
 
     log_message "DEBUG" "Menu system initialized. Starting main loop for $CURRENT_MENU_FUNCTION"
 
-    # Main menu loop
     while [[ -n "$CURRENT_MENU_FUNCTION" ]]; do
         log_message "DEBUG" "Main loop - Current Menu: $CURRENT_MENU_FUNCTION, Stack: [${MENU_STACK[*]}]"
-        if type "$CURRENT_MENU_FUNCTION" &>/dev/null; then
-            "$CURRENT_MENU_FUNCTION" # Execute the current menu function
+
+        local func_name_to_check
+        # Extract the first word as the function name for 'type' command
+        read -r func_name_to_check _ <<< "$CURRENT_MENU_FUNCTION"
+
+        if type "$func_name_to_check" &>/dev/null; then
+            eval "$CURRENT_MENU_FUNCTION" # Use eval to correctly parse function and its arguments
         else
-            handle_critical_error "Menu function '$CURRENT_MENU_FUNCTION' not found. Stack: [${MENU_STACK[*]}]."
+            handle_critical_error "Menu function '$func_name_to_check' (from command string '$CURRENT_MENU_FUNCTION') not found. Stack: [${MENU_STACK[*]}]."
         fi
 
-        # After a menu function returns, CURRENT_MENU_FUNCTION might have been changed by navigation functions
-        # If MENU_STACK is empty, it means request_script_exit or similar was called.
         if [[ ${#MENU_STACK[@]} -eq 0 ]]; then
             log_message "DEBUG" "Menu stack is empty. Exiting main loop."
-            CURRENT_MENU_FUNCTION="" # Ensure loop terminates
+            CURRENT_MENU_FUNCTION=""
         fi
-        # If CURRENT_MENU_FUNCTION was set by navigate_to_menu, loop continues with new function.
-        # If it was cleared by return_from_menu and stack became empty, loop terminates.
-        # If it was cleared by return_from_menu and stack is not empty, CURRENT_MENU_FUNCTION is already set to top of stack.
     done
 
     log_message "INFO" "EasyBackhaul script finished."

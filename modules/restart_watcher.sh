@@ -249,8 +249,8 @@ manage_tunnel_watcher() {
         print_menu_header "secondary" "Restart Watcher Management" "Tunnel: $tunnel_short_suffix" "Watcher: $watcher_status"
 
         menu_loop "Select watcher option" menu_options "_tunnel_watcher_menu_help \"$tunnel_short_suffix\""
-        user_choice="$MENU_CHOICE"
-        menu_rc=$?
+        local menu_rc=$?
+        local user_choice="$MENU_CHOICE" # Capture MENU_CHOICE after $?
 
         case "$menu_rc" in
             0) # Numeric choice
@@ -279,10 +279,11 @@ manage_tunnel_watcher() {
                 request_script_exit; return 0 ;;
             5) # 'r' Return/Back (to specific tunnel menu)
                 return_from_menu; return 0 ;;
-            6) # 'c' Cancel (acts like 'r' here)
-                return_from_menu; return 0 ;;
+            6) # Invalid input in menu_loop (warning and press_any_key handled by menu_loop)
+                continue ;; # Re-display this menu
             *)
-                handle_error "ERROR" "Unhandled menu_loop code $menu_rc in manage_tunnel_watcher"; press_any_key; continue;;
+                handle_error "ERROR" "Unhandled menu_loop code $menu_rc in manage_tunnel_watcher"; press_any_key
+                continue;; # Ensure redraw on unexpected error
         esac
     done
 }
@@ -688,8 +689,8 @@ _manage_watcher_shared_secret() {
     }
 
     menu_loop "Select secret option" secret_menu_options "_secret_menu_help"
-    user_choice="$MENU_CHOICE"
-    menu_rc=$?
+    local menu_rc=$?
+    local user_choice="$MENU_CHOICE"
 
     case "$menu_rc" in
         0) # Numeric choice
@@ -713,8 +714,6 @@ _manage_watcher_shared_secret() {
                 "2") # Set manually
                     local role_for_set="client"
                     if grep -q 'mode[[:space:]]*=[[:space:]]*"server"' "$main_tunnel_config_file" 2>/dev/null; then role_for_set="server"; fi
-                    # _get_or_set_watcher_secret is interactive, call it and let it handle its flow.
-                    # It returns the secret or empty on failure/cancel.
                     local new_secret_val
                     new_secret_val=$(_get_or_set_watcher_secret "$main_tunnel_config_file" "$role_for_set")
                     if [[ -n "$new_secret_val" ]]; then
@@ -722,7 +721,6 @@ _manage_watcher_shared_secret() {
                     else
                         handle_warning "Watcher secret process cancelled or failed."
                     fi
-                    # This will re-display the manage_watcher_shared_secret menu after.
                     ;;
                 "3") # Generate new
                      if prompt_yes_no "Generate a new random secret? This will overwrite existing." "n"; then
@@ -731,12 +729,10 @@ _manage_watcher_shared_secret() {
                         print_info "New Generated Secret: $new_s"
                         print_warning "You MUST update the other side of the tunnel with this secret."
                         if prompt_yes_no "Use this new secret?" "y"; then
-                            # Save to global default (if RESTART_WATCHER_SECRET is not already set by env)
                             if [[ -z "$RESTART_WATCHER_SECRET" && -n "$GLOBAL_WATCHER_SECRET_FILE" ]]; then
                                 echo "$new_s" > "$GLOBAL_WATCHER_SECRET_FILE"
                                 set_secure_file_permissions "$GLOBAL_WATCHER_SECRET_FILE"
                             fi
-                            # Save to specific tunnel config
                             update_toml_value "$main_tunnel_config_file" "watcher_shared_secret" "$new_s" "string"
                             handle_success "New secret set and saved."
                         else
@@ -755,10 +751,11 @@ _manage_watcher_shared_secret() {
             request_script_exit; return 0 ;;
         5) # 'r' Return/Back (to manage_tunnel_watcher menu)
             return_from_menu; return 0 ;;
-        6) # 'c' Cancel (acts like 'r' here)
-            return_from_menu; return 0 ;;
+        6) # Invalid input
+            _manage_watcher_shared_secret "$main_tunnel_config_file"; return $? ;;
         *)
-            handle_error "ERROR" "Unhandled menu_loop code $menu_rc in _manage_watcher_shared_secret"; press_any_key; return 1;;
+            handle_error "ERROR" "Unhandled menu_loop code $menu_rc in _manage_watcher_shared_secret"; press_any_key;
+            _manage_watcher_shared_secret "$main_tunnel_config_file"; return $? ;;
     esac
     press_any_key
 }

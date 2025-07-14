@@ -169,15 +169,13 @@ _remove_service_cron_job() {
     if echo "$current_crontab" | grep -Fq "$service_to_manage" && \
        echo "$current_crontab" | grep -Fq "# $CRON_COMMENT_TAG"; then
         job_found=true
-        # Filter out the job for the specific service and comment tag
-        echo "$current_crontab" | grep -vF "$service_to_manage" | grep -vF "# $CRON_COMMENT_TAG" | crontab -
-        # This grep logic is a bit broad, ideally it should remove the specific line.
-        # A more precise way:
-        # echo "$current_crontab" | grep -vE "systemctl restart ${service_to_manage} # ${CRON_COMMENT_TAG}$" | crontab -
-        # For simplicity, the above is okay if we assume one job per service.
-        # Let's refine it:
-        echo "$current_crontab" | grep -v "systemctl restart ${service_to_manage} # ${CRON_COMMENT_TAG}" | crontab -
-
+        # Filter out the specific job line.
+        # The line is expected to be exactly: <schedule_expression> systemctl restart <service_name> # <CRON_COMMENT_TAG>
+        # We need to match this pattern carefully. Since schedule_expression can vary,
+        # we match the fixed parts: "systemctl restart ${service_to_manage} # ${CRON_COMMENT_TAG}"
+        # The `grep -v` will remove lines containing this exact string.
+        local line_to_remove_pattern="systemctl restart ${service_to_manage} # ${CRON_COMMENT_TAG}"
+        echo "$current_crontab" | grep -vF "$line_to_remove_pattern" | crontab -
 
         # Verify removal
         if ! crontab -l 2>/dev/null | grep -Fq "$service_to_manage" | grep -Fq "# $CRON_COMMENT_TAG"; then

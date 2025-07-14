@@ -25,23 +25,55 @@ press_any_key() { read -n 1 -s -r -p "Press any key to continue..."; echo; }
 
 # Initialize the logging system (directories, main log file)
 init_logging() {
-    # Ensure LOG_DIR is set, fallback to a default if necessary (should be defined in globals.sh)
-    local current_log_dir="${LOG_DIR:-/var/log/easybackhaul}"
-    mkdir -p "$current_log_dir"
-    chmod 750 "$current_log_dir"
-    
-    local main_log_file="$current_log_dir/easybackhaul.log"
-    touch "$main_log_file"
-    chmod 640 "$main_log_file"
+    # LOG_DIR is now defined in globals.sh as /var/log/easybackhaul
+    # Ensure LOG_DIR exists and has appropriate permissions.
+    # The user running easybh.sh (likely root) will create this.
+    # Services running as 'nobody' will write to files here, so group writability might be needed
+    # or files need specific 'nobody:nogroup' ownership.
+    # For simplicity, we'll make LOG_DIR root:adm 0775 or root:nogroup 0775,
+    # and log files root:adm 0664 or nobody:nogroup 0664.
+    # 'adm' group is standard for log access. 'nogroup' if 'nobody' needs to write directly.
 
-    # Specific log files if they are different from main_log_file
+    if [[ -z "$LOG_DIR" ]]; then
+        handle_critical_error "LOG_DIR global variable is not set. Logging cannot be initialized."
+        return 1
+    fi
+
+    if [[ ! -d "$LOG_DIR" ]]; then
+        mkdir -p "$LOG_DIR" || { handle_critical_error "Failed to create LOG_DIR: $LOG_DIR"; return 1; }
+    fi
+
+    # Set ownership and permissions for LOG_DIR
+    # Try chown to root:adm, then root:nogroup as fallback, then root:root.
+    # Permissions 0775 allow owner/group to write, others to read/execute.
+    if id -g adm >/dev/null 2>&1; then
+        chown root:adm "$LOG_DIR" && chmod 0775 "$LOG_DIR"
+    elif id -g nogroup >/dev/null 2>&1; then
+        chown root:nogroup "$LOG_DIR" && chmod 0775 "$LOG_DIR"
+    else
+        chown root:root "$LOG_DIR" && chmod 0755 "$LOG_DIR" # Fallback to root:root 0755
+    fi
+    
+    # Main log file
+    local main_log_file="$LOG_DIR/easybackhaul.log"
+    touch "$main_log_file" || { handle_error "WARN" "Failed to touch main log file: $main_log_file"; }
+    # Set permissions for the main log file. If services write here as 'nobody',
+    # they'll need write permission. root:adm 664 or nobody:nogroup 664.
+    if id -g adm >/dev/null 2>&1; then
+        chown root:adm "$main_log_file" && chmod 0664 "$main_log_file"
+    elif id -g nogroup >/dev/null 2>&1; then
+        chown nobody:nogroup "$main_log_file" && chmod 0664 "$main_log_file" # Allow easybackhaul_binary to write if it runs as nobody
+    else
+        chown root:root "$main_log_file" && chmod 0640 "$main_log_file"
+    fi
+
+
+    # Specific log files (health, performance) - these are typically written by easybh.sh itself (root)
     if [[ -n "${HEALTH_LOG_FILE:-}" && "$HEALTH_LOG_FILE" != "$main_log_file" ]]; then
-        touch "$HEALTH_LOG_FILE"
-        chmod 640 "$HEALTH_LOG_FILE"
+        touch "$HEALTH_LOG_FILE" && chmod 0640 "$HEALTH_LOG_FILE" && chown root:root "$HEALTH_LOG_FILE" 2>/dev/null
     fi
     if [[ -n "${PERFORMANCE_LOG_FILE:-}" && "$PERFORMANCE_LOG_FILE" != "$main_log_file" ]]; then
-        touch "$PERFORMANCE_LOG_FILE"
-        chmod 640 "$PERFORMANCE_LOG_FILE"
+        touch "$PERFORMANCE_LOG_FILE" && chmod 0640 "$PERFORMANCE_LOG_FILE" && chown root:root "$PERFORMANCE_LOG_FILE" 2>/dev/null
     fi
     
     if command -v logrotate &>/dev/null; then
@@ -51,15 +83,32 @@ init_logging() {
 
 # Setup log rotation for easybackhaul logs
 setup_log_rotation() {
-    local current_log_dir="${LOG_DIR:-/tmp/easybackhaul_logs}" # Using /tmp for sandbox
+    # LOG_DIR is now /var/log/easybackhaul
+    local current_log_dir="$LOG_DIR"
     local logrotate_conf_target="/etc/logrotate.d/easybackhaul"
-    local logrotate_conf_sandbox="/tmp/easybackhaul_logrotate_conf_test.conf" # Write to /tmp for sandbox
+    # No longer using sandbox path for logrotate config, directly target /etc/logrotate.d
     local max_files_to_rotate="${LOG_MAX_FILES:-5}"
 
-    print_info "Logrotate: Simulating creation of $logrotate_conf_target by writing to $logrotate_conf_sandbox for testing."
-    # In a real deployment, this would be: cat > "$logrotate_conf_target" << EOF
-    # For sandbox/testing, we write to /tmp to avoid permission errors.
-    cat > "$logrotate_conf_sandbox" << EOF
+    # Determine user/group for created log files by logrotate.
+    # Default to root:adm if adm group exists, else root:root or root:nogroup.
+    local logrotate_create_user="root"
+    local logrotate_create_group="root"
+    if id -g adm >/dev/null 2>&1; then
+        logrotate_create_group="adm"
+    elif id -g nogroup >/dev/null 2>&1; then
+         logrotate_create_group="nogroup" # If backhaul binary logs as nobody:nogroup
+    fi
+
+    log_message "INFO" "Attempting to create/update logrotate configuration at $logrotate_conf_target."
+
+    # Check if we can write to /etc/logrotate.d (requires root)
+    if [[ ! -w "$(dirname "$logrotate_conf_target")" && "$(id -u)" -ne 0 ]]; then
+        print_warning "Cannot write to $(dirname "$logrotate_conf_target"). Logrotate setup skipped. Run as root or setup manually."
+        log_message "WARN" "Logrotate setup skipped due to insufficient permissions for $logrotate_conf_target."
+        return 1
+    fi
+
+    cat > "$logrotate_conf_target" << EOF
 ${current_log_dir}/*.log {
     daily
     missingok
@@ -67,16 +116,16 @@ ${current_log_dir}/*.log {
     compress
     delaycompress
     notifempty
-    create 0640 root adm
+    create 0640 ${logrotate_create_user} ${logrotate_create_group}
     postrotate
-        # No action needed for script logs generally
+        # If services write to these logs, they might need a signal to reopen log files.
+        # For simple file logs by backhaul binary, this is usually not needed unless it keeps file handle open.
+        # Example: systemctl kill -s HUP backhaul-*.service >/dev/null 2>&1 || true
     endscript
 }
 EOF
-    chmod 644 "$logrotate_conf_sandbox" # Target the sandbox path
-    log_message "DEBUG" "Logrotate (sandbox) configuration created/updated at $logrotate_conf_sandbox."
-    # In a real deployment, this would be: log_message "DEBUG" "Logrotate configuration created/updated at $logrotate_conf_target."
-    # This function is called by init_logging, so log_message should be available after init_logging completes.
+    chmod 0644 "$logrotate_conf_target"
+    log_message "DEBUG" "Logrotate configuration created/updated at $logrotate_conf_target."
 }
 
 # Unified logging function
@@ -84,8 +133,8 @@ log_message() {
     local level="$1"
     local message="$2"
 
-    local current_log_dir="${LOG_DIR:-/var/log/easybackhaul}"
-    local log_file_to_use="${LOG_FILE_OVERRIDE:-$current_log_dir/easybackhaul.log}"
+    # LOG_DIR is now reliably set by globals.sh and init_logging ensures it exists.
+    local log_file_to_use="${LOG_FILE_OVERRIDE:-$LOG_DIR/easybackhaul.log}"
     local current_log_level="${LOG_LEVEL:-INFO}"
     local current_log_format="${LOG_FORMAT:-text}"
     local timestamp
@@ -691,7 +740,6 @@ print_menu_header() {
         if [[ -n "$detail2" ]]; then print_info "Status: $detail2"; fi   # Status for secondary
     fi
     # Standardized tip line, will be part of print_menu_footer now.
-    # print_info "Tip: Press '?' for help, 'm' for Main Menu, 'x' to Exit."
     echo
 }
 
@@ -784,7 +832,7 @@ prompt_for_ip() {
 # Unified menu footer printing
 print_menu_footer() {
     echo "----------------------------------------------------------------"
-    echo " [?] Help | [c] Cancel Op | [r] Return/Back | [m] Main Menu | [x] Exit Script"
+    echo " [?] Help | [r] Return/Back/Cancel | [m] Main Menu | [x] Exit Script"
 }
 
 prompt_yes_no() {
@@ -814,26 +862,22 @@ MENU_CHOICE="" # Global variable to store the result of menu_loop
 
 # Standardized menu loop.
 # Usage: menu_loop "Prompt Message" "options_array_name" ["custom_help_function_name"]
-#   options_array: ("1. Option A" "2. Option B") - These are the numbered options.
-# Sets MENU_CHOICE to the selected number (as a string) or one of the navigation characters.
+# Sets MENU_CHOICE globally.
 # Returns:
-#   0: Valid NUMERIC choice from options_ref was made. MENU_CHOICE holds the number.
-#   2: '?' (Help) was pressed. MENU_CHOICE holds '?'.
+#   0: Valid NUMERIC choice. MENU_CHOICE holds the number string.
+#   2: '?' (Help) was pressed. MENU_CHOICE holds '?'. (Help function, if any, was called).
 #   3: 'm' (Main Menu) was pressed. MENU_CHOICE holds 'm'.
 #   4: 'x' (Exit Script) was pressed. MENU_CHOICE holds 'x'.
-#   5: 'r' (Return/Back) was pressed. MENU_CHOICE holds 'r'.
-#   6: 'c' (Cancel Operation) was pressed. MENU_CHOICE holds 'c'.
-#   Any other non-zero return indicates an issue, though the loop should prevent this.
+#   5: 'r' (Return/Back/Cancel) was pressed. MENU_CHOICE holds 'r'.
+#   6: Invalid input (empty or non-matching). Warning printed by menu_loop for non-empty invalid. MENU_CHOICE holds the invalid input. Caller should redraw.
 menu_loop() {
     local prompt_msg="$1"
     local -n options_ref=$2 # Array of menu options like "1. Do X"
-    # Third argument is now custom_help_function_name, removed exit_option_details_ref
     local custom_help_function_name="${3:-}"
 
     local min_numeric_opt=1
     local max_numeric_opt=${#options_ref[@]}
     
-    # Construct the choice part of the prompt string for NUMERIC options
     local prompt_numeric_choices_str=""
     if (( max_numeric_opt > 0 )); then
         if (( max_numeric_opt == 1 )); then
@@ -843,66 +887,75 @@ menu_loop() {
         fi
     fi
     
+    # This loop is now only for re-prompting on truly empty input after processing.
+    # All other paths (special keys, valid numeric, invalid non-empty) will RETURN from the function.
     while true; do
-        # Display options from the array
         for opt_str in "${options_ref[@]}"; do
             echo "  $opt_str"
         done
 
-        # Display the standardized footer (which now contains all nav keys)
-        print_menu_footer # No argument needed anymore
+        print_menu_footer # Display updated footer
 
-        # Build the prompt string
         local full_prompt_str="$prompt_msg"
         local available_choices_display=""
         if [[ -n "$prompt_numeric_choices_str" ]]; then
             available_choices_display="$prompt_numeric_choices_str, "
         fi
-        # Add standardized navigation keys to the prompt display
-        available_choices_display+="?, c, r, m, x" # Standard nav keys
+        available_choices_display+="?, r, m, x"
 
         full_prompt_str+=" [${available_choices_display}]: "
 
+        local raw_choice
         read -r -p "$full_prompt_str" raw_choice
-        MENU_CHOICE=$(echo "$raw_choice" | tr '[:upper:]' '[:lower:]') # Normalize to lowercase
 
-        case "$MENU_CHOICE" in
-            '?')
-                if [[ -n "$custom_help_function_name" ]] && type "$custom_help_function_name" &>/dev/null; then
-                    "$custom_help_function_name"
-                else
-                    print_info "No specific help available for this menu."
-                fi
-                press_any_key # Always press_any_key after help
-                return 2 # Help shown
-                ;;
-            'm') return 3 ;; # Request Main Menu
-            'x') return 4 ;; # Request Exit Script (changed from 'e')
-            'r') return 5 ;; # Request Return/Back
-            'c') return 6 ;; # Request Cancel Operation
-        esac
+        local processed_choice
+        processed_choice=$(echo "$raw_choice" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        MENU_CHOICE="$processed_choice"
 
-        # Check if choice is a number within the options range
-        if [[ "$MENU_CHOICE" =~ ^[0-9]+$ ]]; then
-            if (( max_numeric_opt == 0 )); then # No numbered options defined
-                 print_warning "Invalid option: '$MENU_CHOICE'. No numeric options available. Use navigation keys."
-            elif (( MENU_CHOICE >= min_numeric_opt && MENU_CHOICE <= max_numeric_opt )); then
-                return 0 # Valid numeric option selected
+        if [[ "$processed_choice" == "?" ]]; then
+            if [[ -n "$custom_help_function_name" ]] && type "$custom_help_function_name" &>/dev/null; then
+                "$custom_help_function_name"
             else
-                 print_warning "Invalid numeric option: '$MENU_CHOICE'. Choose from ${prompt_numeric_choices_str} or navigation keys."
+                print_info "No specific help available for this menu."
+                press_any_key
             fi
-        else
-            # Non-numeric input that wasn't a nav key (and not empty)
-            if [[ -n "$MENU_CHOICE" ]]; then # Only print warning if input was not empty
-                print_warning "Invalid option: '$MENU_CHOICE'. Please try again."
-            fi
+            return 2
+        elif [[ "$processed_choice" == "m" ]]; then
+            return 3
+        elif [[ "$processed_choice" == "x" ]]; then
+            return 4
+        elif [[ "$processed_choice" == "r" ]]; then
+            return 5
         fi
 
-        # If input was empty or invalid, press_any_key only if it was not empty and invalid
-        if [[ -n "$MENU_CHOICE" ]]; then
-             press_any_key
+        if [[ "$processed_choice" =~ ^[0-9]+$ ]]; then
+            if (( max_numeric_opt == 0 )); then
+                 print_warning "Invalid option: '$processed_choice'. No numeric options available. Use navigation keys."
+                 press_any_key
+                 return 6
+            elif (( processed_choice >= min_numeric_opt && processed_choice <= max_numeric_opt )); then
+                return 0
+            else
+                 print_warning "Invalid numeric option: '$processed_choice'. Choose from ${prompt_numeric_choices_str} or navigation keys."
+                 press_any_key
+                 return 6
+            fi
+        else # Not numeric, and wasn't a special key
+            if [[ -n "$processed_choice" ]]; then
+                print_warning "Invalid option: '$processed_choice'. Please use numbers or navigation keys: ?, r, m, x."
+                press_any_key
+                return 6
+            else
+                # processed_choice IS empty (user just pressed Enter or entered only spaces)
+                # Return 6 to allow caller to redraw the full screen.
+                # No warning or press_any_key from menu_loop for this specific case.
+                return 6
+            fi
         fi
-        # Loop again to re-display menu and prompt
+        # Unreachable code due to returns in all paths above, unless processed_choice was initially empty
+        # and the "else" for empty choice didn't return 6.
+        # The loop should only continue if processed_choice was empty AND the "else" above didn't return 6.
+        # Corrected logic: empty input now also returns 6. So this loop should not be hit again unless error.
     done
 }
 
@@ -1199,33 +1252,35 @@ view_system_log() {
         print_menu_header "secondary" "$log_title" "Source: $log_identifier"
         # Call menu_loop without the exit_option_details_array
         menu_loop "Select log view option" local_menu_options "_view_log_help"
-        user_choice="$MENU_CHOICE"
-        menu_return_code=$?
+        local menu_return_code=$?       # Return code from menu_loop
+        local user_choice="$MENU_CHOICE" # MENU_CHOICE is set by menu_loop, capture after $?
 
         case "$menu_return_code" in
             0) # Numeric choice
-                case "$user_choice" in
-                    "1")
+                case "$user_choice" in # user_choice is the number string ("1", "2", etc.)
+                    "1") # Interactive view (less)
                         if [[ "$log_source_type" == "journalctl" ]]; then
                             journalctl -u "$log_identifier" --no-pager | less
                         elif [[ -f "$log_identifier" ]]; then
                             less "$log_identifier"
                         else print_error "Log source not found: $log_identifier"; press_any_key; fi
                         ;;
-                    "2")
+                    "2") # Live follow
                         print_info "Starting live log follow. Press Ctrl+C to stop."
-                        # Add trap for Ctrl+C specific to this operation
-                        trap 'print_info "Live log follow interrupted."; trap - INT; return_from_menu; return 130' INT
+                        local original_trap_INT; original_trap_INT=$(trap -p INT)
+                        trap 'print_warning "\nLive log follow interrupted."; eval "$original_trap_INT" 2>/dev/null || trap - INT; return 130' INT
+
                         if [[ "$log_source_type" == "journalctl" ]]; then
                             journalctl -u "$log_identifier" -f
                         elif [[ -f "$log_identifier" ]]; then
                             tail -f "$log_identifier"
                         else print_error "Log source not found: $log_identifier"; fi
-                        trap - INT # Clear trap
-                        print_info "Live log follow stopped."
+
+                        eval "$original_trap_INT" 2>/dev/null || trap - INT # Restore original trap
+                        print_info "Live log follow stopped." # This might only be seen if tail -f exits normally
                         press_any_key
                         ;;
-                    "3")
+                    "3") # View last 100 lines
                         if [[ "$log_source_type" == "journalctl" ]]; then
                             journalctl -u "$log_identifier" --no-pager -n 100
                         elif [[ -f "$log_identifier" ]]; then
@@ -1233,27 +1288,40 @@ view_system_log() {
                         else print_error "Log source not found: $log_identifier"; fi
                         press_any_key
                         ;;
-                    "4")
+                    "4") # Search logs
+                        local search_term # Define search_term locally
                         read -r -p "Enter search term: " search_term
                         if [[ -n "$search_term" ]]; then
                             print_info "Searching for '$search_term' (last 200 matching lines)..."
                             if [[ "$log_source_type" == "journalctl" ]]; then
-                                journalctl -u "$log_identifier" --no-pager | grep -i "$search_term" | tail -n 200
+                                journalctl -u "$log_identifier" --no-pager | grep -iE --color=always "$search_term" | tail -n 200
                             elif [[ -f "$log_identifier" ]]; then
-                                grep -i "$search_term" "$log_identifier" | tail -n 200
+                                grep -iE --color=always "$search_term" "$log_identifier" | tail -n 200
                             else print_error "Log source not found: $log_identifier"; fi
                             press_any_key
                         fi
                         ;;
+                    *) print_warning "Invalid numeric choice in view_system_log: $user_choice"; press_any_key ;;
                 esac
                 ;;
-            2) # Help shown, menu_loop already handled press_any_key
+            2)  # '?' Help
+                # Help function already called by menu_loop. Loop again to show menu.
                 continue ;;
-            3) go_to_main_menu; return ;;
-            4) request_script_exit; return ;;
-            5) return_from_menu; return ;; # 'r' Return/Back
-            6) return_from_menu; return ;; # 'c' Cancel (acts like 'r' here)
-            *) print_warning "Invalid option from log viewer menu_loop."; press_any_key ;;
+            3)  # 'm' Main Menu
+                go_to_main_menu
+                return 0 ;; # Return to main script loop to process navigation
+            4)  # 'x' Exit Script
+                request_script_exit
+                return 0 ;; # Return to main script loop
+            5)  # 'r' Return/Back/Cancel
+                return_from_menu # This pops the stack, current func should return to main script loop
+                return 0 ;;
+            6)  # Invalid input in menu_loop (warning and press_any_key handled by menu_loop)
+                continue ;; # Re-display this menu
+            *)
+                print_warning "Unexpected menu_loop return code in view_system_log: $menu_return_code (Choice: $user_choice)"
+                press_any_key
+                continue ;; # Re-display this menu
         esac
     done
 }

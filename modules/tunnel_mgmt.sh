@@ -18,7 +18,7 @@ manage_tunnels_menu() {
         echo
         print_info "Navigation:"
         echo "  - Use number keys to select a tunnel."
-        echo "  - '0' or 'x' or 'm' will behave as per the footer." # 'x' is alias for 'e' in menu_loop
+        echo "  - Navigation keys [?, c, r, m, x] function as described in the footer."
         press_any_key
     }
 
@@ -48,27 +48,30 @@ manage_tunnels_menu() {
             # Prompt is empty as options are self-explanatory or covered by footer
             # Pass empty options array, menu_loop handles it.
             menu_loop "" tunnel_options "_manage_tunnels_menu_help"
-            no_tunnel_choice="$MENU_CHOICE" # Will be a nav key
-            no_tunnel_rc=$?
+            local no_tunnel_rc=$?
+            local no_tunnel_choice="$MENU_CHOICE" # Will be a nav key, capture after $?
 
             case "$no_tunnel_rc" in
                 # Case 0 (numeric choice) is not possible if tunnel_options is empty.
-                # menu_loop will only return nav key codes.
-                2) # '?' Help shown
+                2) # '?' Help
+                    # Help function already called by menu_loop. Loop again to show menu.
                     continue ;;
                 3) # 'm' Main Menu
-                    go_to_main_menu; return 0 ;;
+                    go_to_main_menu
+                    return 0 ;; # Return to main script loop
                 4) # 'x' Exit script
-                    request_script_exit; return 0 ;;
-                5) # 'r' Return/Back (to main menu)
-                    return_from_menu; return 0 ;;
-                6) # 'c' Cancel (to main menu)
-                    return_from_menu; return 0 ;;
+                    request_script_exit
+                    return 0 ;; # Return to main script loop
+                5) # 'r' Return/Back/Cancel (to previous menu, likely main menu)
+                    return_from_menu # This pops the stack
+                    return 0 ;; # Return to main script loop
+                6) # Invalid input in menu_loop (warning and press_any_key handled by menu_loop)
+                    continue ;; # Re-display this menu
                 *)
-                    print_warning "Unexpected choice/return code: $no_tunnel_rc / $no_tunnel_choice"; press_any_key; continue ;;
+                    print_warning "Unexpected menu_loop return code in manage_tunnels_menu (no tunnels): $no_tunnel_rc (Choice: $no_tunnel_choice)"
+                    press_any_key
+                    continue ;; # Re-display this menu
             esac
-            #This continue should not be reached if all nav keys are handled properly above.
-            # continue
         fi
         
         print_menu_header "primary" "Manage Tunnels" "Select a Tunnel"
@@ -105,11 +108,11 @@ manage_tunnels_menu() {
         done
 
         # local exit_options=("0. Back to Main Menu") # No longer needed
-        local user_choice menu_rc
+        local user_choice menu_rc # menu_rc declared here, user_choice will be local too
 
         menu_loop "Select tunnel to manage" tunnel_options "_manage_tunnels_menu_help"
-        user_choice="$MENU_CHOICE"
-        menu_rc=$?
+        menu_rc=$? # Capture $? first
+        user_choice="$MENU_CHOICE" # Then MENU_CHOICE
 
         case "$menu_rc" in
             0) # Numeric choice
@@ -124,20 +127,24 @@ manage_tunnels_menu() {
                     press_any_key
                 fi
                 ;;
-            2) # '?' Help shown
+            2) # '?' Help
+                # Help function already called by menu_loop. Loop again to show menu.
                 continue ;;
             3) # 'm' Main Menu
-                go_to_main_menu; return 0 ;;
+                go_to_main_menu
+                return 0 ;; # Return to main script loop
             4) # 'x' Exit script
-                request_script_exit; return 0 ;;
-            5) # 'r' Return/Back (to main menu)
-                return_from_menu; return 0 ;;
-            6) # 'c' Cancel (to main menu)
-                return_from_menu; return 0 ;;
+                request_script_exit
+                return 0 ;; # Return to main script loop
+            5) # 'r' Return/Back/Cancel (to previous menu, likely main menu)
+                return_from_menu # This pops the stack
+                return 0 ;; # Return to main script loop
+            6) # Invalid input in menu_loop (warning and press_any_key handled by menu_loop)
+                continue ;; # Re-display this menu
             *)
-                print_warning "Unexpected menu_loop return in manage_tunnels_menu: $menu_rc, choice: $user_choice"
+                print_warning "Unexpected menu_loop return code in manage_tunnels_menu: $menu_rc (Choice: $user_choice)"
                 press_any_key
-                ;;
+                continue ;; # Re-display this menu
         esac
     done
 }
@@ -181,7 +188,7 @@ manage_specific_tunnel_menu() {
         "12. Delete Tunnel"
     )
     # local exit_options=("0. Back to Tunnel List") # No longer needed
-    local user_choice menu_rc
+    local user_choice menu_rc # menu_rc declared here, user_choice will be local too
 
     while true; do
         local current_status_str="Unknown"
@@ -204,8 +211,8 @@ manage_specific_tunnel_menu() {
         print_menu_header "secondary" "Managing Tunnel: $tunnel_suffix" "Service: $service_name" "Status: ${current_status_color}${current_status_str}${COLOR_RESET}"
         
         menu_loop "Select action" menu_options "_specific_tunnel_menu_help"
-        user_choice="$MENU_CHOICE"
-        menu_rc=$?
+        local menu_rc=$?
+        local user_choice="$MENU_CHOICE" # Capture MENU_CHOICE after $? is captured
 
         # local action_performed_and_continue=false # May not be needed if all actions handle their own flow
 
@@ -255,20 +262,24 @@ manage_specific_tunnel_menu() {
                     *) print_warning "Invalid option: $user_choice"; press_any_key ;;
                 esac
                 ;;
-            2) # '?' Help shown
+            2) # '?' Help
+                # Help function already called by menu_loop. Loop again to show menu.
                 continue ;;
             3) # 'm' Main Menu
-                go_to_main_menu; return 0 ;;
+                go_to_main_menu
+                return 0 ;; # Return to main script loop
             4) # 'x' Exit script
-                request_script_exit; return 0 ;;
-            5) # 'r' Return/Back (to tunnel list)
-                return_from_menu; return 0 ;;
-            6) # 'c' Cancel (acts like 'r' here, back to tunnel list)
-                return_from_menu; return 0 ;;
+                request_script_exit
+                return 0 ;; # Return to main script loop
+            5) # 'r' Return/Back/Cancel (to previous menu, tunnel list)
+                return_from_menu # This pops the stack
+                return 0 ;; # Return to main script loop
+            6) # Invalid input in menu_loop (warning and press_any_key handled by menu_loop)
+                continue ;; # Re-display this menu
             *)
-                print_warning "Unexpected menu_loop return in manage_specific_tunnel_menu: $menu_rc, choice: $user_choice"
+                print_warning "Unexpected menu_loop return code in manage_specific_tunnel_menu: $menu_rc (Choice: $user_choice)"
                 press_any_key
-                ;;
+                continue ;; # Re-display this menu
         esac
     done
 }
@@ -386,8 +397,8 @@ _mng_change_log_level() {
         local user_choice menu_rc
 
         menu_loop "Select new log level" log_level_options "_log_level_help"
-        user_choice="$MENU_CHOICE"
-        menu_rc=$?
+        local menu_rc=$?
+        local user_choice="$MENU_CHOICE"
 
         local new_level=""
         case "$menu_rc" in
@@ -400,18 +411,25 @@ _mng_change_log_level() {
                     *) print_warning "Invalid numeric selection: $user_choice"; press_any_key; continue ;;
                 esac
                 ;;
-            2) # '?' Help shown
+            2) # '?' Help
+                # Help function already called by menu_loop. Loop again to show menu.
                 continue ;;
             3) # 'm' Main Menu
-                go_to_main_menu; return ;;
+                go_to_main_menu
+                return 0 ;; # Return to main script loop to process navigation
             4) # 'x' Exit script
-                request_script_exit; return ;;
-            5) # 'r' Return/Back
-                print_info "Log level change cancelled via 'r'."; press_any_key; return_from_menu; return ;;
-            6) # 'c' Cancel
-                print_info "Log level change cancelled via 'c'."; press_any_key; return_from_menu; return ;;
+                request_script_exit
+                return 0 ;; # Return to main script loop
+            5) # 'r' Return/Back/Cancel
+                print_info "Log level change cancelled."
+                press_any_key
+                return_from_menu
+                return 0 ;;
+            6) # Invalid input in menu_loop (warning and press_any_key handled by menu_loop)
+                continue ;;
             *)
-                print_warning "Unexpected menu return in log level: $menu_rc, choice: $user_choice"; press_any_key; continue ;;
+                print_warning "Unexpected menu_loop return code in _mng_change_log_level: $menu_rc (Choice: $user_choice)"
+                press_any_key; continue ;;
         esac
 
         if [[ -n "$new_level" ]]; then
@@ -575,13 +593,6 @@ _mng_delete_tunnel() {
     return 0 # Indicate successful deletion, return from specific tunnel menu
 }
 
-# Decommissioned functions that created standalone scripts for tunnels.
-# These are replaced by systemd services directly running the backhaul binary with a config file.
-# create_tunnel() { log_message "WARN" "DEPRECATED: create_tunnel function called. Tunnel creation is now part of configure_tunnel."; }
-# create_tunnel_impl() { log_message "WARN" "DEPRECATED: create_tunnel_impl function called."; }
-# start_tunnel() { log_message "WARN" "DEPRECATED: start_tunnel function called. Use systemctl via _mng_start_tunnel."; }
-# start_tunnel_impl() { log_message "WARN" "DEPRECATED: start_tunnel_impl function called."; }
-# stop_tunnel() { log_message "WARN" "DEPRECATED: stop_tunnel function called. Use systemctl via _mng_stop_tunnel."; }
-# stop_tunnel_impl() { log_message "WARN" "DEPRECATED: stop_tunnel_impl function called."; }
+# End of tunnel management functions.
 
 true # Ensure script is valid if sourced.
