@@ -414,18 +414,24 @@ EOLSCRIPT
     local watcher_pid_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.pid"
     if ps -p $watcher_pid > /dev/null 2>&1; then
         echo "$watcher_pid" > "$watcher_pid_file_path"
-        chmod 600 "$watcher_pid_file_path"
-        update_toml_value "$config_file" "restart_watcher_enabled" "true" "boolean"
-        update_toml_value "$config_file" "restart_watcher_pid" "$watcher_pid" "numeric"
-        # Store other watcher params in the main tunnel config for visibility/editing later
-        update_toml_value "$config_file" "watcher_role" "$w_role" "string"
-        update_toml_value "$config_file" "watcher_listen_port" "$w_listen_port" "numeric"
-        update_toml_value "$config_file" "watcher_remote_host" "$w_remote_host" "string"
-        update_toml_value "$config_file" "watcher_remote_port" "$w_remote_port" "numeric"
-        update_toml_value "$config_file" "watcher_log_pattern" "$w_log_pattern" "string"
+        if [[ -f "$watcher_pid_file_path" ]] && [[ $(cat "$watcher_pid_file_path") -eq "$watcher_pid" ]]; then
+            chmod 600 "$watcher_pid_file_path"
+            update_toml_value "$config_file" "restart_watcher_enabled" "true" "boolean"
+            update_toml_value "$config_file" "restart_watcher_pid" "$watcher_pid" "numeric"
+            # Store other watcher params in the main tunnel config for visibility/editing later
+            update_toml_value "$config_file" "watcher_role" "$w_role" "string"
+            update_toml_value "$config_file" "watcher_listen_port" "$w_listen_port" "numeric"
+            update_toml_value "$config_file" "watcher_remote_host" "$w_remote_host" "string"
+            update_toml_value "$config_file" "watcher_remote_port" "$w_remote_port" "numeric"
+            update_toml_value "$config_file" "watcher_log_pattern" "$w_log_pattern" "string"
 
-        handle_success "Watcher enabled and started for $service_name (PID: $watcher_pid)."
-        print_info "Watcher log: $watcher_log_file"
+            handle_success "Watcher enabled and started for $service_name (PID: $watcher_pid)."
+            print_info "Watcher log: $watcher_log_file"
+        else
+            handle_error "ERROR" "Watcher process started but failed to create PID file for $service_name. Check permissions in /tmp."
+            kill "$watcher_pid" 2>/dev/null
+            rm -f "$watcher_conf_file_path" "$watcher_launcher_script_path"
+        fi
     else
         handle_error "ERROR" "Watcher process failed to start for $service_name. Check $watcher_log_file for details."
         # Cleanup temp files if start failed

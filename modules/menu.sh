@@ -131,7 +131,7 @@ _perform_full_uninstall() {
     if ! prompt_yes_no "Are you absolutely sure you want to proceed with uninstallation?" "n"; then
         print_info "Uninstallation cancelled."; press_any_key; return 1; fi
     
-    local confirm_uninstall_text="UNINSTALL EASYBACKHAUL NOW"
+    local confirm_uninstall_text="DELETE"
     local user_confirmation
     read -r -p "To confirm, type '$confirm_uninstall_text': " user_confirmation
     if [[ "$user_confirmation" != "$confirm_uninstall_text" ]]; then

@@ -19,43 +19,62 @@ get_server_info() {
         "https://ipapi.co/json/"
         "https://ipinfo.io/json"
     )
-    local response_json
+    local pids=()
+    local temp_output_files=()
 
     for service_url in "${services_to_try[@]}"; do
-        log_message "DEBUG" "Trying IP service: $service_url"
-        
-        # Use run_with_spinner for curl command with timeout
-        # Create a temporary file to capture curl output
         local temp_output_file
         temp_output_file=$(mktemp)
-
-        # Using a subshell to capture output for response_json
-        if response_json=$(timeout 10s curl -s --connect-timeout 3 --max-time 8 "$service_url" 2>"$temp_output_file"); then
-            if [[ -n "$response_json" ]] && echo "$response_json" | jq -e . >/dev/null 2>&1; then
-                # Attempt to parse common fields
-                local ip country isp
-                ip=$(echo "$response_json" | jq -r '.ip // .query // "N/A"')
-                country=$(echo "$response_json" | jq -r '.country // .country_name // "N/A"')
-                isp=$(echo "$response_json" | jq -r '.isp // .org // "N/A"')
-
-                if [[ "$ip" != "N/A" && "$ip" != "null" ]]; then
-                    SERVER_IP="$ip"
-                    SERVER_COUNTRY="$country"
-                    SERVER_ISP="$isp"
-                    log_message "INFO" "Server info fetched from $service_url: IP=$SERVER_IP, Country=$SERVER_COUNTRY, ISP=$SERVER_ISP"
-                    rm -f "$temp_output_file"
-                    return 0
-                else
-                    log_message "WARN" "Successfully fetched from $service_url, but IP address was null or N/A."
-                fi
-            else
-                log_message "WARN" "Invalid or empty JSON response from $service_url. Error: $(cat "$temp_output_file")"
-            fi
-        else
-            log_message "WARN" "Failed to fetch from $service_url. Error: $(cat "$temp_output_file")"
-        fi
-        rm -f "$temp_output_file"
+        temp_output_files+=("$temp_output_file")
+        (curl -s --connect-timeout 3 --max-time 8 "$service_url" > "$temp_output_file" 2>/dev/null) &
+        pids+=($!)
     done
+
+    # Wait for the first successful response
+    local success=false
+    while [[ ${#pids[@]} -gt 0 ]] && [[ "$success" == "false" ]]; do
+        for i in "${!pids[@]}"; do
+            if ! kill -0 "${pids[$i]}" 2>/dev/null; then
+                # Process finished
+                local response_json
+                response_json=$(cat "${temp_output_files[$i]}")
+                if [[ -n "$response_json" ]] && echo "$response_json" | jq -e . >/dev/null 2>&1; then
+                    local ip country isp
+                    ip=$(echo "$response_json" | jq -r '.ip // .query // "N/A"')
+                    country=$(echo "$response_json" | jq -r '.country // .country_name // "N/A"')
+                    isp=$(echo "$response_json" | jq -r '.isp // .org // "N/A"')
+
+                    if [[ "$ip" != "N/A" && "$ip" != "null" ]]; then
+                        SERVER_IP="$ip"
+                        SERVER_COUNTRY="$country"
+                        SERVER_ISP="$isp"
+                        log_message "INFO" "Server info fetched from ${services_to_try[$i]}: IP=$SERVER_IP, Country=$SERVER_COUNTRY, ISP=$SERVER_ISP"
+                        success=true
+                        break
+                    fi
+                fi
+                # Remove pid and temp file from lists
+                unset 'pids[$i]'
+                rm -f "${temp_output_files[$i]}"
+                unset 'temp_output_files[$i]'
+            fi
+        done
+        sleep 0.1
+    done
+
+    # Kill any remaining curl processes
+    for pid in "${pids[@]}"; do
+        kill "$pid" 2>/dev/null
+    done
+
+    # Clean up any remaining temp files
+    for temp_file in "${temp_output_files[@]}"; do
+        rm -f "$temp_file"
+    done
+
+    if [[ "$success" == "true" ]]; then
+        return 0
+    fi
 
     log_message "WARN" "All external IP services failed. Attempting fallback using icanhazip.com..."
     local fallback_ip
@@ -138,6 +157,10 @@ install_downloaded_binary() {
     if ! tar -tzf "$archive_path" >/dev/null 2>&1; then
         handle_error "ERROR" "File $archive_path is not a valid tar.gz archive."
         secure_delete "$archive_path"
+        return 1
+    fi
+    if [[ ! -r "$archive_path" ]]; then
+        handle_error "ERROR" "File $archive_path is not readable."
         return 1
     fi
 

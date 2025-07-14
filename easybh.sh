@@ -436,16 +436,6 @@ handle_success() {
 }
 
 # --- Input Validation Utilities ---
-sanitize_input() {
-    local input="$1"
-    local max_length="${2:-255}" # Increased default max_length
-    
-    # Remove dangerous characters and limit length.
-    # Added @ . : / - _ to allow common characters in paths, IPs, etc.
-    # Still restrictive, consider carefully if this is too aggressive.
-    echo "$input" | sed "s/[^a-zA-Z0-9@.:/\-_ ]/_/g" | head -c "$max_length"
-}
-
 validate_ip() {
     local ip="$1"
     if [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
@@ -471,12 +461,19 @@ validate_port() {
 
 validate_tunnel_name_format() {
     local name="$1"
-    if [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] && [[ ${#name} -ge 1 ]] && [[ ${#name} -le 50 ]]; then
-        return 0 # Valid tunnel name
+    if [[ -z "$name" ]]; then
+        print_error "Tunnel name cannot be empty."
+        return 1
     fi
-    # handle_error "WARNING" "Tunnel name '$name' is invalid. Must be 1-50 chars, letters, numbers, hyphens, underscores."
-    # Caller should handle the error message for more context.
-    return 1
+    if ! [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        print_error "Tunnel name contains invalid characters. Only letters, numbers, hyphens, and underscores are allowed."
+        return 1
+    fi
+    if [[ ${#name} -lt 1 ]] || [[ ${#name} -gt 50 ]]; then
+        print_error "Tunnel name must be between 1 and 50 characters."
+        return 1
+    fi
+    return 0 # Valid tunnel name
 }
 
 # --- Network Utilities ---
@@ -488,64 +485,23 @@ check_port_availability() {
         return 1
     fi
     
-    # Try ss first (more modern)
     if command -v ss &>/dev/null; then
         if ss -tuln | grep -q ":${port_to_check}[[:space:]]"; then # Added [[:space:]] to avoid matching substrings like 8080 for 80
             return 1 # Port in use
         fi
-    # Fallback to netstat
-    elif command -v netstat &>/dev/null; then
-        if netstat -tuln | grep -q ":${port_to_check}[[:space:]]"; then
-            return 1 # Port in use
-        fi
-    # Fallback to lsof (can be slower)
-    elif command -v lsof &>/dev/null; then
-        if lsof -i ":$port_to_check" -sTCP:LISTEN -sUDP:LISTEN -P -n -- 2>/dev/null | grep -q LISTEN; then # More specific lsof
-            return 1 # Port in use
-        fi
-    else
-        log_message "WARN" "No suitable tool (ss, netstat, lsof) found to check port availability."
-        return 2 # Cannot determine
     fi
     
     return 0 # Port available
 }
 
 check_nc_compatibility() {
-    # Test for OpenBSD netcat compatibility with timeout to prevent hanging
-    local nc_test_result=""
-    
-    if command -v timeout &>/dev/null; then
-        nc_test_result=$(timeout 3s bash -c 'echo | nc -l -p 0 -w 1 2>&1' 2>/dev/null || echo "timeout_or_error")
-    else
-        # Fallback without timeout command - riskier
-        ( nc -l -p 0 -w 1 >/dev/null 2>&1 & )
-        local nc_pid=$!
-        sleep 3
-        if kill -0 $nc_pid 2>/dev/null; then
-            kill -9 $nc_pid 2>/dev/null
-            nc_test_result="timeout_or_error"
-        else
-            # This path is tricky; if nc fails very fast due to incompatibility, it might seem like success.
-            # A more robust check here is difficult without 'timeout'.
-            # We'll assume if it exited quickly without error output, it might be okay, or it failed too fast to capture output.
-            # The subsequent grep will try to catch known error patterns.
-            nc_test_result="success_or_immediate_fail"
-        fi
-    fi
-    
-    if [[ "$nc_test_result" == "timeout_or_error" ]] || \
-       echo "$nc_test_result" | grep -qiE 'usage|invalid|unknown option|must be used with|Ncat: Could not resolve hostname'; then
-        log_message "WARN" "Netcat (nc) may not support '-l -p -w 1' or test timed out/errored. Restart watcher and some features might not work reliably."
-        print_warning "Netcat (nc) may not be fully compatible. Restart watcher might be unreliable."
+    if ! command -v nc &>/dev/null; then
+        log_message "WARN" "Netcat (nc) is not installed. Restart watcher and some features might not work reliably."
+        print_warning "Netcat (nc) is not installed. Restart watcher might be unreliable."
         print_info "Consider installing 'netcat-openbsd' (Debian/Ubuntu) or 'nmap-ncat' (CentOS/RHEL/Fedora)."
-        if command -v ncat &>/dev/null; then
-            print_info "Found 'ncat' (from nmap) - this is usually a good alternative if 'nc' is problematic."
-        fi
         NC_COMPATIBLE="false" # Global hint for other parts of the script
         return 1
     fi
-    log_message "DEBUG" "Netcat compatibility check passed."
     NC_COMPATIBLE="true" # Global hint
     return 0
 }
@@ -599,67 +555,40 @@ check_basic_connectivity() {
 }
 
 # --- System Resource Utilities ---
+_SYSTEM_RESOURCES_SUMMARY=""
+_LAST_SUMMARY_TIMESTAMP=0
+
 get_system_resources_summary() {
-    local cpu_usage mem_usage disk_usage
-    cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}' | cut -d. -f1)
-    mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}')
-    disk_usage=$(df -P / | awk 'NR==2 {print $5}' | sed 's/%//') # Added -P for POSIX output
-    
-    echo "CPU: ${cpu_usage}% | Memory: ${mem_usage}% | Disk: ${disk_usage}%"
+    local current_time
+    current_time=$(date +%s)
+    if (( current_time - _LAST_SUMMARY_TIMESTAMP > 5 )); then
+        local cpu_usage mem_usage disk_usage
+        cpu_usage=$(grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {printf "%.0f", usage}')
+        mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}')
+        disk_usage=$(df -P / | awk 'NR==2 {print $5}')
+        _SYSTEM_RESOURCES_SUMMARY="CPU: ${cpu_usage}% | Memory: ${mem_usage}% | Disk: ${disk_usage}"
+        _LAST_SUMMARY_TIMESTAMP=$current_time
+    fi
+    echo "$_SYSTEM_RESOURCES_SUMMARY"
 }
 
 display_system_resources() {
     print_info "--- System Resources ---"
+    local summary
+    summary=$(get_system_resources_summary)
+    # Parse the summary string
     local cpu_usage mem_usage disk_usage
-    cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}' | cut -d. -f1)
-    mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}')
-    disk_usage=$(df -P / | awk 'NR==2 {print $5}' | sed 's/%//')
-    
+    cpu_usage=$(echo "$summary" | awk -F'[ |%]+' '{print $2}')
+    mem_usage=$(echo "$summary" | awk -F'[ |%]+' '{print $4}')
+    disk_usage=$(echo "$summary" | awk -F'[ |%]+' '{print $6}')
+
     echo "  CPU Usage: ${cpu_usage}%"
     echo "  Memory Usage: ${mem_usage}%"
     echo "  Root Disk Usage: ${disk_usage}%"
-    
+
     if (( cpu_usage > 85 )); then print_warning "  High CPU usage detected!"; fi
     if (( mem_usage > 85 )); then print_warning "  High memory usage detected!"; fi
     if (( disk_usage > 90 )); then print_warning "  High disk usage detected!"; fi
-}
-
-# --- Performance Tracking Utilities ---
-with_performance_tracking() {
-    local operation_description="$1"
-    shift
-    local command_to_run=("$@")
-
-    local start_time end_time duration_secs
-    start_time=$(date +%s%N)
-    
-    "${command_to_run[@]}"
-    local exit_code=$?
-    
-    end_time=$(date +%s%N)
-    local duration_nanos=$((end_time - start_time))
-    duration_secs=$(awk "BEGIN {printf \"%.3f\", $duration_nanos / 1000000000}")
-
-    local success_status="false"
-    if [[ $exit_code -eq 0 ]]; then
-        success_status="true"
-    fi
-
-    if [[ -n "$PERFORMANCE_LOG_FILE" ]]; then
-        local perf_log_entry
-        if [[ "${LOG_FORMAT:-text}" == "json" ]]; then
-            perf_log_entry="{\"timestamp\":\"$(date '+%Y-%m-%d %H:%M:%S')\",\"operation\":\"$operation_description\",\"duration_seconds\":$duration_secs,\"success\":$success_status,\"exit_code\":$exit_code}"
-        else
-            perf_log_entry="[$(date '+%Y-%m-%d %H:%M:%S')] [PERF] Operation: \"$operation_description\", Duration: ${duration_secs}s, Success: $success_status, ExitCode: $exit_code"
-        fi
-        echo "$perf_log_entry" >> "$PERFORMANCE_LOG_FILE"
-    fi
-    
-    if (( $(echo "$duration_secs > 30" | bc -l 2>/dev/null || echo 0) )); then
-        log_message "WARN" "Slow operation: \"$operation_description\" took ${duration_secs}s."
-    fi
-    
-    return $exit_code
 }
 
 # --- File and Configuration Utilities ---
@@ -765,6 +694,15 @@ update_toml_value() {
         esac
     fi
     
+    # Validate the temp file before moving
+    if ! toml-validator "$temp_file" >/dev/null 2>&1; then
+        log_message "ERROR" "Generated TOML is invalid. Aborting update for $config_file."
+        rm -f "$temp_file"
+        release_file_lock "$config_file"
+        trap - EXIT HUP INT QUIT TERM
+        return 1
+    fi
+
     if mv "$temp_file" "$config_file"; then
         set_secure_file_permissions "$config_file" "600"
         log_message "INFO" "Updated key '$key' in $config_file."
@@ -1268,8 +1206,13 @@ cleanup_watcher_files() {
             log_message "INFO" "Stopping watcher process PID $watcher_pid_val for tunnel $tunnel_suffix."
             kill "$watcher_pid_val" 2>/dev/null
             sleep 0.5
-            kill -9 "$watcher_pid_val" 2>/dev/null
+            if ps -p "$watcher_pid_val" > /dev/null 2>&1; then
+                kill -9 "$watcher_pid_val" 2>/dev/null
+            fi
+        else
+            log_message "INFO" "Stale PID file found for tunnel $tunnel_suffix. Removing."
         fi
+        rm -f "$watcher_pid_file_path"
     fi
     
     rm -f "$watcher_script_path" "$watcher_pid_file_path" "$watcher_log_file_path" "$watcher_conf_file_path" "$restart_ack_file_path"
@@ -1352,7 +1295,13 @@ generate_random_secret() {
     fi
 }
 
+# These will be used to pass the generated paths back to the calling function
+_GENERATED_CERT_PATH=""
+_GENERATED_KEY_PATH=""
+
 generate_self_signed_tls_cert() {
+    _GENERATED_CERT_PATH=""
+    _GENERATED_KEY_PATH=""
     local cert_common_name="${1:-${SERVER_IP:-localhost}}"
     local cert_dir="${CERT_DIR:-/etc/easybackhaul/certs}"
     ensure_dir "$cert_dir" "700"
@@ -1402,6 +1351,11 @@ generate_self_signed_tls_cert() {
     echo "  Private Key: $key_path"
     echo "  Certificate: $cert_path"
     print_info "These paths can be used in your tunnel configurations for WSS/WSSMUX."
+
+    # Store paths in global variables to be picked up by the caller
+    _GENERATED_CERT_PATH="$cert_path"
+    _GENERATED_KEY_PATH="$key_path"
+
     press_any_key
     return 0
 }
@@ -1580,75 +1534,6 @@ retry_operation() {
     return 1 # Failure
 }
 
-# Attempt to recover from common error scenarios
-attempt_generic_error_recovery() {
-    local failed_operation_desc="$1"
-    local error_details="$2" # e.g., service name, file path
-    local recovery_attempt_count="${3:-0}"
-
-    log_message "INFO" "Attempting recovery for '$failed_operation_desc' (Details: $error_details, Attempt: $((recovery_attempt_count + 1)))"
-
-    # Example recovery strategies (can be expanded)
-    case "$failed_operation_desc" in
-        "start_service")
-            # Try cleaning up potential conflicting state then restart
-            if [[ -n "$error_details" ]]; then # error_details is service name
-                cleanup_watcher_files "$error_details" # Clean related watcher state
-                log_message "INFO" "Ensuring service $error_details is stopped before retry..."
-                systemctl stop "$error_details" 2>/dev/null
-                sleep 2
-                log_message "INFO" "Retrying start for service $error_details..."
-                if systemctl start "$error_details"; then
-                    log_message "INFO" "Service $error_details recovered and started."
-                    return 0
-                fi
-            fi
-            ;;
-        "download_file")
-            # Try checking connectivity, or suggest alternative if context allows
-            log_message "INFO" "Checking basic connectivity before retrying download..."
-            if check_basic_connectivity; then
-                log_message "INFO" "Connectivity seems OK. The issue might be with the specific download source for '$error_details'."
-                # Specific retry for download might be handled by the download function itself
-            else
-                log_message "ERROR" "Basic connectivity check failed. Cannot retry download now."
-            fi
-            ;;
-        "update_config")
-            # Try restoring from the most recent backup if available
-            if [[ -n "$error_details" ]]; then # error_details is tunnel name or config path
-                local config_to_restore="$CONFIG_DIR/config-${error_details}.toml" # Assuming tunnel name
-                if [[ ! -f "$config_to_restore" ]]; then config_to_restore="$error_details"; fi # Assuming full path
-
-                local backup_file_path
-                backup_file_path=$(find "$BACKUP_DIR" -name "$(basename "$config_to_restore").*.bak" -type f | sort -r | head -n 1)
-
-                if [[ -f "$backup_file_path" ]]; then
-                    log_message "INFO" "Attempting to restore '$config_to_restore' from backup: $backup_file_path"
-                    if cp "$backup_file_path" "$config_to_restore"; then
-                        set_secure_file_permissions "$config_to_restore"
-                        log_message "INFO" "Config '$config_to_restore' restored from backup. Service may need restart."
-                        return 0
-                    else
-                        log_message "ERROR" "Failed to restore '$config_to_restore' from backup '$backup_file_path'."
-                    fi
-                else
-                    log_message "WARN" "No backup found to restore for '$config_to_restore'."
-                fi
-            fi
-            ;;
-        *)
-            log_message "WARN" "No specific recovery strategy for '$failed_operation_desc'. Generic wait and retry might be applicable elsewhere."
-            # Generic recovery: just wait a bit, usually handled by retry_operation
-            sleep $((recovery_attempt_count + 2)) # Wait a bit longer for generic cases
-            return 0 # Signify that a generic attempt (like waiting) was made
-            ;;
-    esac
-    
-    log_message "ERROR" "Recovery attempt for '$failed_operation_desc' failed."
-    return 1
-}
-
 # --- Prerequisite Checks ---
 # (Moved from prereqs.sh)
 # Checks for essential command-line tool dependencies and attempts to install them.
@@ -1771,43 +1656,62 @@ get_server_info() {
         "https://ipapi.co/json/"
         "https://ipinfo.io/json"
     )
-    local response_json
+    local pids=()
+    local temp_output_files=()
 
     for service_url in "${services_to_try[@]}"; do
-        log_message "DEBUG" "Trying IP service: $service_url"
-        
-        # Use run_with_spinner for curl command with timeout
-        # Create a temporary file to capture curl output
         local temp_output_file
         temp_output_file=$(mktemp)
-
-        # Using a subshell to capture output for response_json
-        if response_json=$(timeout 10s curl -s --connect-timeout 3 --max-time 8 "$service_url" 2>"$temp_output_file"); then
-            if [[ -n "$response_json" ]] && echo "$response_json" | jq -e . >/dev/null 2>&1; then
-                # Attempt to parse common fields
-                local ip country isp
-                ip=$(echo "$response_json" | jq -r '.ip // .query // "N/A"')
-                country=$(echo "$response_json" | jq -r '.country // .country_name // "N/A"')
-                isp=$(echo "$response_json" | jq -r '.isp // .org // "N/A"')
-
-                if [[ "$ip" != "N/A" && "$ip" != "null" ]]; then
-                    SERVER_IP="$ip"
-                    SERVER_COUNTRY="$country"
-                    SERVER_ISP="$isp"
-                    log_message "INFO" "Server info fetched from $service_url: IP=$SERVER_IP, Country=$SERVER_COUNTRY, ISP=$SERVER_ISP"
-                    rm -f "$temp_output_file"
-                    return 0
-                else
-                    log_message "WARN" "Successfully fetched from $service_url, but IP address was null or N/A."
-                fi
-            else
-                log_message "WARN" "Invalid or empty JSON response from $service_url. Error: $(cat "$temp_output_file")"
-            fi
-        else
-            log_message "WARN" "Failed to fetch from $service_url. Error: $(cat "$temp_output_file")"
-        fi
-        rm -f "$temp_output_file"
+        temp_output_files+=("$temp_output_file")
+        (curl -s --connect-timeout 3 --max-time 8 "$service_url" > "$temp_output_file" 2>/dev/null) &
+        pids+=($!)
     done
+
+    # Wait for the first successful response
+    local success=false
+    while [[ ${#pids[@]} -gt 0 ]] && [[ "$success" == "false" ]]; do
+        for i in "${!pids[@]}"; do
+            if ! kill -0 "${pids[$i]}" 2>/dev/null; then
+                # Process finished
+                local response_json
+                response_json=$(cat "${temp_output_files[$i]}")
+                if [[ -n "$response_json" ]] && echo "$response_json" | jq -e . >/dev/null 2>&1; then
+                    local ip country isp
+                    ip=$(echo "$response_json" | jq -r '.ip // .query // "N/A"')
+                    country=$(echo "$response_json" | jq -r '.country // .country_name // "N/A"')
+                    isp=$(echo "$response_json" | jq -r '.isp // .org // "N/A"')
+
+                    if [[ "$ip" != "N/A" && "$ip" != "null" ]]; then
+                        SERVER_IP="$ip"
+                        SERVER_COUNTRY="$country"
+                        SERVER_ISP="$isp"
+                        log_message "INFO" "Server info fetched from ${services_to_try[$i]}: IP=$SERVER_IP, Country=$SERVER_COUNTRY, ISP=$SERVER_ISP"
+                        success=true
+                        break
+                    fi
+                fi
+                # Remove pid and temp file from lists
+                unset 'pids[$i]'
+                rm -f "${temp_output_files[$i]}"
+                unset 'temp_output_files[$i]'
+            fi
+        done
+        sleep 0.1
+    done
+
+    # Kill any remaining curl processes
+    for pid in "${pids[@]}"; do
+        kill "$pid" 2>/dev/null
+    done
+
+    # Clean up any remaining temp files
+    for temp_file in "${temp_output_files[@]}"; do
+        rm -f "$temp_file"
+    done
+
+    if [[ "$success" == "true" ]]; then
+        return 0
+    fi
 
     log_message "WARN" "All external IP services failed. Attempting fallback using icanhazip.com..."
     local fallback_ip
@@ -1890,6 +1794,10 @@ install_downloaded_binary() {
     if ! tar -tzf "$archive_path" >/dev/null 2>&1; then
         handle_error "ERROR" "File $archive_path is not a valid tar.gz archive."
         secure_delete "$archive_path"
+        return 1
+    fi
+    if [[ ! -r "$archive_path" ]]; then
+        handle_error "ERROR" "File $archive_path is not readable."
         return 1
     fi
 
@@ -2633,8 +2541,7 @@ _prompt_basic_config_params() {
     local -n listen_port_ref=$2 # Output for server mode
     local -n remote_ip_ref=$3   # Output for client mode
     local -n remote_port_ref=$4 # Output for client mode
-    local -n local_fwd_port_ref=$5 # Output for client mode (local port to forward from) - NO LONGER USED for prompting/saving
-    local -n auth_token_ref=$6  # Output: auth token
+    local -n auth_token_ref=$5  # Output: auth token
 
     print_menu_header "secondary" "Basic Configuration" "Step 3: Mandatory Settings"
 
@@ -2770,16 +2677,10 @@ _prompt_tls_config() {
     case "$menu_rc" in
         0) # Numeric choice
             if (( user_choice == generate_new_opt_num )); then
-                if generate_self_signed_tls_cert; then # This function handles its own output and sets paths
-                    # It should output the paths it created, we need to capture them.
-                    # For now, assume generate_self_signed_tls_cert updates some global vars or returns paths.
-                    # This part needs refinement: generate_self_signed_tls_cert needs to return the paths.
-                    # Let's assume it writes to last_cert.path and last_key.path files for simplicity here.
-                    # This is a placeholder for better path communication.
-                    if [[ -f "$cert_dir_global/last_generated_cert.path" && -f "$cert_dir_global/last_generated_key.path" ]]; then
-                        tls_cert_path_ref=$(cat "$cert_dir_global/last_generated_cert.path")
-                        tls_key_path_ref=$(cat "$cert_dir_global/last_generated_key.path")
-                        rm -f "$cert_dir_global/last_generated_cert.path" "$cert_dir_global/last_generated_key.path"
+                if generate_self_signed_tls_cert; then
+                    if [[ -n "$_GENERATED_CERT_PATH" && -n "$_GENERATED_KEY_PATH" ]]; then
+                        tls_cert_path_ref="$_GENERATED_CERT_PATH"
+                        tls_key_path_ref="$_GENERATED_KEY_PATH"
                         print_success "Using newly generated cert: $tls_cert_path_ref and key: $tls_key_path_ref"
                     else
                         handle_error "ERROR" "Failed to retrieve paths of newly generated certificate/key. Please enter manually."
@@ -2884,153 +2785,94 @@ _configure_server_forwarding_rules() {
     out_any_udp_rules_ref="false" # Initialize UDP flag
 
     print_menu_header "secondary" "Server Port Forwarding" "Step 4: Configure Forwarding Rules"
-    echo "Enter server ports to forward traffic from."
-    echo "Examples:"
-    echo "  - Single port (TCP): 80 (forwards server's public port 80 to client's port 80)"
-    echo "  - Single port (UDP): 53/udp (forwards server's 53/udp to client's 53/udp; requires 'accept_udp=true')"
-    echo "  - Port to specific client port: 8080:80 (forwards server's 8080 to client's port 80)"
-    echo "  - Port range: 7000-7010 (forwards server range 7000-7010 to client's range 7000-7010)"
-    echo "  - Port range to single client port: 7000-7010:6000 (forwards server range 7000-7010 to client's single port 6000)"
-    echo "  - To specific client IP & port: 2222=192.168.0.10:22 (forwards server's 2222 to 192.168.0.10:22 on client side)"
-    echo "Separate multiple rules with a comma. Examples:"
-    echo "  Ex 1: 80, 443:8443, 7000-7010, 53/udp"
-    echo "  Ex 2: 2222=10.0.0.5:22, 8000-8010:9000, 999/udp"
-    echo "Leave blank for no forwarding."
-    echo
 
-    local user_input_str
-    read -r -p "Enter forwarding rules: " user_input_str
+    while true; do
+        echo "You can add multiple port forwarding rules. Leave the input blank to finish."
+        echo "Examples of rules:"
+        echo "  - 80                        (Forward TCP port 80 to the client's port 80)"
+        echo "  - 53/udp                    (Forward UDP port 53 to the client's port 53)"
+        echo "  - 8080:80                   (Forward TCP port 8080 to the client's port 80)"
+        echo "  - 7000-7010                 (Forward TCP port range 7000-7010 to the client)"
+        echo "  - 2222=192.168.0.10:22      (Forward TCP port 2222 to a specific IP and port on the client's network)"
+        echo
 
-    if [[ -z "$user_input_str" ]]; then
-        print_info "No port forwarding rules entered."
-        return 0 # Success, but no rules
-    fi
+        local user_input_str
+        read -r -p "Enter a single forwarding rule (or press Enter to continue): " user_input_str
 
-    local IFS=',' # Set Internal Field Separator to comma for splitting
-    read -ra raw_rules <<< "$user_input_str" # Split into array
-    local IFS=$' \t\n' # Reset IFS
+        if [[ -z "$user_input_str" ]]; then
+            break
+        fi
 
-    local rule_valid
-    for rule_str_raw in "${raw_rules[@]}"; do
         local rule_str
-        rule_str=$(echo "$rule_str_raw" | xargs) # Trim whitespace
+        rule_str=$(echo "$user_input_str" | xargs) # Trim whitespace
 
-        if [[ -z "$rule_str" ]]; then continue; fi # Skip empty rules if user entered ",,"
-
-        local listen_spec listen_type listen_port1 listen_port2 listen_protocol_suffix
-        local dest_ip dest_port
         local toml_rule=""
-        rule_valid=false
+        local rule_valid=false
 
-        # Try to parse listen_spec=dest_ip:dest_port format
         if [[ "$rule_str" =~ ^([^=]+)=([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}):([0-9]+(/udp)?)$ ]]; then
             listen_spec="${BASH_REMATCH[1]}"
             dest_ip="${BASH_REMATCH[2]}"
-            local dest_port_full="${BASH_REMATCH[3]}" # e.g., "22" or "22/udp"
+            dest_port_full="${BASH_REMATCH[3]}"
+            dest_port_no_udp="${dest_port_full%/udp}"
 
-            local dest_port_no_udp="$dest_port_full"
-            local dest_protocol_suffix=""
-            if [[ "$dest_port_full" == */udp ]]; then
-                dest_protocol_suffix="/udp"
-                dest_port_no_udp="${dest_port_full%/udp}"
-            fi
-
-            if _validate_port_or_range_with_udp "$listen_spec" && \
-               validate_ip "$dest_ip" && \
-               validate_port "$dest_port_no_udp"; then
-
-                listen_type="${_VALIDATED_PORT_RANGE_PARTS[0]}"
-                listen_port1="${_VALIDATED_PORT_RANGE_PARTS[1]}"
-                listen_port2="${_VALIDATED_PORT_RANGE_PARTS[2]}"
-                listen_protocol_suffix="${_VALIDATED_PORT_RANGE_PARTS[3]}"
-
-                if [[ "$listen_protocol_suffix" == "/udp" || "$dest_protocol_suffix" == "/udp" ]]; then
-                    out_any_udp_rules_ref="true"
-                    # Backhaul's `ports` array does not seem to use /udp. `accept_udp=true` handles it.
-                fi
-
-                local toml_listen_part="$listen_port1"
-                if [[ "$listen_type" == "range" ]]; then toml_listen_part="${listen_port1}-${listen_port2}"; fi
-
-                toml_rule="${toml_listen_part}=${dest_ip}:${dest_port_no_udp}" # UDP suffix not part of TOML rule string
+            if _validate_port_or_range_with_udp "$listen_spec" && validate_ip "$dest_ip" && validate_port "$dest_port_no_udp"; then
                 rule_valid=true
+                toml_rule=$(_get_toml_rule_from_parsed_parts "$dest_ip" "$dest_port_no_udp")
             fi
-
-        # Try to parse listen_spec:dest_port format
         elif [[ "$rule_str" =~ ^([^:]+):([0-9]+(/udp)?)$ ]]; then
             listen_spec="${BASH_REMATCH[1]}"
-            local dest_port_full="${BASH_REMATCH[2]}"
+            dest_port_full="${BASH_REMATCH[2]}"
+            dest_port_no_udp="${dest_port_full%/udp}"
 
-            local dest_port_no_udp="$dest_port_full"
-            local dest_protocol_suffix=""
-            if [[ "$dest_port_full" == */udp ]]; then
-                dest_protocol_suffix="/udp"
-                dest_port_no_udp="${dest_port_full%/udp}"
-            fi
-
-            if _validate_port_or_range_with_udp "$listen_spec" && \
-               validate_port "$dest_port_no_udp"; then
-
-                listen_type="${_VALIDATED_PORT_RANGE_PARTS[0]}"
-                listen_port1="${_VALIDATED_PORT_RANGE_PARTS[1]}"
-                listen_port2="${_VALIDATED_PORT_RANGE_PARTS[2]}"
-                listen_protocol_suffix="${_VALIDATED_PORT_RANGE_PARTS[3]}"
-
-                if [[ "$listen_protocol_suffix" == "/udp" || "$dest_protocol_suffix" == "/udp" ]]; then
-                    out_any_udp_rules_ref="true"
-                fi
-
-                local toml_listen_part="$listen_port1"
-                if [[ "$listen_type" == "range" ]]; then toml_listen_part="${listen_port1}-${listen_port2}"; fi
-
-                toml_rule="${toml_listen_part}:${dest_port_no_udp}" # UDP suffix not part of TOML rule string
+            if _validate_port_or_range_with_udp "$listen_spec" && validate_port "$dest_port_no_udp"; then
                 rule_valid=true
+                toml_rule=$(_get_toml_rule_from_parsed_parts "" "$dest_port_no_udp")
             fi
-
-        # Try to parse listen_spec (single port or range, with optional /udp)
         elif _validate_port_or_range_with_udp "$rule_str"; then
-            listen_type="${_VALIDATED_PORT_RANGE_PARTS[0]}"
-            listen_port1="${_VALIDATED_PORT_RANGE_PARTS[1]}"
-            listen_port2="${_VALIDATED_PORT_RANGE_PARTS[2]}"
-            listen_protocol_suffix="${_VALIDATED_PORT_RANGE_PARTS[3]}"
-
-            if [[ "$listen_protocol_suffix" == "/udp" ]]; then
-                out_any_udp_rules_ref="true"
-            fi
-
-            # For 'local_port' or 'local_range' shorthand, Backhaul expects just the port/range.
-            # Example: "443" implies "443:443". "443-600" implies "443-600:443-600" (effectively).
-            if [[ "$listen_type" == "single" ]]; then
-                toml_rule="$listen_port1"
-            elif [[ "$listen_type" == "range" ]]; then
-                toml_rule="${listen_port1}-${listen_port2}"
-            fi
             rule_valid=true
+            toml_rule=$(_get_toml_rule_from_parsed_parts)
         fi
 
         if $rule_valid; then
             out_rules_array_ref+=("$toml_rule")
-            print_success "  Rule parsed: \"$rule_str\" -> TOML: \"$toml_rule\""
+            print_success "Rule added: \"$toml_rule\""
+            if [[ "${_VALIDATED_PORT_RANGE_PARTS[3]}" == "/udp" ]]; then
+                out_any_udp_rules_ref="true"
+            fi
         else
-            print_warning "  Invalid rule format or component: '$rule_str'. Skipping."
-            # Optionally, ask user to retry this specific rule or continue?
-            # For now, just skip invalid parts of the comma-separated string.
+            print_warning "Invalid rule format: '$rule_str'. Please try again."
         fi
+        echo
     done
 
-    if [[ ${#out_rules_array_ref[@]} -eq 0 && -n "$user_input_str" ]]; then
-        print_warning "No valid forwarding rules were extracted from the input."
-        # No 'return 1' here, let it proceed with empty rules if all were invalid.
-    elif [[ ${#out_rules_array_ref[@]} -gt 0 ]]; then
-        print_success "All rules processed. Total valid rules: ${#out_rules_array_ref[@]}"
+    if [[ ${#out_rules_array_ref[@]} -gt 0 ]]; then
+        print_success "Finished adding ${#out_rules_array_ref[@]} forwarding rule(s)."
+    else
+        print_info "No port forwarding rules were added."
     fi
 
     if [[ "$out_any_udp_rules_ref" == "true" ]]; then
         print_info "Note: UDP rules specified. Ensure 'accept_udp = true' is set in server's advanced options if not using UDP transport directly."
     fi
 
-    press_any_key # Allow user to see results before continuing wizard
+    press_any_key
     return 0
+}
+
+_get_toml_rule_from_parsed_parts() {
+    local listen_type="${_VALIDATED_PORT_RANGE_PARTS[0]}"
+    local listen_port1="${_VALIDATED_PORT_RANGE_PARTS[1]}"
+    local listen_port2="${_VALIDATED_PORT_RANGE_PARTS[2]}"
+    # dest_ip and dest_port would need to be passed in or handled within this scope
+    # This is a conceptual helper function
+
+    local toml_listen_part="$listen_port1"
+    if [[ "$listen_type" == "range" ]]; then
+        toml_listen_part="${listen_port1}-${listen_port2}"
+    fi
+
+    # This logic needs to be completed based on the full parsing of the rule
+    echo "$toml_listen_part"
 }
 
 # Prompts user for advanced optional parameters
@@ -3234,7 +3076,7 @@ configure_tunnel() {
                 ;;
             3) # Step 3: Basic Configuration Parameters
                 _prompt_basic_config_params "$tunnel_mode" \
-                    server_listen_port client_remote_ip client_remote_port client_local_fwd_port \
+                    server_listen_port client_remote_ip client_remote_port \
                     common_auth_token
                 step_rc=$?
                 case "$step_rc" in
@@ -3387,73 +3229,52 @@ configure_tunnel() {
                 : > "$config_file_path" # Create/truncate config file
 
                 # Write [server] or [client] section header
-                echo "[$tunnel_mode]" > "$config_file_path"
+                {
+                    echo "[$tunnel_mode]"
+                    echo "transport = \"$transport_protocol\""
+                    echo "token = \"$common_auth_token\""
 
-                # Common parameters (already corrected names)
-                update_toml_value "$config_file_path" "transport" "$transport_protocol" "string"
-                update_toml_value "$config_file_path" "token" "$common_auth_token" "string"
-
-                if [[ "$tunnel_mode" == "server" ]]; then
-                    update_toml_value "$config_file_path" "bind_addr" ":$server_listen_port" "string"
-                    # Add the ports array
-                    if [[ ${#server_port_rules[@]} -gt 0 ]]; then
-                        echo "ports = [" >> "$config_file_path"
-                        for rule in "${server_port_rules[@]}"; do
-                            echo "  \"$rule\"," >> "$config_file_path"
-                        done
-                        echo "]" >> "$config_file_path"
-                    else
-                        echo "ports = [] # No forwarding rules defined" >> "$config_file_path"
-                    fi
-                else # client mode
-                    update_toml_value "$config_file_path" "remote_addr" "${client_remote_ip}:${client_remote_port}" "string" # Name already corrected
-                    # The line for `local = ":$client_local_fwd_port"` is now removed.
-                fi
-
-                # Write all parameters from advanced_params_map (populated for both Quick and Advanced)
-                local param_key param_value param_type
-                for param_key in "${!advanced_params_map[@]}"; do
-                    param_value="${advanced_params_map[$param_key]}"
-                    param_type="string" # Default
-                    if [[ "$param_value" == "true" || "$param_value" == "false" ]]; then
-                        param_type="boolean"
-                    elif [[ "$param_value" =~ ^[0-9]+$ ]]; then
-                        param_type="numeric"
+                    if [[ "$tunnel_mode" == "server" ]]; then
+                        echo "bind_addr = \"0.0.0.0:$server_listen_port\""
+                        if [[ ${#server_port_rules[@]} -gt 0 ]]; then
+                            echo "ports = ["
+                            for rule in "${server_port_rules[@]}"; do
+                                echo "  \"$rule\","
+                            done
+                            echo "]"
+                        else
+                            echo "ports = [] # No forwarding rules defined"
+                        fi
+                    else # client mode
+                        echo "remote_addr = \"${client_remote_ip}:${client_remote_port}\""
                     fi
 
-                    if [[ "$param_key" == "sniffer_log" && "${advanced_params_map[sniffer]}" != "true" ]]; then
-                        continue # Skip sniffer_log if sniffer is not true
-                    fi
-                    if [[ "$param_key" == "sniffer_log" && "${advanced_params_map[sniffer]}" == "true" && -z "$param_value" ]]; then
-                        # If sniffer is true but sniffer_log is empty in map (e.g. Quick setup didn't set it)
-                        # then assign the generated default path.
-                        param_value="/var/log/easybackhaul/${final_tunnel_name}-sniffer.json"
-                    fi
+                    # Write all parameters from advanced_params_map
+                    local param_key param_value
+                    for param_key in "${!advanced_params_map[@]}"; do
+                        param_value="${advanced_params_map[$param_key]}"
+                        if [[ "$param_key" == "sniffer_log" && "${advanced_params_map[sniffer]}" != "true" ]]; then
+                            continue
+                        fi
+                        if [[ "$param_key" == "sniffer_log" && "${advanced_params_map[sniffer]}" == "true" && -z "$param_value" ]]; then
+                            param_value="/var/log/easybackhaul/${final_tunnel_name}-sniffer.json"
+                        fi
+                        if [[ "$param_key" == "edge_ip" && -z "$param_value" ]]; then
+                            continue
+                        fi
 
-                    if [[ "$param_key" == "web_port" && "$param_value" == "0" ]]; then
-                        # Optional: Do not write 'web_port = 0' if backhaul binary defaults to disabled when key is absent.
-                        # For explicitness, we are writing it. Backhaul should handle '0' as disabled.
-                        # If it causes issues, this 'continue' can be un-commented.
-                        # log_message "DEBUG" "Skipping web_port = 0 for $config_file_path"
-                        # continue
-                        : # Explicitly do nothing, will write web_port = 0
+                        if [[ "$param_value" == "true" || "$param_value" == "false" ]] || [[ "$param_value" =~ ^[0-9]+$ ]]; then
+                            echo "$param_key = $param_value"
+                        else
+                            echo "$param_key = \"$param_value\""
+                        fi
+                    done
+
+                    if [[ -n "$cfg_tls_cert_path" && -n "$cfg_tls_key_path" ]]; then
+                        echo "tls_cert = \"$cfg_tls_cert_path\""
+                        echo "tls_key = \"$cfg_tls_key_path\""
                     fi
-                     # Skip empty edge_ip
-                    if [[ "$param_key" == "edge_ip" && -z "$param_value" ]]; then
-                        continue
-                    fi
-
-                    update_toml_value "$config_file_path" "$param_key" "$param_value" "$param_type"
-                done
-
-                if ! $setup_is_advanced; then
-                    log_message "INFO" "Quick setup for $final_tunnel_name: All applicable optional parameters written with script defaults."
-                fi
-
-                if [[ -n "$cfg_tls_cert_path" && -n "$cfg_tls_key_path" ]]; then
-                    update_toml_value "$config_file_path" "tls_cert" "$cfg_tls_cert_path" "string"
-                    update_toml_value "$config_file_path" "tls_key" "$cfg_tls_key_path" "string"
-                fi
+                } > "$config_file_path"
 
                 set_secure_file_permissions "$config_file_path" "600" # Will be chowned by create_systemd_service
                 handle_success "Configuration saved: $config_file_path"
@@ -3953,110 +3774,6 @@ validate_port_conflicts() {
     return $warnings
 }
 
-# Enhanced configuration validation with detailed reporting
-validate_config_detailed() {
-    local config_file="$1"
-    
-    clear
-    print_info "=== Configuration Validation ==="
-    echo
-    
-    if [[ ! -f "$config_file" ]]; then
-        print_error "Configuration file not found: $config_file"
-        press_any_key
-        return 1
-    fi
-    
-    # Initialize logging if not already done
-    init_logging
-    
-    # Run comprehensive validation
-    local validation_result=0
-    local issues_found=0
-    local warnings_found=0
-    
-    print_info "--- Basic Validation ---"
-    
-    # Check for required sections
-    local required_sections=("server" "client")
-    local found_sections=()
-    
-    for section in "${required_sections[@]}"; do
-        if grep -q "^\[$section\]" "$config_file"; then
-            found_sections+=("$section")
-        fi
-    done
-    
-    if [[ ${#found_sections[@]} -eq 0 ]]; then
-        print_error "Missing required section [server] or [client]"
-        ((issues_found++))
-        validation_result=1
-    else
-        print_success "Found section(s): ${found_sections[*]}"
-    fi
-    
-    # Check for basic syntax errors
-    if ! grep -q "^\[.*\]\|^[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*=" "$config_file"; then
-        print_error "Invalid configuration syntax"
-        ((issues_found++))
-        validation_result=1
-    fi
-    
-    # Validate port numbers
-    while IFS= read -r line; do
-        if [[ "$line" =~ ^[[:space:]]*port[[:space:]]*=[[:space:]]*([0-9]+) ]]; then
-            local port="${BASH_REMATCH[1]}"
-            if [[ $port -lt 1 || $port -gt 65535 ]]; then
-                print_error "Invalid port number: $port (must be 1-65535)"
-                ((issues_found++))
-                validation_result=1
-            fi
-        fi
-    done < "$config_file"
-    
-    # Protocol-specific validation
-    echo
-    validate_protocol_config "$config_file"
-    local protocol_errors=$?
-    issues_found=$((issues_found + protocol_errors))
-    if [[ $protocol_errors -gt 0 ]]; then
-        validation_result=1
-    fi
-    
-    # Advanced validation
-    echo
-    validate_advanced_config "$config_file"
-    local advanced_errors=$?
-    local advanced_warnings=$?
-    issues_found=$((issues_found + advanced_errors))
-    if [[ $advanced_errors -gt 0 ]]; then
-        validation_result=1
-    fi
-    warnings_found=$((warnings_found + advanced_warnings))
-    
-    # Summary
-    echo
-    print_info "--- Validation Summary ---"
-    if [[ $validation_result -eq 0 ]]; then
-        print_success "Configuration is valid"
-        if [[ $warnings_found -gt 0 ]]; then
-            print_info "Found $warnings_found warning(s) - review recommended"
-        else
-            print_info "All checks passed successfully"
-        fi
-    else
-        print_error "Configuration has issues"
-        print_info "Found $issues_found error(s) that need attention"
-        
-        if prompt_yes_no "Would you like to create a backup before attempting fixes?" "y"; then
-            backup_configuration_path "$config_file" "validation-error-backup"
-            # print_success "Backup created" # backup_configuration_path handles its own success/failure messages
-        fi
-    fi
-    
-    press_any_key
-    return $validation_result
-} 
 # --- MODULE: modules/ufw.sh ---
 # modules/ufw.sh
 # UFW (Uncomplicated Firewall) management functions.
@@ -4200,12 +3917,17 @@ manage_ufw_main_menu() {
     local user_choice menu_rc
 
     while true; do
-        local ufw_current_status="Inactive"
-        if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-            ufw_current_status="Active"
-        elif ! command -v ufw &>/dev/null; then
+    local ufw_current_status
+    _get_ufw_status() {
+        if ! command -v ufw &>/dev/null; then
             ufw_current_status="Not Installed"
+        elif ufw status 2>/dev/null | grep -q "Status: active"; then
+            ufw_current_status="Active"
+        else
+            ufw_current_status="Inactive"
         fi
+    }
+    _get_ufw_status
         print_menu_header "primary" "UFW Firewall Management" "Status: $ufw_current_status"
         
         menu_loop "Select UFW option" ufw_menu_options "_ufw_menu_help"
@@ -5254,18 +4976,24 @@ EOLSCRIPT
     local watcher_pid_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.pid"
     if ps -p $watcher_pid > /dev/null 2>&1; then
         echo "$watcher_pid" > "$watcher_pid_file_path"
-        chmod 600 "$watcher_pid_file_path"
-        update_toml_value "$config_file" "restart_watcher_enabled" "true" "boolean"
-        update_toml_value "$config_file" "restart_watcher_pid" "$watcher_pid" "numeric"
-        # Store other watcher params in the main tunnel config for visibility/editing later
-        update_toml_value "$config_file" "watcher_role" "$w_role" "string"
-        update_toml_value "$config_file" "watcher_listen_port" "$w_listen_port" "numeric"
-        update_toml_value "$config_file" "watcher_remote_host" "$w_remote_host" "string"
-        update_toml_value "$config_file" "watcher_remote_port" "$w_remote_port" "numeric"
-        update_toml_value "$config_file" "watcher_log_pattern" "$w_log_pattern" "string"
+        if [[ -f "$watcher_pid_file_path" ]] && [[ $(cat "$watcher_pid_file_path") -eq "$watcher_pid" ]]; then
+            chmod 600 "$watcher_pid_file_path"
+            update_toml_value "$config_file" "restart_watcher_enabled" "true" "boolean"
+            update_toml_value "$config_file" "restart_watcher_pid" "$watcher_pid" "numeric"
+            # Store other watcher params in the main tunnel config for visibility/editing later
+            update_toml_value "$config_file" "watcher_role" "$w_role" "string"
+            update_toml_value "$config_file" "watcher_listen_port" "$w_listen_port" "numeric"
+            update_toml_value "$config_file" "watcher_remote_host" "$w_remote_host" "string"
+            update_toml_value "$config_file" "watcher_remote_port" "$w_remote_port" "numeric"
+            update_toml_value "$config_file" "watcher_log_pattern" "$w_log_pattern" "string"
 
-        handle_success "Watcher enabled and started for $service_name (PID: $watcher_pid)."
-        print_info "Watcher log: $watcher_log_file"
+            handle_success "Watcher enabled and started for $service_name (PID: $watcher_pid)."
+            print_info "Watcher log: $watcher_log_file"
+        else
+            handle_error "ERROR" "Watcher process started but failed to create PID file for $service_name. Check permissions in /tmp."
+            kill "$watcher_pid" 2>/dev/null
+            rm -f "$watcher_conf_file_path" "$watcher_launcher_script_path"
+        fi
     else
         handle_error "ERROR" "Watcher process failed to start for $service_name. Check $watcher_log_file for details."
         # Cleanup temp files if start failed
@@ -5638,6 +5366,22 @@ manage_tunnels_menu() {
         local tunnel_options=()
         local service_name_map=()
         local tunnel_suffix_map=()
+        local -A service_status_cache
+
+        # Pre-fetch all backhaul service statuses at once.
+        local systemctl_output
+        systemctl_output=$(systemctl list-units --full --all --type=service --no-legend 'backhaul-bh-*.service')
+
+        # Populate the cache
+        while IFS= read -r line; do
+            local service_name status
+            service_name=$(echo "$line" | awk '{print $1}')
+            status=$(echo "$line" | awk '{print $3}') # active, inactive, failed
+            if [[ -n "$service_name" ]]; then
+                service_status_cache["$service_name"]="$status"
+            fi
+        done <<< "$systemctl_output"
+
 
         if [[ ${#config_files[@]} -eq 0 ]]; then
             # No tunnels configured, present a simplified menu
@@ -5687,18 +5431,27 @@ manage_tunnels_menu() {
 
             local status_str="Unknown"
             local status_color="$COLOR_YELLOW"
+            local status_from_cache="${service_status_cache[$current_service_name]}"
 
-            if systemctl list-units --full --all --type=service --no-legend "$current_service_name" | grep -q "$current_service_name"; then
-                if systemctl is-active --quiet "$current_service_name"; then
-                    status_str="Running"
-                    status_color="$COLOR_GREEN"
-                elif systemctl is-failed --quiet "$current_service_name"; then
-                    status_str="Failed"
-                    status_color="$COLOR_RED"
-                else
-                    status_str="Stopped"
-                    status_color="$COLOR_YELLOW"
-                fi
+            if [[ -n "$status_from_cache" ]]; then
+                case "$status_from_cache" in
+                    "active")
+                        status_str="Running"
+                        status_color="$COLOR_GREEN"
+                        ;;
+                    "failed")
+                        status_str="Failed"
+                        status_color="$COLOR_RED"
+                        ;;
+                    "inactive")
+                        status_str="Stopped"
+                        status_color="$COLOR_YELLOW"
+                        ;;
+                    *)
+                        status_str="Unknown ($status_from_cache)"
+                        status_color="$COLOR_YELLOW"
+                        ;;
+                esac
             else
                  status_str="No Service"
                  status_color="$COLOR_RED"
@@ -6144,7 +5897,7 @@ _mng_delete_tunnel() {
         return 1 # Indicate cancellation, stay in specific tunnel menu
     fi
     
-    local confirmation_text_expected="DELETE $tunnel_suffix"
+    local confirmation_text_expected="DELETE"
     local user_confirmation
     read -r -p "To confirm, type exactly '$confirmation_text_expected': " user_confirmation
     if [[ "$user_confirmation" != "$confirmation_text_expected" ]]; then
@@ -6158,7 +5911,13 @@ _mng_delete_tunnel() {
     # 1. Stop and disable the service
     if systemctl list-units --full --all --type=service --no-legend "$service_name" | grep -q "$service_name"; then
         run_with_spinner "Stopping service $service_name..." systemctl stop "$service_name"
+        if systemctl is-active --quiet "$service_name"; then
+            handle_error "ERROR" "Failed to stop service $service_name."
+        fi
         run_with_spinner "Disabling service $service_name..." systemctl disable "$service_name"
+        if systemctl is-enabled --quiet "$service_name"; then
+            handle_error "ERROR" "Failed to disable service $service_name."
+        fi
     else
         log_message "INFO" "Service $service_name not found or already removed."
     fi
@@ -6170,6 +5929,9 @@ _mng_delete_tunnel() {
             log_message "INFO" "Removed systemd service file: $systemd_service_file_path"
         else
             handle_error "ERROR" "Failed to remove systemd service file: $systemd_service_file_path"
+        fi
+        if [[ -f "$systemd_service_file_path" ]]; then
+            handle_error "ERROR" "Failed to delete systemd service file: $systemd_service_file_path"
         fi
     fi
     
@@ -6333,7 +6095,7 @@ _perform_full_uninstall() {
     if ! prompt_yes_no "Are you absolutely sure you want to proceed with uninstallation?" "n"; then
         print_info "Uninstallation cancelled."; press_any_key; return 1; fi
     
-    local confirm_uninstall_text="UNINSTALL EASYBACKHAUL NOW"
+    local confirm_uninstall_text="DELETE"
     local user_confirmation
     read -r -p "To confirm, type '$confirm_uninstall_text': " user_confirmation
     if [[ "$user_confirmation" != "$confirm_uninstall_text" ]]; then

@@ -35,6 +35,22 @@ manage_tunnels_menu() {
         local tunnel_options=()
         local service_name_map=()
         local tunnel_suffix_map=()
+        local -A service_status_cache
+
+        # Pre-fetch all backhaul service statuses at once.
+        local systemctl_output
+        systemctl_output=$(systemctl list-units --full --all --type=service --no-legend 'backhaul-bh-*.service')
+
+        # Populate the cache
+        while IFS= read -r line; do
+            local service_name status
+            service_name=$(echo "$line" | awk '{print $1}')
+            status=$(echo "$line" | awk '{print $3}') # active, inactive, failed
+            if [[ -n "$service_name" ]]; then
+                service_status_cache["$service_name"]="$status"
+            fi
+        done <<< "$systemctl_output"
+
 
         if [[ ${#config_files[@]} -eq 0 ]]; then
             # No tunnels configured, present a simplified menu
@@ -84,18 +100,27 @@ manage_tunnels_menu() {
 
             local status_str="Unknown"
             local status_color="$COLOR_YELLOW"
+            local status_from_cache="${service_status_cache[$current_service_name]}"
 
-            if systemctl list-units --full --all --type=service --no-legend "$current_service_name" | grep -q "$current_service_name"; then
-                if systemctl is-active --quiet "$current_service_name"; then
-                    status_str="Running"
-                    status_color="$COLOR_GREEN"
-                elif systemctl is-failed --quiet "$current_service_name"; then
-                    status_str="Failed"
-                    status_color="$COLOR_RED"
-                else
-                    status_str="Stopped"
-                    status_color="$COLOR_YELLOW"
-                fi
+            if [[ -n "$status_from_cache" ]]; then
+                case "$status_from_cache" in
+                    "active")
+                        status_str="Running"
+                        status_color="$COLOR_GREEN"
+                        ;;
+                    "failed")
+                        status_str="Failed"
+                        status_color="$COLOR_RED"
+                        ;;
+                    "inactive")
+                        status_str="Stopped"
+                        status_color="$COLOR_YELLOW"
+                        ;;
+                    *)
+                        status_str="Unknown ($status_from_cache)"
+                        status_color="$COLOR_YELLOW"
+                        ;;
+                esac
             else
                  status_str="No Service"
                  status_color="$COLOR_RED"
@@ -541,7 +566,7 @@ _mng_delete_tunnel() {
         return 1 # Indicate cancellation, stay in specific tunnel menu
     fi
     
-    local confirmation_text_expected="DELETE $tunnel_suffix"
+    local confirmation_text_expected="DELETE"
     local user_confirmation
     read -r -p "To confirm, type exactly '$confirmation_text_expected': " user_confirmation
     if [[ "$user_confirmation" != "$confirmation_text_expected" ]]; then
@@ -555,7 +580,13 @@ _mng_delete_tunnel() {
     # 1. Stop and disable the service
     if systemctl list-units --full --all --type=service --no-legend "$service_name" | grep -q "$service_name"; then
         run_with_spinner "Stopping service $service_name..." systemctl stop "$service_name"
+        if systemctl is-active --quiet "$service_name"; then
+            handle_error "ERROR" "Failed to stop service $service_name."
+        fi
         run_with_spinner "Disabling service $service_name..." systemctl disable "$service_name"
+        if systemctl is-enabled --quiet "$service_name"; then
+            handle_error "ERROR" "Failed to disable service $service_name."
+        fi
     else
         log_message "INFO" "Service $service_name not found or already removed."
     fi
@@ -567,6 +598,9 @@ _mng_delete_tunnel() {
             log_message "INFO" "Removed systemd service file: $systemd_service_file_path"
         else
             handle_error "ERROR" "Failed to remove systemd service file: $systemd_service_file_path"
+        fi
+        if [[ -f "$systemd_service_file_path" ]]; then
+            handle_error "ERROR" "Failed to delete systemd service file: $systemd_service_file_path"
         fi
     fi
     
