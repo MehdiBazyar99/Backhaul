@@ -99,17 +99,19 @@ After installation, you'll see:
 =================================================================
   Core by Musixal  |  Installer by @N4Xon
 -----------------------------------------------------------------
- 1. Configure a New Tunnel
- 2. Manage Existing Tunnels
- 3. Update/Re-install Backhaul Binary
- 4. Generate Self-Signed TLS Certificate
- 5. System Health & Performance Monitor
- 6. Clean Stale Processes & Temp Files
- 7. Manage UFW Firewall (if installed)
- 8. Uninstall EasyBackhaul
- ?. Help & Documentation
- 0. Exit
+
+      Main Menu
+=================================================================
+  1. Configure a New Tunnel
+  2. Manage Existing Tunnels
+  3. Update/Re-install Backhaul Binary
+  4. Generate Self-Signed TLS Certificate
+  5. Select Binary Directory
+  6. System Health & Performance Monitor
+  7. Clean Stale Processes & Temp Files
+  8. Uninstall EasyBackhaul
 ----------------------------------------------------------------
+ [?] Help | [r] Return/Back/Cancel | [m] Main Menu | [x] Exit Script
 ```
 
 ### 3. Configure a New Tunnel

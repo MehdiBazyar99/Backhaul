@@ -95,21 +95,23 @@ sudo bash easybh.sh
 پس از نصب، منوی زیر را خواهید دید:
 
 ```
-      EasyBackhaul Installer & Management Menu (v14.0-dev)
-================================================================
+      EasyBackhaul Management Menu (v14.0-dev)
+=================================================================
   Core by Musixal  |  Installer by @N4Xon
+-----------------------------------------------------------------
+
+      Main Menu
+=================================================================
+  1. Configure a New Tunnel
+  2. Manage Existing Tunnels
+  3. Update/Re-install Backhaul Binary
+  4. Generate Self-Signed TLS Certificate
+  5. Select Binary Directory
+  6. System Health & Performance Monitor
+  7. Clean Stale Processes & Temp Files
+  8. Uninstall EasyBackhaul
 ----------------------------------------------------------------
- 1. Configure a New Tunnel
- 2. Manage Existing Tunnels
- 3. Update/Re-install Backhaul Binary
- 4. Generate Self-Signed TLS Certificate
- 5. System Health & Performance Monitor
- 6. Clean Stale Processes & Temp Files
- 7. Manage UFW Firewall (if installed)
- 8. Uninstall EasyBackhaul
- ?. Help & Documentation
- 0. Exit
-----------------------------------------------------------------
+ [?] Help | [r] Return/Back/Cancel | [m] Main Menu | [x] Exit Script
 ```
 
 ### ۳. ساخت تونل جدید
