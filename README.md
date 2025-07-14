@@ -59,7 +59,7 @@ sudo bash easybh.sh
 - **Input validation**: Robust validation with re-prompting for invalid input
 - **Contextual help**: Press `?` for help throughout the interface
 - **Multi-language support**: English and Persian documentation
-- **Beta channel**: Try the latest features before stable release
+- **Dev channel**: Try the latest features before stable release
 - **Installation Wizard**: Multiple installation options with network diagnostics
 
 ### **Security & Performance**
@@ -103,10 +103,10 @@ After installation, you'll see:
  2. Manage Existing Tunnels
  3. Update/Re-install Backhaul Binary
  4. Generate Self-Signed TLS Certificate
- 5. Select Backhaul Binary Directory (current: /usr/local/bin/backhaul)
- 6. System Health & Performance Monitor
- 7. Clean Up Zombie/Orphaned Processes
- 8. Uninstall EasyBackhaul (Removes binary and ALL configs)
+ 5. System Health & Performance Monitor
+ 6. Clean Stale Processes & Temp Files
+ 7. Manage UFW Firewall (if installed)
+ 8. Uninstall EasyBackhaul
  ?. Help & Documentation
  0. Exit
 ----------------------------------------------------------------
@@ -117,7 +117,7 @@ After installation, you'll see:
 - **Quick Setup (Recommended)**: Uses sensible defaults and asks only essential questions
 - **Advanced Setup**: Full control over all settings for power users
 - **Smart Transport Selection**: Simplified options with clear descriptions
-- **Simple Port Configuration**: Enter ports as single, multiple, or ranges (e.g., `80,443,8000-8010`)
+- **Interactive Port Configuration**: Add port forwarding rules one by one with clear examples.
 - **Automatic Validation**: Check port availability, validate IP, and optional ping test
 - **Enhanced Input Validation**: Robust validation with helpful error messages
 
@@ -139,104 +139,6 @@ After installation, you'll see:
 - **Validate Configuration**: Comprehensive configuration validation
 - **Delete Service**: Remove tunnel and all related files
 
-#### **Graceful Restart Feature**
-- **Pre-restart health check**: Verify current tunnel status
-- **System resource monitoring**: Check memory, CPU, and disk usage
-- **Coordinated restart**: Stop service, wait for cooldown, restart with retry
-- **Post-restart verification**: Confirm tunnel is healthy after restart
-- **Error recovery**: Automatic recovery options if restart fails
-- **Progress indicators**: Visual feedback during the restart process
-
-#### **Enhanced Configuration Validation**
-- **Comprehensive validation**: Check syntax, required fields, and protocol-specific settings
-- **Detailed error reporting**: Clear error messages with specific issues
-- **Support for all protocols**: TCP, UDP, WebSocket, WSS, TCP Multiplexing, WSMUX, WSSMUX
-- **Port conflict detection**: Identify potential port conflicts
-- **Security validation**: Check for security issues and deprecated fields
-
-#### **Interactive Log Viewer**
-- Choose between live follow or interactive scroll/search
-- **Press Ctrl+C** to exit log view and return to the menu (the script will not close)
-- **Search functionality**: Use `/` to search within logs
-- **Follow mode**: Use `F` to follow logs in real-time
-
-#### **Coordinated Restart Watcher**
-- **Background process**: Runs as a lightweight background process
-- **Restart coordination**: Coordinates restarts between client and server
-- **Configurable**: Customize patterns, delays, and ports
-- **Status monitoring**: View watcher status and logs
-- **Testing**: Test watcher communication
-
-### 5. System Health & Performance Monitor
-
-#### **System Overview**
-- **Binary status**: Check Backhaul binary installation and version
-- **Service status**: Monitor all running Backhaul services
-- **Resource usage**: Real-time CPU, memory, and disk usage
-- **Log file sizes**: Monitor log file growth and rotation
-
-#### **Actions Available**
-- **Refresh health status**: Update all system metrics
-- **Clean up zombie processes**: Remove orphaned processes and watchers
-- **View detailed logs**: Browse and search through log files
-- **Optimize all tunnel processes**: Optimize resource usage for all tunnels
-
-### 6. Advanced Management Features
-
-#### **Log Level Management**
-- **Dynamic log level changes**: Modify logging verbosity without restart
-- **Supported levels**: debug, info, warn, error
-- **Automatic restart**: Option to restart service after log level change
-- **Current level display**: Show current log level for each tunnel
-
-#### **Zombie Process Cleanup**
-- **Automatic detection**: Find orphaned processes and watchers
-- **Safe termination**: Graceful shutdown with fallback to force kill
-- **Comprehensive cleanup**: Remove PID files, logs, and temporary files
-- **System optimization**: Clean up system resources
-
-#### **Binary Management**
-- **Path customization**: Change Backhaul binary location
-- **Version checking**: Display binary version and status
-- **Reinstallation**: Update or reinstall Backhaul binary
-- **Session persistence**: Remember binary path for current session
-
----
-
-## 🔧 Advanced Features
-
-### **Performance Monitoring**
-- **Operation tracking**: Monitor performance of all operations
-- **Resource usage**: Track memory, CPU, and disk usage
-- **Slow operation detection**: Identify operations taking longer than expected
-- **Performance optimization**: Automatic process priority optimization
-
-### **Health Monitoring**
-- **Real-time health checks**: Monitor tunnel health status
-- **Resource monitoring**: Track memory and CPU usage per tunnel
-- **Health logging**: Log health metrics for analysis
-- **Automatic recovery**: Attempt recovery for failed tunnels
-
-### **Security Features**
-- **Secure file operations**: Secure deletion and permission hardening
-- **Input sanitization**: Protect against malicious input
-- **Rate limiting**: Prevent abuse of the management interface
-- **Audit logging**: Comprehensive audit trail of all operations
-- **Permission hardening**: Automatic security hardening of files and directories
-
-### **Error Handling & Recovery**
-- **Advanced error recovery**: Automatic recovery for common issues
-- **Retry mechanisms**: Exponential backoff for failed operations
-- **Graceful degradation**: Continue operation even with partial failures
-- **Error logging**: Detailed error logging for troubleshooting
-
-### **Enhanced Logging System**
-- **Multiple formats**: JSON and text logging formats
-- **Configurable levels**: DEBUG, INFO, WARN, ERROR levels
-- **Log rotation**: Automatic log rotation and compression
-- **Dedicated log files**: Separate files for health, performance, and general logs
-- **Interactive viewing**: Advanced log viewing with search and follow capabilities
-
 ---
 
 ## 🧑‍💻 Development & Building
@@ -246,57 +148,12 @@ After installation, you'll see:
 - Use `./build.sh` to generate the distributable `easybh.sh`
 - **Do not edit `easybh.sh` directly**—edit modules and rebuild
 
-### **Module Structure**
-```
-modules/
-├── backhaul_core.sh      # Core Backhaul operations
-├── config.sh            # Configuration management
-├── cron.sh              # Cron job management
-├── globals.sh           # Global variables and settings
-├── helpers.sh           # Utility functions and helpers
-├── menu.sh              # Main menu and UI
-├── prereqs.sh           # Prerequisites and dependencies
-├── restart_watcher.sh   # Coordinated restart watcher
-├── systemd.sh           # Systemd service management
-├── tunnel_mgmt.sh       # Tunnel management
-├── ufw.sh               # UFW firewall management
-└── validation.sh        # Configuration validation
-```
-
-### **Building from Source**
-```bash
-# Clone the repository
-git clone https://github.com/NaxonM/EasyBackhaul.git
-cd EasyBackhaul
-
-# Build the script
-./build.sh
-
-# The script is now ready to use
-sudo bash easybh.sh
-```
-
 ---
 
-## 🧪 Beta Channel
+## 🧪 Dev Channel
 
-This version is distributed via the **beta channel**.  
+This version is distributed via the **dev channel**.  
 Please report bugs and feedback via [GitHub Issues](https://github.com/NaxonM/EasyBackhaul/issues).
-
-### **Recent Improvements**
-- ✅ **Major Code Refactoring (v14.0-dev)**: Significant internal restructuring of all script modules for improved maintainability, robustness, and standardization of helper functions. This also addressed various bugs and inconsistencies.
-- ✅ **Graceful Restart**: Advanced restart with health checks and resource monitoring
-- ✅ **Enhanced Validation**: Comprehensive configuration validation with detailed reporting
-- ✅ **Improved UX**: Progress indicators, better error messages, and contextual help
-- ✅ **Performance Monitoring**: Track operation performance and resource usage
-- ✅ **Security Enhancements**: Secure file operations and input sanitization
-- ✅ **Error Recovery**: Advanced error handling and recovery mechanisms
-- ✅ **Coordinated Restart Watcher**: Advanced restart coordination between client and server
-- ✅ **System Health Monitor**: Comprehensive system monitoring and optimization
-- ✅ **Zombie Process Cleanup**: Automatic cleanup of orphaned processes
-- ✅ **Enhanced Logging**: Advanced logging system with multiple formats and levels
-- ✅ **Installation Wizard**: Multiple installation options with network diagnostics
-- ✅ **Log Level Management**: Dynamic log level changes for troubleshooting
 
 ---
 
