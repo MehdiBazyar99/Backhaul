@@ -47,30 +47,13 @@ manage_tunnels_menu() {
 
             # Prompt is empty as options are self-explanatory or covered by footer
             # Pass empty options array, menu_loop handles it.
-            menu_loop "" tunnel_options "_manage_tunnels_menu_help"
-            local no_tunnel_rc=$?
-            local no_tunnel_choice="$MENU_CHOICE" # Will be a nav key, capture after $?
-
-            case "$no_tunnel_rc" in
-                # Case 0 (numeric choice) is not possible if tunnel_options is empty.
-                2) # '?' Help
-                    # Help function already called by menu_loop. Loop again to show menu.
-                    continue ;;
-                3) # 'm' Main Menu
-                    go_to_main_menu
-                    return 0 ;; # Return to main script loop
-                4) # 'x' Exit script
-                    request_script_exit
-                    return 0 ;; # Return to main script loop
-                5) # 'r' Return/Back/Cancel (to previous menu, likely main menu)
-                    return_from_menu # This pops the stack
-                    return 0 ;; # Return to main script loop
-                6) # Invalid input in menu_loop (warning and press_any_key handled by menu_loop)
-                    continue ;; # Re-display this menu
-                *)
-                    print_warning "Unexpected menu_loop return code in manage_tunnels_menu (no tunnels): $no_tunnel_rc (Choice: $no_tunnel_choice)"
-                    press_any_key
-                    continue ;; # Re-display this menu
+            if ! menu_loop "" tunnel_options no_tunnel_choice "_manage_tunnels_menu_help"; then
+                continue
+            fi
+            case "$no_tunnel_choice" in
+                "?") _manage_tunnels_menu_help ;;
+                "m") go_to_main_menu; return 0 ;;
+                "r"|"x") return_from_menu; return 0 ;;
             esac
         fi
         
@@ -109,11 +92,8 @@ manage_tunnels_menu() {
             ((idx++))
         done
 
-        # local exit_options=("0. Back to Main Menu") # No longer needed
-        local user_choice menu_rc # menu_rc declared here, user_choice will be local too
-
         local choice
-        if ! menu_loop "Select tunnel to manage" tunnel_options choice; then
+        if ! menu_loop "Select tunnel to manage" tunnel_options choice "_manage_tunnels_menu_help"; then
             continue # Re-display menu on invalid input
         fi
 
@@ -195,7 +175,7 @@ manage_specific_tunnel_menu() {
         print_menu_header "secondary" "Managing Tunnel: $tunnel_suffix" "Service: $service_name" "Status: ${current_status_color}${current_status_str}${COLOR_RESET}"
         
         local choice
-        if ! menu_loop "Select action" menu_options choice; then
+        if ! menu_loop "Select action" menu_options choice "_specific_tunnel_menu_help"; then
             continue # Re-display menu on invalid input
         fi
 
@@ -352,43 +332,22 @@ _mng_change_log_level() {
         print_info "Current log level in $(basename "$cfg_file"): ${COLOR_CYAN}$current_level${COLOR_RESET}"
 
         local log_level_options=("1. debug" "2. info" "3. warn" "4. error")
-        # local log_level_exit_options=("0. Cancel and Back") # No longer needed
-        local user_choice menu_rc
+        local choice
 
-        menu_loop "Select new log level" log_level_options "_log_level_help"
-        local menu_rc=$?
-        local user_choice="$MENU_CHOICE"
+        if ! menu_loop "Select new log level" log_level_options choice "_log_level_help"; then
+            continue
+        fi
 
         local new_level=""
-        case "$menu_rc" in
-            0) # Numeric choice
-                case "$user_choice" in
-                    "1") new_level="debug" ;;
-                    "2") new_level="info" ;;
-                    "3") new_level="warn" ;;
-                    "4") new_level="error" ;;
-                    *) print_warning "Invalid numeric selection: $user_choice"; press_any_key; continue ;;
-                esac
-                ;;
-            2) # '?' Help
-                # Help function already called by menu_loop. Loop again to show menu.
-                continue ;;
-            3) # 'm' Main Menu
-                go_to_main_menu
-                return 0 ;; # Return to main script loop to process navigation
-            4) # 'x' Exit script
-                request_script_exit
-                return 0 ;; # Return to main script loop
-            5) # 'r' Return/Back/Cancel
-                print_info "Log level change cancelled."
-                press_any_key
-                return_from_menu
-                return 0 ;;
-            6) # Invalid input in menu_loop (warning and press_any_key handled by menu_loop)
-                continue ;;
-            *)
-                print_warning "Unexpected menu_loop return code in _mng_change_log_level: $menu_rc (Choice: $user_choice)"
-                press_any_key; continue ;;
+        case "$choice" in
+            "1") new_level="debug" ;;
+            "2") new_level="info" ;;
+            "3") new_level="warn" ;;
+            "4") new_level="error" ;;
+            "?") _log_level_help ;;
+            "m") go_to_main_menu; return 0 ;;
+            "r"|"x") return_from_menu; return 0 ;;
+            *) print_warning "Invalid selection: $choice"; press_any_key; continue ;;
         esac
 
         if [[ -n "$new_level" ]]; then

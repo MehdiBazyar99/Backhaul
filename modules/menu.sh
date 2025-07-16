@@ -67,7 +67,7 @@ system_health_monitor_menu() {
         if pgrep -f "${EASYBACKHAUL_TMP_DIR:-/tmp}/backhaul-watcher-.*\.sh" >/dev/null; then pgrep -af "${EASYBACKHAUL_TMP_DIR:-/tmp}/backhaul-watcher-.*\.sh" | sed 's/^/    /'; else print_info "  No active watcher processes found."; fi
 
         local choice
-        if ! menu_loop "Select action" health_menu_options choice; then
+        if ! menu_loop "Select action" health_menu_options choice "_health_monitor_menu_help"; then
             continue # Re-display menu on invalid input
         fi
 
@@ -257,7 +257,7 @@ main_menu_entry() {
         "8. Uninstall EasyBackhaul"
     )
     local choice
-    if ! menu_loop "Select option" main_menu_options choice; then
+    if ! menu_loop "Select option" main_menu_options choice "_generic_main_menu_help"; then
         return 0 # Re-display menu on invalid input
     fi
 

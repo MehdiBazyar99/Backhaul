@@ -865,10 +865,14 @@ prompt_yes_no() {
 }
 
 # Refactored menu loop to be more concise and avoid global variables.
+# Usage: menu_loop "Prompt" options_array_name choice_variable_name ["help_function_name"]
+# Returns 0 if the choice is valid (numeric or special char), 1 for invalid input.
+# The chosen option is stored in the variable named by choice_variable_name.
 menu_loop() {
     local prompt_msg="$1"
-    local -n options_ref=$2
-    local -n choice_ref=$3 # Nameref for the output variable
+    local -n options_ref=$2 # Nameref to the array of options
+    local -n choice_ref=$3  # Nameref to the variable that will store the user's choice
+    local help_func="${4:-}" # Optional: name of the help function
 
     echo
     for opt_str in "${options_ref[@]}"; do
@@ -889,14 +893,28 @@ menu_loop() {
     read -r -p "$full_prompt_str" choice_ref
     choice_ref=$(xargs <<< "$(tr '[:upper:]' '[:lower:]' <<< "$choice_ref")")
 
+    # Handle help separately
+    if [[ "$choice_ref" == "?" ]]; then
+        if [[ -n "$help_func" ]] && type "$help_func" &>/dev/null; then
+            "$help_func"
+        else
+            print_info "No help available for this menu."
+            press_any_key
+        fi
+        return 1 # Return 1 to indicate a re-display of the menu is needed
+    fi
+
+    # Validate numeric choice
     if [[ "$choice_ref" =~ ^[0-9]+$ ]]; then
         if (( max_numeric_opt > 0 && choice_ref >= 1 && choice_ref <= max_numeric_opt )); then
             return 0 # Valid numeric choice
         fi
-    elif [[ "$choice_ref" =~ ^[?rmx]$ ]]; then
+    # Validate special command characters (excluding '?')
+    elif [[ "$choice_ref" =~ ^[rmx]$ ]]; then
         return 0 # Valid special command
     fi
 
+    # If we reach here, the input is invalid
     print_warning "Invalid option: '$choice_ref'."
     press_any_key
     return 1 # Invalid choice
