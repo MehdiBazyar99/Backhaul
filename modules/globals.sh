@@ -5,9 +5,11 @@
 # All global variables use UPPER_SNAKE_CASE for consistency
 # Using /etc for persistent configurations and /var/log for logs.
 # /tmp is still used for transient items like backups or temporary binary location.
+EASYBACKHAUL_APP_DIR="/var/lib/easybackhaul"
+EASYBACKHAUL_TMP_DIR="$EASYBACKHAUL_APP_DIR/tmp"
 CONFIG_DIR="/etc/easybackhaul/configs"
-BACKUP_DIR="/tmp/easybackhaul_backups" # Backups can remain in /tmp or move to /var/backups/easybackhaul
-BIN_PATH="/tmp/easybackhaul_bin/easybackhaul_binary"
+BACKUP_DIR="$EASYBACKHAUL_APP_DIR/backups"
+BIN_PATH="$EASYBACKHAUL_APP_DIR/bin/easybackhaul_binary"
 SERVICE_DIR="/etc/systemd/system"
 LOG_DIR="/var/log/easybackhaul" # Standard log location
 

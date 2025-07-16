@@ -24,7 +24,7 @@ get_server_info() {
 
     for service_url in "${services_to_try[@]}"; do
         local temp_output_file
-        temp_output_file=$(mktemp)
+        temp_output_file=$(mktemp "$EASYBACKHAUL_TMP_DIR/ipinfo.XXXXXX")
         temp_output_files+=("$temp_output_file")
         (curl -s --connect-timeout 3 --max-time 8 "$service_url" > "$temp_output_file" 2>/dev/null) &
         pids+=($!)
@@ -141,7 +141,7 @@ verify_binary_installation() {
 # Assumes binary is at /tmp/backhaul.tar.gz
 # Uses global BIN_PATH.
 install_downloaded_binary() {
-    local archive_path="/tmp/backhaul.tar.gz"
+    local archive_path="$EASYBACKHAUL_APP_DIR/backhaul.tar.gz"
     local target_bin_dir
     target_bin_dir=$(dirname "$BIN_PATH")
     local target_bin_name
@@ -165,7 +165,7 @@ install_downloaded_binary() {
     fi
 
     local temp_extract_dir
-    temp_extract_dir=$(mktemp -d /tmp/backhaul_extract_XXXXXX)
+    temp_extract_dir=$(mktemp -d "$EASYBACKHAUL_APP_DIR/backhaul_extract_XXXXXX")
 
     log_message "INFO" "Extracting $archive_path to $temp_extract_dir..."
     if ! tar -xzf "$archive_path" -C "$temp_extract_dir"; then
@@ -363,15 +363,23 @@ _download_from_github() {
     if [[ -n "$api_response" ]] && echo "$api_response" | jq -e .tag_name >/dev/null 2>&1; then
         latest_version=$(echo "$api_response" | jq -r .tag_name)
         if [[ -z "$latest_version" || "$latest_version" == "null" ]]; then
-            log_message "WARN" "Could not parse tag_name from GitHub API response. Will try a common fallback."
-            latest_version="v0.6.6" # Fallback, consider making this more dynamic or removing
+            log_message "WARN" "Could not parse tag_name from GitHub API response."
+            latest_version=""
         else
             log_message "INFO" "Latest version from GitHub: $latest_version"
         fi
     else
         handle_error "WARNING" "Failed to fetch latest version from GitHub API. Check connectivity or API rate limits."
-        log_message "WARN" "Using fallback version v0.6.6 due to API fetch failure."
-        latest_version="v0.6.6"
+        # Try to fetch the latest tag from the releases page as a fallback
+        latest_version=$(curl -s https://github.com/Musixal/Backhaul/releases | grep -oE '/Musixal/Backhaul/releases/tag/v[0-9.]+' | head -n1 | grep -oE 'v[0-9.]+' )
+        if [[ -z "$latest_version" ]]; then
+            print_error "Could not determine the latest Backhaul version. Please check your network connection or manually download the binary."
+            print_info "You can use the 'Install from Local .tar.gz File' or 'Install from Alternative URL' options."
+            press_any_key
+            return 1
+        else
+            log_message "INFO" "Fallback: Found latest version from releases page: $latest_version"
+        fi
     fi
 
     local download_url="https://github.com/Musixal/Backhaul/releases/download/${latest_version}/backhaul_${os}_${arch_suffix}.tar.gz"
@@ -379,7 +387,7 @@ _download_from_github() {
     echo "URL: $download_url"
 
     if run_with_spinner "Downloading from GitHub..." \
-        wget --progress=dot:giga -O /tmp/backhaul.tar.gz "$download_url"; then
+        wget --progress=dot:giga -O "$EASYBACKHAUL_APP_DIR/backhaul.tar.gz" "$download_url"; then
         if install_downloaded_binary; then # install_downloaded_binary returns 0 on success
             return 0 # Overall success
         else
@@ -388,6 +396,7 @@ _download_from_github() {
         fi
     else
         handle_error "ERROR" "Download from GitHub failed. URL: $download_url"
+        print_info "You may want to try another installation method or check the available versions at: https://github.com/Musixal/Backhaul/releases"
         return 1
     fi
 }
@@ -424,8 +433,8 @@ _download_from_local_file() {
         break
     done
 
-    log_message "INFO" "Copying local file '$local_file_path' to /tmp/backhaul.tar.gz"
-    if cp "$local_file_path" /tmp/backhaul.tar.gz; then
+    log_message "INFO" "Copying local file '$local_file_path' to $EASYBACKHAUL_APP_DIR/backhaul.tar.gz"
+    if cp "$local_file_path" "$EASYBACKHAUL_APP_DIR/backhaul.tar.gz"; then
         if install_downloaded_binary; then return 0; else return 1; fi
     else
         handle_error "ERROR" "Failed to copy local file '$local_file_path' to temporary location."
@@ -458,7 +467,7 @@ _download_from_alternative_source() {
     done
 
     if run_with_spinner "Downloading from $alt_url..." \
-        wget --progress=dot:giga -O /tmp/backhaul.tar.gz "$alt_url"; then
+        wget --progress=dot:giga -O "$EASYBACKHAUL_APP_DIR/backhaul.tar.gz" "$alt_url"; then
         if install_downloaded_binary; then return 0; else return 1; fi
     else
         handle_error "ERROR" "Download from alternative source '$alt_url' failed."

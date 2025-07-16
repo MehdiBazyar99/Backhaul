@@ -619,19 +619,24 @@ _configure_server_forwarding_rules() {
 }
 
 _get_toml_rule_from_parsed_parts() {
+    local dest_ip="$1"
+    local dest_port="$2"
     local listen_type="${_VALIDATED_PORT_RANGE_PARTS[0]}"
     local listen_port1="${_VALIDATED_PORT_RANGE_PARTS[1]}"
     local listen_port2="${_VALIDATED_PORT_RANGE_PARTS[2]}"
-    # dest_ip and dest_port would need to be passed in or handled within this scope
-    # This is a conceptual helper function
 
     local toml_listen_part="$listen_port1"
     if [[ "$listen_type" == "range" ]]; then
         toml_listen_part="${listen_port1}-${listen_port2}"
     fi
 
-    # This logic needs to be completed based on the full parsing of the rule
-    echo "$toml_listen_part"
+    if [[ -n "$dest_ip" ]]; then
+        echo "${toml_listen_part}=${dest_ip}:${dest_port}"
+    elif [[ -n "$dest_port" ]]; then
+        echo "${toml_listen_part}:${dest_port}"
+    else
+        echo "$toml_listen_part"
+    fi
 }
 
 # Prompts user for advanced optional parameters
@@ -988,52 +993,73 @@ configure_tunnel() {
                 : > "$config_file_path" # Create/truncate config file
 
                 # Write [server] or [client] section header
-                {
-                    echo "[$tunnel_mode]"
-                    echo "transport = \"$transport_protocol\""
-                    echo "token = \"$common_auth_token\""
+                echo "[$tunnel_mode]" > "$config_file_path"
 
-                    if [[ "$tunnel_mode" == "server" ]]; then
-                        echo "bind_addr = \"0.0.0.0:$server_listen_port\""
-                        if [[ ${#server_port_rules[@]} -gt 0 ]]; then
-                            echo "ports = ["
-                            for rule in "${server_port_rules[@]}"; do
-                                echo "  \"$rule\","
-                            done
-                            echo "]"
-                        else
-                            echo "ports = [] # No forwarding rules defined"
-                        fi
-                    else # client mode
-                        echo "remote_addr = \"${client_remote_ip}:${client_remote_port}\""
+                # Common parameters (already corrected names)
+                update_toml_value "$config_file_path" "transport" "$transport_protocol" "string"
+                update_toml_value "$config_file_path" "token" "$common_auth_token" "string"
+
+                if [[ "$tunnel_mode" == "server" ]]; then
+                    update_toml_value "$config_file_path" "bind_addr" "0.0.0.0:$server_listen_port" "string"
+                    # Add the ports array
+                    if [[ ${#server_port_rules[@]} -gt 0 ]]; then
+                        echo "ports = [" >> "$config_file_path"
+                        for rule in "${server_port_rules[@]}"; do
+                            echo "  \"$rule\"," >> "$config_file_path"
+                        done
+                        echo "]" >> "$config_file_path"
+                    else
+                        echo "ports = [] # No forwarding rules defined" >> "$config_file_path"
+                    fi
+                else # client mode
+                    update_toml_value "$config_file_path" "remote_addr" "${client_remote_ip}:${client_remote_port}" "string" # Name already corrected
+                    # The line for `local = ":$client_local_fwd_port"` is now removed.
+                fi
+
+                # Write all parameters from advanced_params_map (populated for both Quick and Advanced)
+                local param_key param_value param_type
+                for param_key in "${!advanced_params_map[@]}"; do
+                    param_value="${advanced_params_map[$param_key]}"
+                    param_type="string" # Default
+                    if [[ "$param_value" == "true" || "$param_value" == "false" ]]; then
+                        param_type="boolean"
+                    elif [[ "$param_value" =~ ^[0-9]+$ ]]; then
+                        param_type="numeric"
                     fi
 
-                    # Write all parameters from advanced_params_map
-                    local param_key param_value
-                    for param_key in "${!advanced_params_map[@]}"; do
-                        param_value="${advanced_params_map[$param_key]}"
-                        if [[ "$param_key" == "sniffer_log" && "${advanced_params_map[sniffer]}" != "true" ]]; then
-                            continue
-                        fi
-                        if [[ "$param_key" == "sniffer_log" && "${advanced_params_map[sniffer]}" == "true" && -z "$param_value" ]]; then
-                            param_value="/var/log/easybackhaul/${final_tunnel_name}-sniffer.json"
-                        fi
-                        if [[ "$param_key" == "edge_ip" && -z "$param_value" ]]; then
-                            continue
-                        fi
-
-                        if [[ "$param_value" == "true" || "$param_value" == "false" ]] || [[ "$param_value" =~ ^[0-9]+$ ]]; then
-                            echo "$param_key = $param_value"
-                        else
-                            echo "$param_key = \"$param_value\""
-                        fi
-                    done
-
-                    if [[ -n "$cfg_tls_cert_path" && -n "$cfg_tls_key_path" ]]; then
-                        echo "tls_cert = \"$cfg_tls_cert_path\""
-                        echo "tls_key = \"$cfg_tls_key_path\""
+                    if [[ "$param_key" == "sniffer_log" && "${advanced_params_map[sniffer]}" != "true" ]]; then
+                        continue # Skip sniffer_log if sniffer is not true
                     fi
-                } > "$config_file_path"
+                    if [[ "$param_key" == "sniffer_log" && "${advanced_params_map[sniffer]}" == "true" && -z "$param_value" ]]; then
+                        # If sniffer is true but sniffer_log is empty in map (e.g. Quick setup didn't set it)
+                        # then assign the generated default path.
+                        param_value="/var/log/easybackhaul/${final_tunnel_name}-sniffer.json"
+                    fi
+
+                    if [[ "$param_key" == "web_port" && "$param_value" == "0" ]]; then
+                        # Optional: Do not write 'web_port = 0' if backhaul binary defaults to disabled when key is absent.
+                        # For explicitness, we are writing it. Backhaul should handle '0' as disabled.
+                        # If it causes issues, this 'continue' can be un-commented.
+                        # log_message "DEBUG" "Skipping web_port = 0 for $config_file_path"
+                        # continue
+                        : # Explicitly do nothing, will write web_port = 0
+                    fi
+                     # Skip empty edge_ip
+                    if [[ "$param_key" == "edge_ip" && -z "$param_value" ]]; then
+                        continue
+                    fi
+
+                    update_toml_value "$config_file_path" "$param_key" "$param_value" "$param_type"
+                done
+
+                if ! $setup_is_advanced; then
+                    log_message "INFO" "Quick setup for $final_tunnel_name: All applicable optional parameters written with script defaults."
+                fi
+
+                if [[ -n "$cfg_tls_cert_path" && -n "$cfg_tls_key_path" ]]; then
+                    update_toml_value "$config_file_path" "tls_cert" "$cfg_tls_cert_path" "string"
+                    update_toml_value "$config_file_path" "tls_key" "$cfg_tls_key_path" "string"
+                fi
 
                 set_secure_file_permissions "$config_file_path" "600" # Will be chowned by create_systemd_service
                 handle_success "Configuration saved: $config_file_path"

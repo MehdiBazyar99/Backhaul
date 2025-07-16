@@ -43,12 +43,13 @@ manage_tunnels_menu() {
 
         # Populate the cache
         while IFS= read -r line; do
+            if [[ -z "$line" ]]; then
+                continue
+            fi
             local service_name status
             service_name=$(echo "$line" | awk '{print $1}')
             status=$(echo "$line" | awk '{print $3}') # active, inactive, failed
-            if [[ -n "$service_name" ]]; then
-                service_status_cache["$service_name"]="$status"
-            fi
+            service_status_cache["$service_name"]="$status"
         done <<< "$systemctl_output"
 
 
@@ -621,6 +622,11 @@ _mng_delete_tunnel() {
     fi
 
     cleanup_watcher_files "$tunnel_suffix"
+
+    # Remove any auto-restart cron job for this service
+    if type _remove_service_cron_job &>/dev/null; then
+        _remove_service_cron_job "$service_name" "quiet"
+    fi
 
     handle_success "Tunnel '$tunnel_suffix' and its associated files/rules have been deleted."
     press_any_key

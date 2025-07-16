@@ -422,13 +422,17 @@ update_toml_value() {
         return 1
     fi
 
+    if ! command -v yq &>/dev/null; then
+        handle_error "CRITICAL" "yq is not installed. Please install it to update TOML files."
+        return 1
+    fi
+
     if ! acquire_file_lock "$config_file"; then
         handle_error "WARNING" "Could not update $config_file due to lock timeout."
         return 1
     fi
     # Ensure lock is released even on error within this function
     trap 'release_file_lock "$config_file"; trap - EXIT HUP INT QUIT TERM' EXIT HUP INT QUIT TERM
-
 
     if [[ "${CONFIG_BACKUP_ON_CHANGE:-true}" == "true" ]]; then
         local backup_base_dir="${BACKUP_DIR:-/etc/easybackhaul/backup}"
@@ -439,57 +443,20 @@ update_toml_value() {
             log_message "WARN" "Failed to create config backup for $config_file"
     fi
     
-    local temp_file
-    temp_file=$(mktemp)
-    
-    local updated=false
-    # Regex to match key, allowing for spaces and comments after value
-    # Handles: key = "value", key="value", key = value, key=value #comment
-    local key_regex="^[[:space:]]*${key}[[:space:]]*=[[:space:]]*"
-
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        if echo "$line" | grep -qE "$key_regex"; then
-            local comment_part=""
-            if echo "$line" | grep -q "#"; then
-                comment_part=" #"$(echo "$line" | sed 's/.*#//')
-            fi
-            case "$data_type" in
-                "numeric") echo "${key} = ${value}${comment_part}" >> "$temp_file" ;;
-                "boolean") echo "${key} = ${value}${comment_part}" >> "$temp_file" ;;
-                "string"|*) echo "${key} = \"${value}\"${comment_part}" >> "$temp_file" ;;
-            esac
-            updated=true
-        else
-            echo "$line" >> "$temp_file"
-        fi
-    done < "$config_file"
-
-    if ! $updated; then
-        case "$data_type" in
-            "numeric") echo "${key} = ${value}" >> "$temp_file" ;;
-            "boolean") echo "${key} = ${value}" >> "$temp_file" ;;
-            "string"|*) echo "${key} = \"${value}\"" >> "$temp_file" ;;
-        esac
-    fi
-    
-    # Validate the temp file before moving
-    if ! toml-validator "$temp_file" >/dev/null 2>&1; then
-        log_message "ERROR" "Generated TOML is invalid. Aborting update for $config_file."
-        rm -f "$temp_file"
-        release_file_lock "$config_file"
-        trap - EXIT HUP INT QUIT TERM
-        return 1
+    local yq_expression
+    if [[ "$data_type" == "string" ]]; then
+        yq_expression=".${key} = \"${value}\""
+    else
+        yq_expression=".${key} = ${value}"
     fi
 
-    if mv "$temp_file" "$config_file"; then
-        set_secure_file_permissions "$config_file" "600"
+    if yq -i -y "$yq_expression" "$config_file"; then
         log_message "INFO" "Updated key '$key' in $config_file."
         release_file_lock "$config_file"
         trap - EXIT HUP INT QUIT TERM
         return 0
     else
-        log_message "ERROR" "Failed to move temp file to $config_file."
-        rm -f "$temp_file" # Clean up temp file on failure
+        log_message "ERROR" "Failed to update key '$key' in $config_file with yq."
         release_file_lock "$config_file"
         trap - EXIT HUP INT QUIT TERM
         return 1
@@ -929,21 +896,21 @@ cleanup_stale_processes_and_files() {
     fi
 
     local temp_patterns=(
-        "/tmp/backhaul-*.tmp"
-        "/tmp/backhaul-*.pid"
-        "/tmp/backhaul-*.log"
-        "/tmp/restart_ack_*"
-        "/tmp/backhaul-watcher-*.sh"
-        "/tmp/backhaul-watcher-*.conf"
-        "/tmp/easybackhaul_rate_limit_*.lock"
+        "$EASYBACKHAUL_APP_DIR/backhaul-*.tmp"
+        "$EASYBACKHAUL_APP_DIR/backhaul-*.pid"
+        "$EASYBACKHAUL_APP_DIR/backhaul-*.log"
+        "$EASYBACKHAUL_APP_DIR/restart_ack_*"
+        "$EASYBACKHAUL_APP_DIR/backhaul-watcher-*.sh"
+        "$EASYBACKHAUL_APP_DIR/backhaul-watcher-*.conf"
+        "$EASYBACKHAUL_APP_DIR/easybackhaul_rate_limit_*.lock"
     )
     log_message "DEBUG" "Checking for stale temporary files..."
     for pattern in "${temp_patterns[@]}"; do
         # Delete files older than 1 day matching the pattern
-        find /tmp -name "$(basename "$pattern")" -type f -mtime +1 -print -delete 2>/dev/null && ((cleaned_items++))
+        find "$EASYBACKHAUL_APP_DIR" -name "$(basename "$pattern")" -type f -mtime +1 -print -delete 2>/dev/null && ((cleaned_items++))
 
         if [[ "$pattern" == *".pid" ]]; then
-            find /tmp -name "$(basename "$pattern")" -type f -print0 | while IFS= read -r -d $'\0' pid_file; do
+            find "$EASYBACKHAUL_APP_DIR" -name "$(basename "$pattern")" -type f -print0 | while IFS= read -r -d $'\0' pid_file; do
                 local pid_val
                 pid_val=$(cat "$pid_file" 2>/dev/null)
                 if [[ -n "$pid_val" ]] && ! ps -p "$pid_val" > /dev/null 2>&1; then
@@ -970,12 +937,12 @@ cleanup_watcher_files() {
 
     log_message "INFO" "Cleaning up watcher files for tunnel: $tunnel_suffix"
     
-    local watcher_script_path="/tmp/backhaul-watcher-${tunnel_suffix}.sh"
-    local watcher_pid_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.pid"
-    local watcher_log_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.log"
-    local watcher_conf_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.conf"
+    local watcher_script_path="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_suffix}.sh"
+    local watcher_pid_file_path="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_suffix}.pid"
+    local watcher_log_file_path="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_suffix}.log"
+    local watcher_conf_file_path="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_suffix}.conf"
     # Assuming service name follows a pattern like backhaul-<suffix>.service
-    local restart_ack_file_path="/tmp/restart_ack_backhaul-${tunnel_suffix}.service"
+    local restart_ack_file_path="$EASYBACKHAUL_APP_DIR/restart_ack_backhaul-${tunnel_suffix}.service"
 
     if [[ -f "$watcher_pid_file_path" ]]; then
         local watcher_pid_val
@@ -1007,7 +974,7 @@ run_with_spinner() {
     shift
     local command_to_run=("$@")
     local spin_chars="|/-\\"
-    local log_file="/tmp/spinner_$(date +%s%N).log" # Unique log file for each spinner run
+    local log_file="$EASYBACKHAUL_APP_DIR/spinner_$(date +%s%N).log" # Unique log file for each spinner run
     
     echo -n "$description "
     # Redirect stdout and stderr of the command to the log file
@@ -1073,7 +1040,6 @@ generate_random_secret() {
     fi
 }
 
-# These will be used to pass the generated paths back to the calling function
 _GENERATED_CERT_PATH=""
 _GENERATED_KEY_PATH=""
 
@@ -1130,7 +1096,6 @@ generate_self_signed_tls_cert() {
     echo "  Certificate: $cert_path"
     print_info "These paths can be used in your tunnel configurations for WSS/WSSMUX."
 
-    # Store paths in global variables to be picked up by the caller
     _GENERATED_CERT_PATH="$cert_path"
     _GENERATED_KEY_PATH="$key_path"
 
@@ -1324,6 +1289,7 @@ check_dependencies() {
         ["wget"]="wget"
         ["tar"]="tar"
         ["jq"]="jq"
+        ["yq"]="yq"
         ["nc"]="netcat-openbsd" # Preferred nc, nmap-ncat is fallback
         ["ss"]="iproute2"
         ["systemctl"]="systemd" # Though systemctl itself isn't a package, 'systemd' is.
