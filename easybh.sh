@@ -674,7 +674,7 @@ update_toml_value() {
         yq_expression=".${key} = ${value}"
     fi
 
-    if yq -i "$yq_expression" "$config_file"; then
+    if yq -i -y "$yq_expression" "$config_file"; then
         log_message "INFO" "Updated key '$key' in $config_file."
         release_file_lock "$config_file"
         trap - EXIT HUP INT QUIT TERM
@@ -1968,15 +1968,23 @@ _download_from_github() {
     if [[ -n "$api_response" ]] && echo "$api_response" | jq -e .tag_name >/dev/null 2>&1; then
         latest_version=$(echo "$api_response" | jq -r .tag_name)
         if [[ -z "$latest_version" || "$latest_version" == "null" ]]; then
-            log_message "WARN" "Could not parse tag_name from GitHub API response. Will try a common fallback."
-            latest_version="v0.6.6" # Fallback, consider making this more dynamic or removing
+            log_message "WARN" "Could not parse tag_name from GitHub API response."
+            latest_version=""
         else
             log_message "INFO" "Latest version from GitHub: $latest_version"
         fi
     else
         handle_error "WARNING" "Failed to fetch latest version from GitHub API. Check connectivity or API rate limits."
-        log_message "WARN" "Using fallback version v0.6.6 due to API fetch failure."
-        latest_version="v0.6.6"
+        # Try to fetch the latest tag from the releases page as a fallback
+        latest_version=$(curl -s https://github.com/Musixal/Backhaul/releases | grep -oE '/Musixal/Backhaul/releases/tag/v[0-9.]+' | head -n1 | grep -oE 'v[0-9.]+' )
+        if [[ -z "$latest_version" ]]; then
+            print_error "Could not determine the latest Backhaul version. Please check your network connection or manually download the binary."
+            print_info "You can use the 'Install from Local .tar.gz File' or 'Install from Alternative URL' options."
+            press_any_key
+            return 1
+        else
+            log_message "INFO" "Fallback: Found latest version from releases page: $latest_version"
+        fi
     fi
 
     local download_url="https://github.com/Musixal/Backhaul/releases/download/${latest_version}/backhaul_${os}_${arch_suffix}.tar.gz"
@@ -1993,6 +2001,7 @@ _download_from_github() {
         fi
     else
         handle_error "ERROR" "Download from GitHub failed. URL: $download_url"
+        print_info "You may want to try another installation method or check the available versions at: https://github.com/Musixal/Backhaul/releases"
         return 1
     fi
 }
@@ -5948,6 +5957,11 @@ _mng_delete_tunnel() {
 
     cleanup_watcher_files "$tunnel_suffix"
 
+    # Remove any auto-restart cron job for this service
+    if type _remove_service_cron_job &>/dev/null; then
+        _remove_service_cron_job "$service_name" "quiet"
+    fi
+
     handle_success "Tunnel '$tunnel_suffix' and its associated files/rules have been deleted."
     press_any_key
     return 0 # Indicate successful deletion, return from specific tunnel menu
@@ -6253,7 +6267,6 @@ main_menu_entry() {
 }
 
 main_script_entry_point() {
-    trap 'rm -rf "$EASYBACKHAUL_APP_DIR"' EXIT
     ensure_dir "$EASYBACKHAUL_APP_DIR"
     ensure_dir "$EASYBACKHAUL_TMP_DIR"
     ensure_dir "$BACKUP_DIR"
