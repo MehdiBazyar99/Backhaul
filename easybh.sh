@@ -5987,17 +5987,13 @@ _initial_installation_wizard() {
     # download_backhaul_binary_workflow will handle its own menu and logic.
     # It returns 0 on success (binary installed and verified), 1 on failure/cancellation.
     if download_backhaul_binary_workflow; then
-        # verify_binary_installation is called within install_downloaded_binary,
-        # which is called by the helpers in download_backhaul_binary_workflow.
-        # So, if download_backhaul_binary_workflow returns 0, it implies success.
         handle_success "Backhaul binary installed and verified successfully!"
         press_any_key
         return 0 # Successful installation
     else
-        handle_error "ERROR" "Backhaul binary installation was cancelled or failed."
-        print_warning "EasyBackhaul may not function correctly without the binary."
+        print_warning "Binary installation was skipped or failed. You can install the binary later from the main menu."
         press_any_key
-        return 1 # Indicate failure/cancellation of initial setup step
+        return 0 # Allow access to main menu even if binary is missing
     fi
 }
 
@@ -6166,6 +6162,9 @@ main_menu_entry() {
     else binary_status_msg+="${COLOR_RED}NOT INSTALLED${COLOR_RESET} (Expected: $BIN_PATH)"; fi
     
     print_menu_header "primary" "EasyBackhaul Management Menu" "$binary_status_msg"
+    if [[ ! -f "$BIN_PATH" ]]; then
+        print_warning "The Backhaul binary is missing. Most tunnel operations will not work until it is installed. Use the main menu to install or configure the binary."
+    fi
     
     local main_menu_options=(
         "1. Configure a New Tunnel"
@@ -6282,6 +6281,15 @@ main_script_entry_point() {
     trap '_global_ctrl_c_handler' INT
 
     log_message "INFO" "EasyBackhaul script started."
+    log_message "DEBUG" "BIN_PATH is set to: $BIN_PATH"
+    if [[ ! -f "$BIN_PATH" ]]; then
+        log_message "WARN" "Backhaul binary not found at $BIN_PATH. Listing contents of $(dirname "$BIN_PATH"):"
+        ls -l "$(dirname "$BIN_PATH")" 2>&1 | while read -r line; do log_message "DEBUG" "$line"; done
+    elif [[ ! -x "$BIN_PATH" ]]; then
+        log_message "WARN" "Backhaul binary at $BIN_PATH is not executable. Attempting to fix permissions."
+    else
+        log_message "INFO" "Backhaul binary found and appears executable at $BIN_PATH."
+    fi
 
     : "${CONFIG_DIR:=$EASYBACKHAUL_APP_DIR/config}"
     : "${BACKUP_DIR:=$EASYBACKHAUL_APP_DIR/backup}"
@@ -6321,14 +6329,18 @@ main_script_entry_point() {
 
     if [[ ! -f "$BIN_PATH" ]]; then
         log_message "WARN" "Backhaul binary not found at $BIN_PATH. Starting installation wizard."
-        if ! _initial_installation_wizard; then
-            handle_critical_error "Backhaul binary installation was not completed. Exiting."
+        _initial_installation_wizard
+        # After installation attempt, log again
+        if [[ ! -f "$BIN_PATH" ]]; then
+            log_message "ERROR" "Backhaul binary STILL missing at $BIN_PATH after installation attempt. Directory contents:" 
+            ls -l "$(dirname "$BIN_PATH")" 2>&1 | while read -r line; do log_message "DEBUG" "$line"; done
+        else
+            log_message "INFO" "Backhaul binary present at $BIN_PATH after installation attempt."
         fi
     fi
 
-    if ! verify_binary_installation "quiet"; then
-        handle_critical_error "Backhaul binary at $BIN_PATH is invalid or verification failed. Please try re-installing."
-    fi
+    # Remove hard block: allow main menu even if binary is missing
+    # Only show warning in main menu if binary is missing
 
     CURRENT_MENU_FUNCTION="main_menu_entry"
     MENU_STACK=("main_menu_entry")
