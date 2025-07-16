@@ -541,11 +541,8 @@ _mng_delete_tunnel() {
         return 1 # Indicate cancellation, stay in specific tunnel menu
     fi
     
-    local confirmation_text_expected="DELETE $tunnel_suffix"
-    local user_confirmation
-    read -r -p "To confirm, type exactly '$confirmation_text_expected': " user_confirmation
-    if [[ "$user_confirmation" != "$confirmation_text_expected" ]]; then
-        handle_error "ERROR" "Confirmation text did not match. Deletion aborted."
+    if ! prompt_yes_no "Are you sure you want to delete tunnel '$tunnel_suffix'?" "n"; then
+        print_info "Tunnel deletion cancelled."
         press_any_key
         return 1 # Indicate cancellation
     fi

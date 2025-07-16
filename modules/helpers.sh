@@ -1180,6 +1180,11 @@ generate_self_signed_tls_cert() {
     echo "  Private Key: $key_path"
     echo "  Certificate: $cert_path"
     print_info "These paths can be used in your tunnel configurations for WSS/WSSMUX."
+
+    # Store paths for the calling function to retrieve
+    echo "$cert_path" > "$cert_dir/last_generated_cert.path"
+    echo "$key_path" > "$cert_dir/last_generated_key.path"
+
     press_any_key
     return 0
 }

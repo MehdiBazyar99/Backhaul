@@ -1402,6 +1402,11 @@ generate_self_signed_tls_cert() {
     echo "  Private Key: $key_path"
     echo "  Certificate: $cert_path"
     print_info "These paths can be used in your tunnel configurations for WSS/WSSMUX."
+
+    # Store paths for the calling function to retrieve
+    echo "$cert_path" > "$cert_dir/last_generated_cert.path"
+    echo "$key_path" > "$cert_dir/last_generated_key.path"
+
     press_any_key
     return 0
 }
@@ -1749,6 +1754,7 @@ check_dependencies() {
 
 # Final 'true' to ensure the script is valid if sourced.
 true
+
 # --- MODULE: modules/backhaul_core.sh ---
 # modules/backhaul_core.sh
 # Download, install, and update Backhaul binary; get server info 
@@ -1757,6 +1763,26 @@ true
 SERVER_IP="N/A"
 SERVER_COUNTRY="N/A"
 SERVER_ISP="N/A"
+
+# Fetches server's public IP and geo-information with caching.
+get_server_info_with_cache() {
+    local cache_file="/tmp/easybackhaul_server_info.cache"
+    local cache_ttl=3600 # 1 hour
+
+    if [[ -f "$cache_file" ]] && [[ $(($(date +%s) - $(date +%s -r "$cache_file"))) -lt "$cache_ttl" ]]; then
+        log_message "INFO" "Loading server info from cache."
+        source "$cache_file"
+        return 0
+    fi
+
+    get_server_info
+
+    if [[ "$SERVER_IP" != "N/A" ]]; then
+        echo "SERVER_IP='$SERVER_IP'" > "$cache_file"
+        echo "SERVER_COUNTRY='$SERVER_COUNTRY'" >> "$cache_file"
+        echo "SERVER_ISP='$SERVER_ISP'" >> "$cache_file"
+    fi
+}
 
 # Fetches server's public IP and geo-information.
 # Populates SERVER_IP, SERVER_COUNTRY, SERVER_ISP global variables.
@@ -2093,14 +2119,14 @@ _download_from_github() {
         latest_version=$(echo "$api_response" | jq -r .tag_name)
         if [[ -z "$latest_version" || "$latest_version" == "null" ]]; then
             log_message "WARN" "Could not parse tag_name from GitHub API response. Will try a common fallback."
-            latest_version="v0.6.6" # Fallback, consider making this more dynamic or removing
+            latest_version="v0.6.5"
         else
             log_message "INFO" "Latest version from GitHub: $latest_version"
         fi
     else
         handle_error "WARNING" "Failed to fetch latest version from GitHub API. Check connectivity or API rate limits."
-        log_message "WARN" "Using fallback version v0.6.6 due to API fetch failure."
-        latest_version="v0.6.6"
+        log_message "WARN" "Using fallback version v0.6.5 due to API fetch failure."
+        latest_version="v0.6.5"
     fi
 
     local download_url="https://github.com/Musixal/Backhaul/releases/download/${latest_version}/backhaul_${os}_${arch_suffix}.tar.gz"
@@ -2640,7 +2666,7 @@ _prompt_basic_config_params() {
 
     if [[ "$tunnel_mode" == "server" ]]; then
         print_info "Server Mode: Configure listening address."
-        if [[ -z "$SERVER_IP" || "$SERVER_IP" == "N/A" ]]; then get_server_info; fi # Ensure we have an IP for defaults if needed
+        if [[ -z "$SERVER_IP" || "$SERVER_IP" == "N/A" ]]; then get_server_info_with_cache; fi # Ensure we have an IP for defaults if needed
 
         if ! prompt_for_port "Port for Backhaul server to listen on (e.g., 443)" "443" true listen_port_ref; then
             print_error "Failed to get a valid listen port for server."
@@ -2770,12 +2796,7 @@ _prompt_tls_config() {
     case "$menu_rc" in
         0) # Numeric choice
             if (( user_choice == generate_new_opt_num )); then
-                if generate_self_signed_tls_cert; then # This function handles its own output and sets paths
-                    # It should output the paths it created, we need to capture them.
-                    # For now, assume generate_self_signed_tls_cert updates some global vars or returns paths.
-                    # This part needs refinement: generate_self_signed_tls_cert needs to return the paths.
-                    # Let's assume it writes to last_cert.path and last_key.path files for simplicity here.
-                    # This is a placeholder for better path communication.
+                if generate_self_signed_tls_cert; then
                     if [[ -f "$cert_dir_global/last_generated_cert.path" && -f "$cert_dir_global/last_generated_key.path" ]]; then
                         tls_cert_path_ref=$(cat "$cert_dir_global/last_generated_cert.path")
                         tls_key_path_ref=$(cat "$cert_dir_global/last_generated_key.path")
@@ -2891,11 +2912,13 @@ _configure_server_forwarding_rules() {
     echo "  - Port to specific client port: 8080:80 (forwards server's 8080 to client's port 80)"
     echo "  - Port range: 7000-7010 (forwards server range 7000-7010 to client's range 7000-7010)"
     echo "  - Port range to single client port: 7000-7010:6000 (forwards server range 7000-7010 to client's single port 6000)"
-    echo "  - To specific client IP & port: 2222=192.168.0.10:22 (forwards server's 2222 to 192.168.0.10:22 on client side)"
-    echo "Separate multiple rules with a comma. Examples:"
-    echo "  Ex 1: 80, 443:8443, 7000-7010, 53/udp"
-    echo "  Ex 2: 2222=10.0.0.5:22, 8000-8010:9000, 999/udp"
-    echo "Leave blank for no forwarding."
+    echo "  - To specific client IP & port: 2222=192.168.0.10:22 (forwards server's 2222 to a specific IP and port on the client side)"
+    echo
+    echo "Separate multiple rules with a comma. For example:"
+    echo "  80, 443:8443, 7000-7010, 53/udp"
+    echo
+    echo "Leave blank if you don't need to forward any ports."
+    print_info "Note: For UDP forwarding, you must also enable 'accept_udp' in the advanced options."
     echo
 
     local user_input_str
@@ -6144,11 +6167,8 @@ _mng_delete_tunnel() {
         return 1 # Indicate cancellation, stay in specific tunnel menu
     fi
     
-    local confirmation_text_expected="DELETE $tunnel_suffix"
-    local user_confirmation
-    read -r -p "To confirm, type exactly '$confirmation_text_expected': " user_confirmation
-    if [[ "$user_confirmation" != "$confirmation_text_expected" ]]; then
-        handle_error "ERROR" "Confirmation text did not match. Deletion aborted."
+    if ! prompt_yes_no "Are you sure you want to delete tunnel '$tunnel_suffix'?" "n"; then
+        print_info "Tunnel deletion cancelled."
         press_any_key
         return 1 # Indicate cancellation
     fi
@@ -6333,11 +6353,8 @@ _perform_full_uninstall() {
     if ! prompt_yes_no "Are you absolutely sure you want to proceed with uninstallation?" "n"; then
         print_info "Uninstallation cancelled."; press_any_key; return 1; fi
     
-    local confirm_uninstall_text="UNINSTALL EASYBACKHAUL NOW"
-    local user_confirmation
-    read -r -p "To confirm, type '$confirm_uninstall_text': " user_confirmation
-    if [[ "$user_confirmation" != "$confirm_uninstall_text" ]]; then
-        handle_error "ERROR" "Confirmation text did not match. Uninstallation aborted."; press_any_key; return 1; fi
+    if ! prompt_yes_no "Are you sure you want to uninstall EasyBackhaul?" "n"; then
+        print_info "Uninstallation cancelled."; press_any_key; return 1; fi
     
     log_message "WARN" "Starting full uninstallation of EasyBackhaul..."
     
@@ -6402,26 +6419,16 @@ _perform_full_uninstall() {
     fi
     
     print_info "Removing files and directories..."
-    if [[ -n "$BIN_PATH" && -f "$BIN_PATH" ]]; then secure_delete "$BIN_PATH"; fi
-    # CONFIG_DIR is now /etc/easybackhaul/configs. Remove its parent /etc/easybackhaul as well.
-    if [[ -n "$CONFIG_DIR" && -d "$(dirname "$CONFIG_DIR")" ]]; then # Check parent dir
-        secure_delete "$(dirname "$CONFIG_DIR")" # This removes /etc/easybackhaul (and configs within)
-        log_message "INFO" "Removed main config directory structure: $(dirname "$CONFIG_DIR")"
-    elif [[ -n "$CONFIG_DIR" && -d "$CONFIG_DIR" ]]; then # Fallback if parent wasn't as expected
-         secure_delete "$CONFIG_DIR"
-         log_message "INFO" "Removed config directory: $CONFIG_DIR"
-    fi
-
-    if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then secure_delete "$BACKUP_DIR"; fi
-    if [[ -n "$EASYBACKHAUL_TMP_DIR" && -d "$EASYBACKHAUL_TMP_DIR" && "$EASYBACKHAUL_TMP_DIR" != "/tmp" && "$EASYBACKHAUL_TMP_DIR" != "/tmp/" ]]; then
+    if [[ -n "$BIN_PATH" ]] && [[ -e "$BIN_PATH" ]]; then secure_delete "$BIN_PATH"; fi
+    if [[ -n "$CONFIG_DIR" ]] && [[ -d "$(dirname "$CONFIG_DIR")" ]]; then secure_delete "$(dirname "$CONFIG_DIR")"; fi
+    if [[ -n "$BACKUP_DIR" ]] && [[ -d "$BACKUP_DIR" ]]; then secure_delete "$BACKUP_DIR"; fi
+    if [[ -n "$EASYBACKHAUL_TMP_DIR" && "$EASYBACKHAUL_TMP_DIR" != "/tmp" && "$EASYBACKHAUL_TMP_DIR" != "/tmp/" ]] && [[ -d "$EASYBACKHAUL_TMP_DIR" ]]; then
         secure_delete "$EASYBACKHAUL_TMP_DIR"
     fi
 
     # Remove logrotate configuration
-    local logrotate_conf_file="/etc/logrotate.d/easybackhaul"
-    if [[ -f "$logrotate_conf_file" ]]; then
-        secure_delete "$logrotate_conf_file"
-        log_message "INFO" "Removed logrotate configuration file: $logrotate_conf_file"
+    if [[ -f "/etc/logrotate.d/easybackhaul" ]]; then
+        secure_delete "/etc/logrotate.d/easybackhaul"
     fi
 
     # LOG_DIR is now /var/log/easybackhaul
@@ -6431,6 +6438,13 @@ _perform_full_uninstall() {
             handle_success "Log directory $LOG_DIR deleted."
         else
             print_info "Log directory $LOG_DIR preserved."
+        fi
+    fi
+
+    # Remove the script itself
+    if [[ -f "$0" ]]; then
+        if prompt_yes_no "Delete the script file itself ($0)?" "y"; then
+            secure_delete "$0"
         fi
     fi
     
@@ -6609,7 +6623,7 @@ main_script_entry_point() {
     if type check_dependencies &>/dev/null; then check_dependencies;
     else handle_critical_error "check_dependencies function not found."; fi
 
-    if type get_server_info &>/dev/null; then get_server_info; else log_message "WARN" "get_server_info not found."; fi
+    if type get_server_info_with_cache &>/dev/null; then get_server_info_with_cache; else log_message "WARN" "get_server_info_with_cache not found."; fi
 
     if [[ ! -f "$BIN_PATH" ]] || ! verify_binary_installation "quiet"; then
         log_message "WARN" "Backhaul binary not found or failed verification at $BIN_PATH. Starting installation wizard."

@@ -131,11 +131,8 @@ _perform_full_uninstall() {
     if ! prompt_yes_no "Are you absolutely sure you want to proceed with uninstallation?" "n"; then
         print_info "Uninstallation cancelled."; press_any_key; return 1; fi
     
-    local confirm_uninstall_text="UNINSTALL EASYBACKHAUL NOW"
-    local user_confirmation
-    read -r -p "To confirm, type '$confirm_uninstall_text': " user_confirmation
-    if [[ "$user_confirmation" != "$confirm_uninstall_text" ]]; then
-        handle_error "ERROR" "Confirmation text did not match. Uninstallation aborted."; press_any_key; return 1; fi
+    if ! prompt_yes_no "Are you sure you want to uninstall EasyBackhaul?" "n"; then
+        print_info "Uninstallation cancelled."; press_any_key; return 1; fi
     
     log_message "WARN" "Starting full uninstallation of EasyBackhaul..."
     
@@ -200,26 +197,16 @@ _perform_full_uninstall() {
     fi
     
     print_info "Removing files and directories..."
-    if [[ -n "$BIN_PATH" && -f "$BIN_PATH" ]]; then secure_delete "$BIN_PATH"; fi
-    # CONFIG_DIR is now /etc/easybackhaul/configs. Remove its parent /etc/easybackhaul as well.
-    if [[ -n "$CONFIG_DIR" && -d "$(dirname "$CONFIG_DIR")" ]]; then # Check parent dir
-        secure_delete "$(dirname "$CONFIG_DIR")" # This removes /etc/easybackhaul (and configs within)
-        log_message "INFO" "Removed main config directory structure: $(dirname "$CONFIG_DIR")"
-    elif [[ -n "$CONFIG_DIR" && -d "$CONFIG_DIR" ]]; then # Fallback if parent wasn't as expected
-         secure_delete "$CONFIG_DIR"
-         log_message "INFO" "Removed config directory: $CONFIG_DIR"
-    fi
-
-    if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then secure_delete "$BACKUP_DIR"; fi
-    if [[ -n "$EASYBACKHAUL_TMP_DIR" && -d "$EASYBACKHAUL_TMP_DIR" && "$EASYBACKHAUL_TMP_DIR" != "/tmp" && "$EASYBACKHAUL_TMP_DIR" != "/tmp/" ]]; then
+    if [[ -n "$BIN_PATH" ]] && [[ -e "$BIN_PATH" ]]; then secure_delete "$BIN_PATH"; fi
+    if [[ -n "$CONFIG_DIR" ]] && [[ -d "$(dirname "$CONFIG_DIR")" ]]; then secure_delete "$(dirname "$CONFIG_DIR")"; fi
+    if [[ -n "$BACKUP_DIR" ]] && [[ -d "$BACKUP_DIR" ]]; then secure_delete "$BACKUP_DIR"; fi
+    if [[ -n "$EASYBACKHAUL_TMP_DIR" && "$EASYBACKHAUL_TMP_DIR" != "/tmp" && "$EASYBACKHAUL_TMP_DIR" != "/tmp/" ]] && [[ -d "$EASYBACKHAUL_TMP_DIR" ]]; then
         secure_delete "$EASYBACKHAUL_TMP_DIR"
     fi
 
     # Remove logrotate configuration
-    local logrotate_conf_file="/etc/logrotate.d/easybackhaul"
-    if [[ -f "$logrotate_conf_file" ]]; then
-        secure_delete "$logrotate_conf_file"
-        log_message "INFO" "Removed logrotate configuration file: $logrotate_conf_file"
+    if [[ -f "/etc/logrotate.d/easybackhaul" ]]; then
+        secure_delete "/etc/logrotate.d/easybackhaul"
     fi
 
     # LOG_DIR is now /var/log/easybackhaul
@@ -229,6 +216,13 @@ _perform_full_uninstall() {
             handle_success "Log directory $LOG_DIR deleted."
         else
             print_info "Log directory $LOG_DIR preserved."
+        fi
+    fi
+
+    # Remove the script itself
+    if [[ -f "$0" ]]; then
+        if prompt_yes_no "Delete the script file itself ($0)?" "y"; then
+            secure_delete "$0"
         fi
     fi
     
@@ -407,7 +401,7 @@ main_script_entry_point() {
     if type check_dependencies &>/dev/null; then check_dependencies;
     else handle_critical_error "check_dependencies function not found."; fi
 
-    if type get_server_info &>/dev/null; then get_server_info; else log_message "WARN" "get_server_info not found."; fi
+    if type get_server_info_with_cache &>/dev/null; then get_server_info_with_cache; else log_message "WARN" "get_server_info_with_cache not found."; fi
 
     if [[ ! -f "$BIN_PATH" ]] || ! verify_binary_installation "quiet"; then
         log_message "WARN" "Backhaul binary not found or failed verification at $BIN_PATH. Starting installation wizard."

@@ -6,6 +6,26 @@ SERVER_IP="N/A"
 SERVER_COUNTRY="N/A"
 SERVER_ISP="N/A"
 
+# Fetches server's public IP and geo-information with caching.
+get_server_info_with_cache() {
+    local cache_file="/tmp/easybackhaul_server_info.cache"
+    local cache_ttl=3600 # 1 hour
+
+    if [[ -f "$cache_file" ]] && [[ $(($(date +%s) - $(date +%s -r "$cache_file"))) -lt "$cache_ttl" ]]; then
+        log_message "INFO" "Loading server info from cache."
+        source "$cache_file"
+        return 0
+    fi
+
+    get_server_info
+
+    if [[ "$SERVER_IP" != "N/A" ]]; then
+        echo "SERVER_IP='$SERVER_IP'" > "$cache_file"
+        echo "SERVER_COUNTRY='$SERVER_COUNTRY'" >> "$cache_file"
+        echo "SERVER_ISP='$SERVER_ISP'" >> "$cache_file"
+    fi
+}
+
 # Fetches server's public IP and geo-information.
 # Populates SERVER_IP, SERVER_COUNTRY, SERVER_ISP global variables.
 get_server_info() {
@@ -341,14 +361,14 @@ _download_from_github() {
         latest_version=$(echo "$api_response" | jq -r .tag_name)
         if [[ -z "$latest_version" || "$latest_version" == "null" ]]; then
             log_message "WARN" "Could not parse tag_name from GitHub API response. Will try a common fallback."
-            latest_version="v0.6.6" # Fallback, consider making this more dynamic or removing
+            latest_version="v0.6.5"
         else
             log_message "INFO" "Latest version from GitHub: $latest_version"
         fi
     else
         handle_error "WARNING" "Failed to fetch latest version from GitHub API. Check connectivity or API rate limits."
-        log_message "WARN" "Using fallback version v0.6.6 due to API fetch failure."
-        latest_version="v0.6.6"
+        log_message "WARN" "Using fallback version v0.6.5 due to API fetch failure."
+        latest_version="v0.6.5"
     fi
 
     local download_url="https://github.com/Musixal/Backhaul/releases/download/${latest_version}/backhaul_${os}_${arch_suffix}.tar.gz"

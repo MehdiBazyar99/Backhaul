@@ -307,7 +307,7 @@ _prompt_basic_config_params() {
 
     if [[ "$tunnel_mode" == "server" ]]; then
         print_info "Server Mode: Configure listening address."
-        if [[ -z "$SERVER_IP" || "$SERVER_IP" == "N/A" ]]; then get_server_info; fi # Ensure we have an IP for defaults if needed
+        if [[ -z "$SERVER_IP" || "$SERVER_IP" == "N/A" ]]; then get_server_info_with_cache; fi # Ensure we have an IP for defaults if needed
 
         if ! prompt_for_port "Port for Backhaul server to listen on (e.g., 443)" "443" true listen_port_ref; then
             print_error "Failed to get a valid listen port for server."
@@ -437,12 +437,7 @@ _prompt_tls_config() {
     case "$menu_rc" in
         0) # Numeric choice
             if (( user_choice == generate_new_opt_num )); then
-                if generate_self_signed_tls_cert; then # This function handles its own output and sets paths
-                    # It should output the paths it created, we need to capture them.
-                    # For now, assume generate_self_signed_tls_cert updates some global vars or returns paths.
-                    # This part needs refinement: generate_self_signed_tls_cert needs to return the paths.
-                    # Let's assume it writes to last_cert.path and last_key.path files for simplicity here.
-                    # This is a placeholder for better path communication.
+                if generate_self_signed_tls_cert; then
                     if [[ -f "$cert_dir_global/last_generated_cert.path" && -f "$cert_dir_global/last_generated_key.path" ]]; then
                         tls_cert_path_ref=$(cat "$cert_dir_global/last_generated_cert.path")
                         tls_key_path_ref=$(cat "$cert_dir_global/last_generated_key.path")
@@ -558,11 +553,13 @@ _configure_server_forwarding_rules() {
     echo "  - Port to specific client port: 8080:80 (forwards server's 8080 to client's port 80)"
     echo "  - Port range: 7000-7010 (forwards server range 7000-7010 to client's range 7000-7010)"
     echo "  - Port range to single client port: 7000-7010:6000 (forwards server range 7000-7010 to client's single port 6000)"
-    echo "  - To specific client IP & port: 2222=192.168.0.10:22 (forwards server's 2222 to 192.168.0.10:22 on client side)"
-    echo "Separate multiple rules with a comma. Examples:"
-    echo "  Ex 1: 80, 443:8443, 7000-7010, 53/udp"
-    echo "  Ex 2: 2222=10.0.0.5:22, 8000-8010:9000, 999/udp"
-    echo "Leave blank for no forwarding."
+    echo "  - To specific client IP & port: 2222=192.168.0.10:22 (forwards server's 2222 to a specific IP and port on the client side)"
+    echo
+    echo "Separate multiple rules with a comma. For example:"
+    echo "  80, 443:8443, 7000-7010, 53/udp"
+    echo
+    echo "Leave blank if you don't need to forward any ports."
+    print_info "Note: For UDP forwarding, you must also enable 'accept_udp' in the advanced options."
     echo
 
     local user_input_str
