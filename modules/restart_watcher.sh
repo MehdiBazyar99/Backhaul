@@ -29,7 +29,7 @@ _run_watcher_process() {
     local max_retries_local="${MAX_RETRIES:-3}"
     local role_local="${ROLE:-unknown_watcher_role}"
     local listen_port_local="${LISTEN_PORT:-45679}" # Default if not set by conf
-    local ack_file_path="$EASYBACKHAUL_APP_DIR/restart_ack_${service_name_local}" # Standardized ACK file path
+    local ack_file_path="/tmp/restart_ack_${service_name_local}" # Standardized ACK file path
 
     log_message "INFO" "[Watcher:$role_local] Starting for service: $service_name_local. Listening on $listen_port_local. Remote: $remote_host_local:$remote_port_local."
 
@@ -220,9 +220,9 @@ manage_tunnel_watcher() {
     local tunnel_config_file="$3"  # Path to the main tunnel's TOML config
 
     # Construct paths for watcher-specific files (convention)
-    local watcher_launcher_script="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_short_suffix}.sh"
-    local watcher_conf_file="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_short_suffix}.conf"
-    local watcher_pid_file="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_short_suffix}.pid"
+    local watcher_launcher_script="/tmp/backhaul-watcher-${tunnel_short_suffix}.sh"
+    local watcher_conf_file="/tmp/backhaul-watcher-${tunnel_short_suffix}.conf"
+    local watcher_pid_file="/tmp/backhaul-watcher-${tunnel_short_suffix}.pid"
     # Watcher log is managed by nohup redirection in _enable_tunnel_watcher
 
     local menu_options=(
@@ -346,8 +346,8 @@ _enable_tunnel_watcher() {
         return 1
     fi
 
-    # Create watcher configuration file (e.g., $EASYBACKHAUL_APP_DIR/backhaul-watcher-suffix.conf)
-    local watcher_conf_file_path="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_suffix}.conf"
+    # Create watcher configuration file (e.g., /tmp/backhaul-watcher-suffix.conf)
+    local watcher_conf_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.conf"
     cat > "$watcher_conf_file_path" <<EOL
 # Watcher configuration for tunnel: $tunnel_suffix
 SERVICE_NAME="$service_name"
@@ -364,9 +364,9 @@ EOL
     chmod 600 "$watcher_conf_file_path"
     log_message "INFO" "Watcher config file created: $watcher_conf_file_path"
 
-    # Create watcher launcher script (e.g., $EASYBACKHAUL_APP_DIR/backhaul-watcher-suffix.sh)
+    # Create watcher launcher script (e.g., /tmp/backhaul-watcher-suffix.sh)
     # This launcher script will source globals.sh, then helpers.sh, then the watcher conf, then call _run_watcher_process
-    local watcher_launcher_script_path="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_suffix}.sh"
+    local watcher_launcher_script_path="/tmp/backhaul-watcher-${tunnel_suffix}.sh"
     cat > "$watcher_launcher_script_path" <<EOLSCRIPT
 #!/bin/bash
 # Launcher for EasyBackhaul Watcher: ${tunnel_suffix}
@@ -411,27 +411,21 @@ EOLSCRIPT
     local watcher_pid=$!
     sleep 1 # Give it a moment to start or fail
 
-    local watcher_pid_file_path="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_suffix}.pid"
+    local watcher_pid_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.pid"
     if ps -p $watcher_pid > /dev/null 2>&1; then
         echo "$watcher_pid" > "$watcher_pid_file_path"
-        if [[ -f "$watcher_pid_file_path" ]] && [[ $(cat "$watcher_pid_file_path") -eq "$watcher_pid" ]]; then
-            chmod 600 "$watcher_pid_file_path"
-            update_toml_value "$config_file" "restart_watcher_enabled" "true" "boolean"
-            update_toml_value "$config_file" "restart_watcher_pid" "$watcher_pid" "numeric"
-            # Store other watcher params in the main tunnel config for visibility/editing later
-            update_toml_value "$config_file" "watcher_role" "$w_role" "string"
-            update_toml_value "$config_file" "watcher_listen_port" "$w_listen_port" "numeric"
-            update_toml_value "$config_file" "watcher_remote_host" "$w_remote_host" "string"
-            update_toml_value "$config_file" "watcher_remote_port" "$w_remote_port" "numeric"
-            update_toml_value "$config_file" "watcher_log_pattern" "$w_log_pattern" "string"
+        chmod 600 "$watcher_pid_file_path"
+        update_toml_value "$config_file" "restart_watcher_enabled" "true" "boolean"
+        update_toml_value "$config_file" "restart_watcher_pid" "$watcher_pid" "numeric"
+        # Store other watcher params in the main tunnel config for visibility/editing later
+        update_toml_value "$config_file" "watcher_role" "$w_role" "string"
+        update_toml_value "$config_file" "watcher_listen_port" "$w_listen_port" "numeric"
+        update_toml_value "$config_file" "watcher_remote_host" "$w_remote_host" "string"
+        update_toml_value "$config_file" "watcher_remote_port" "$w_remote_port" "numeric"
+        update_toml_value "$config_file" "watcher_log_pattern" "$w_log_pattern" "string"
 
-            handle_success "Watcher enabled and started for $service_name (PID: $watcher_pid)."
-            print_info "Watcher log: $watcher_log_file"
-        else
-            handle_error "ERROR" "Watcher process started but failed to create PID file for $service_name. Check permissions in $EASYBACKHAUL_APP_DIR."
-            kill "$watcher_pid" 2>/dev/null
-            rm -f "$watcher_conf_file_path" "$watcher_launcher_script_path"
-        fi
+        handle_success "Watcher enabled and started for $service_name (PID: $watcher_pid)."
+        print_info "Watcher log: $watcher_log_file"
     else
         handle_error "ERROR" "Watcher process failed to start for $service_name. Check $watcher_log_file for details."
         # Cleanup temp files if start failed
@@ -460,15 +454,15 @@ _show_tunnel_watcher_status() {
     local tunnel_suffix="$1"
     print_menu_header "secondary" "Watcher Status" "Tunnel: $tunnel_suffix"
     
-    local watcher_pid_file_path="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_suffix}.pid"
-    local watcher_conf_file_path="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_suffix}.conf"
+    local watcher_pid_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.pid"
+    local watcher_conf_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.conf"
 
     if [[ -f "$watcher_pid_file_path" ]]; then
         local pid_val
         pid_val=$(cat "$watcher_pid_file_path" 2>/dev/null)
         if [[ -n "$pid_val" ]] && ps -p "$pid_val" > /dev/null 2>&1; then
             print_success "Watcher is RUNNING (PID: $pid_val)."
-            echo "  Launcher: $EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_suffix}.sh"
+            echo "  Launcher: /tmp/backhaul-watcher-${tunnel_suffix}.sh"
             echo "  Config: $watcher_conf_file_path"
             echo "  Log: /var/log/easybackhaul/watcher-${tunnel_suffix}.log"
             if [[ -f "$watcher_conf_file_path" ]]; then
@@ -499,12 +493,12 @@ _view_tunnel_watcher_log() {
 
 _edit_tunnel_watcher_config() {
     local tunnel_suffix="$1" main_tunnel_config_file="$2"
-    local watcher_conf_file_path="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_suffix}.conf" # This is the live config for the running watcher
+    local watcher_conf_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.conf" # This is the live config for the running watcher
     
     print_menu_header "secondary" "Edit Watcher Configuration" "Tunnel: $tunnel_suffix"
 
     if [[ ! -f "$watcher_conf_file_path" ]]; then
-        handle_error "ERROR" "Watcher process config file not found: $watcher_conf_file_path. Enable watcher first or check $EASYBACKHAUL_APP_DIR."
+        handle_error "ERROR" "Watcher process config file not found: $watcher_conf_file_path. Enable watcher first or check /tmp."
         press_any_key
         return 1
     fi
@@ -538,7 +532,7 @@ _edit_tunnel_watcher_config() {
 
 _test_tunnel_watcher_comm() {
     local tunnel_suffix="$1"
-    local watcher_conf_file_path="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_suffix}.conf"
+    local watcher_conf_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.conf"
     print_menu_header "secondary" "Test Watcher Communication" "Tunnel: $tunnel_suffix"
 
     if [[ ! -f "$watcher_conf_file_path" ]]; then
@@ -561,7 +555,7 @@ _test_tunnel_watcher_comm() {
     print_info "Testing communication with remote watcher at $REMOTE_HOST:$REMOTE_PORT"
     print_info "Sending a TEST_PING message..."
     local test_message="TEST_PING:$RESTART_SECRET:$ROLE"
-    local ack_file_path="$EASYBACKHAUL_APP_DIR/test_ack_${SERVICE_NAME:-$tunnel_suffix}" # SERVICE_NAME might not be in scope here from conf
+    local ack_file_path="/tmp/test_ack_${SERVICE_NAME:-$tunnel_suffix}" # SERVICE_NAME might not be in scope here from conf
     rm -f "$ack_file_path"
 
     echo "$test_message" | nc "$REMOTE_HOST" "$REMOTE_PORT" -w 5 # Send with timeout

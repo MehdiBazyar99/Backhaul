@@ -214,6 +214,16 @@ handle_success() {
 }
 
 # --- Input Validation Utilities ---
+sanitize_input() {
+    local input="$1"
+    local max_length="${2:-255}" # Increased default max_length
+    
+    # Remove dangerous characters and limit length.
+    # Added @ . : / - _ to allow common characters in paths, IPs, etc.
+    # Still restrictive, consider carefully if this is too aggressive.
+    echo "$input" | sed "s/[^a-zA-Z0-9@.:/\-_ ]/_/g" | head -c "$max_length"
+}
+
 validate_ip() {
     local ip="$1"
     if [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
@@ -239,19 +249,12 @@ validate_port() {
 
 validate_tunnel_name_format() {
     local name="$1"
-    if [[ -z "$name" ]]; then
-        print_error "Tunnel name cannot be empty."
-        return 1
+    if [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] && [[ ${#name} -ge 1 ]] && [[ ${#name} -le 50 ]]; then
+        return 0 # Valid tunnel name
     fi
-    if ! [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-        print_error "Tunnel name contains invalid characters. Only letters, numbers, hyphens, and underscores are allowed."
-        return 1
-    fi
-    if [[ ${#name} -lt 1 ]] || [[ ${#name} -gt 50 ]]; then
-        print_error "Tunnel name must be between 1 and 50 characters."
-        return 1
-    fi
-    return 0 # Valid tunnel name
+    # handle_error "WARNING" "Tunnel name '$name' is invalid. Must be 1-50 chars, letters, numbers, hyphens, underscores."
+    # Caller should handle the error message for more context.
+    return 1
 }
 
 # --- Network Utilities ---
@@ -263,23 +266,64 @@ check_port_availability() {
         return 1
     fi
     
+    # Try ss first (more modern)
     if command -v ss &>/dev/null; then
         if ss -tuln | grep -q ":${port_to_check}[[:space:]]"; then # Added [[:space:]] to avoid matching substrings like 8080 for 80
             return 1 # Port in use
         fi
+    # Fallback to netstat
+    elif command -v netstat &>/dev/null; then
+        if netstat -tuln | grep -q ":${port_to_check}[[:space:]]"; then
+            return 1 # Port in use
+        fi
+    # Fallback to lsof (can be slower)
+    elif command -v lsof &>/dev/null; then
+        if lsof -i ":$port_to_check" -sTCP:LISTEN -sUDP:LISTEN -P -n -- 2>/dev/null | grep -q LISTEN; then # More specific lsof
+            return 1 # Port in use
+        fi
+    else
+        log_message "WARN" "No suitable tool (ss, netstat, lsof) found to check port availability."
+        return 2 # Cannot determine
     fi
     
     return 0 # Port available
 }
 
 check_nc_compatibility() {
-    if ! command -v nc &>/dev/null; then
-        log_message "WARN" "Netcat (nc) is not installed. Restart watcher and some features might not work reliably."
-        print_warning "Netcat (nc) is not installed. Restart watcher might be unreliable."
+    # Test for OpenBSD netcat compatibility with timeout to prevent hanging
+    local nc_test_result=""
+    
+    if command -v timeout &>/dev/null; then
+        nc_test_result=$(timeout 3s bash -c 'echo | nc -l -p 0 -w 1 2>&1' 2>/dev/null || echo "timeout_or_error")
+    else
+        # Fallback without timeout command - riskier
+        ( nc -l -p 0 -w 1 >/dev/null 2>&1 & )
+        local nc_pid=$!
+        sleep 3
+        if kill -0 $nc_pid 2>/dev/null; then
+            kill -9 $nc_pid 2>/dev/null
+            nc_test_result="timeout_or_error"
+        else
+            # This path is tricky; if nc fails very fast due to incompatibility, it might seem like success.
+            # A more robust check here is difficult without 'timeout'.
+            # We'll assume if it exited quickly without error output, it might be okay, or it failed too fast to capture output.
+            # The subsequent grep will try to catch known error patterns.
+            nc_test_result="success_or_immediate_fail"
+        fi
+    fi
+    
+    if [[ "$nc_test_result" == "timeout_or_error" ]] || \
+       echo "$nc_test_result" | grep -qiE 'usage|invalid|unknown option|must be used with|Ncat: Could not resolve hostname'; then
+        log_message "WARN" "Netcat (nc) may not support '-l -p -w 1' or test timed out/errored. Restart watcher and some features might not work reliably."
+        print_warning "Netcat (nc) may not be fully compatible. Restart watcher might be unreliable."
         print_info "Consider installing 'netcat-openbsd' (Debian/Ubuntu) or 'nmap-ncat' (CentOS/RHEL/Fedora)."
+        if command -v ncat &>/dev/null; then
+            print_info "Found 'ncat' (from nmap) - this is usually a good alternative if 'nc' is problematic."
+        fi
         NC_COMPATIBLE="false" # Global hint for other parts of the script
         return 1
     fi
+    log_message "DEBUG" "Netcat compatibility check passed."
     NC_COMPATIBLE="true" # Global hint
     return 0
 }
@@ -333,40 +377,67 @@ check_basic_connectivity() {
 }
 
 # --- System Resource Utilities ---
-_SYSTEM_RESOURCES_SUMMARY=""
-_LAST_SUMMARY_TIMESTAMP=0
-
 get_system_resources_summary() {
-    local current_time
-    current_time=$(date +%s)
-    if (( current_time - _LAST_SUMMARY_TIMESTAMP > 5 )); then
-        local cpu_usage mem_usage disk_usage
-        cpu_usage=$(grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {printf "%.0f", usage}')
-        mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}')
-        disk_usage=$(df -P / | awk 'NR==2 {print $5}')
-        _SYSTEM_RESOURCES_SUMMARY="CPU: ${cpu_usage}% | Memory: ${mem_usage}% | Disk: ${disk_usage}"
-        _LAST_SUMMARY_TIMESTAMP=$current_time
-    fi
-    echo "$_SYSTEM_RESOURCES_SUMMARY"
+    local cpu_usage mem_usage disk_usage
+    cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}' | cut -d. -f1)
+    mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}')
+    disk_usage=$(df -P / | awk 'NR==2 {print $5}' | sed 's/%//') # Added -P for POSIX output
+    
+    echo "CPU: ${cpu_usage}% | Memory: ${mem_usage}% | Disk: ${disk_usage}%"
 }
 
 display_system_resources() {
     print_info "--- System Resources ---"
-    local summary
-    summary=$(get_system_resources_summary)
-    # Parse the summary string
     local cpu_usage mem_usage disk_usage
-    cpu_usage=$(echo "$summary" | awk -F'[ |%]+' '{print $2}')
-    mem_usage=$(echo "$summary" | awk -F'[ |%]+' '{print $4}')
-    disk_usage=$(echo "$summary" | awk -F'[ |%]+' '{print $6}')
-
+    cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}' | cut -d. -f1)
+    mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}')
+    disk_usage=$(df -P / | awk 'NR==2 {print $5}' | sed 's/%//')
+    
     echo "  CPU Usage: ${cpu_usage}%"
     echo "  Memory Usage: ${mem_usage}%"
     echo "  Root Disk Usage: ${disk_usage}%"
-
+    
     if (( cpu_usage > 85 )); then print_warning "  High CPU usage detected!"; fi
     if (( mem_usage > 85 )); then print_warning "  High memory usage detected!"; fi
     if (( disk_usage > 90 )); then print_warning "  High disk usage detected!"; fi
+}
+
+# --- Performance Tracking Utilities ---
+with_performance_tracking() {
+    local operation_description="$1"
+    shift
+    local command_to_run=("$@")
+
+    local start_time end_time duration_secs
+    start_time=$(date +%s%N)
+    
+    "${command_to_run[@]}"
+    local exit_code=$?
+    
+    end_time=$(date +%s%N)
+    local duration_nanos=$((end_time - start_time))
+    duration_secs=$(awk "BEGIN {printf \"%.3f\", $duration_nanos / 1000000000}")
+
+    local success_status="false"
+    if [[ $exit_code -eq 0 ]]; then
+        success_status="true"
+    fi
+
+    if [[ -n "$PERFORMANCE_LOG_FILE" ]]; then
+        local perf_log_entry
+        if [[ "${LOG_FORMAT:-text}" == "json" ]]; then
+            perf_log_entry="{\"timestamp\":\"$(date '+%Y-%m-%d %H:%M:%S')\",\"operation\":\"$operation_description\",\"duration_seconds\":$duration_secs,\"success\":$success_status,\"exit_code\":$exit_code}"
+        else
+            perf_log_entry="[$(date '+%Y-%m-%d %H:%M:%S')] [PERF] Operation: \"$operation_description\", Duration: ${duration_secs}s, Success: $success_status, ExitCode: $exit_code"
+        fi
+        echo "$perf_log_entry" >> "$PERFORMANCE_LOG_FILE"
+    fi
+    
+    if (( $(echo "$duration_secs > 30" | bc -l 2>/dev/null || echo 0) )); then
+        log_message "WARN" "Slow operation: \"$operation_description\" took ${duration_secs}s."
+    fi
+    
+    return $exit_code
 }
 
 # --- File and Configuration Utilities ---
@@ -422,17 +493,13 @@ update_toml_value() {
         return 1
     fi
 
-    if ! command -v yq &>/dev/null; then
-        handle_error "CRITICAL" "yq is not installed. Please install it to update TOML files."
-        return 1
-    fi
-
     if ! acquire_file_lock "$config_file"; then
         handle_error "WARNING" "Could not update $config_file due to lock timeout."
         return 1
     fi
     # Ensure lock is released even on error within this function
     trap 'release_file_lock "$config_file"; trap - EXIT HUP INT QUIT TERM' EXIT HUP INT QUIT TERM
+
 
     if [[ "${CONFIG_BACKUP_ON_CHANGE:-true}" == "true" ]]; then
         local backup_base_dir="${BACKUP_DIR:-/etc/easybackhaul/backup}"
@@ -443,20 +510,48 @@ update_toml_value() {
             log_message "WARN" "Failed to create config backup for $config_file"
     fi
     
-    local yq_expression
-    if [[ "$data_type" == "string" ]]; then
-        yq_expression=".${key} = \"${value}\""
-    else
-        yq_expression=".${key} = ${value}"
-    fi
+    local temp_file
+    temp_file=$(mktemp)
+    
+    local updated=false
+    # Regex to match key, allowing for spaces and comments after value
+    # Handles: key = "value", key="value", key = value, key=value #comment
+    local key_regex="^[[:space:]]*${key}[[:space:]]*=[[:space:]]*"
 
-    if yq -i -y "$yq_expression" "$config_file"; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if echo "$line" | grep -qE "$key_regex"; then
+            local comment_part=""
+            if echo "$line" | grep -q "#"; then
+                comment_part=" #"$(echo "$line" | sed 's/.*#//')
+            fi
+            case "$data_type" in
+                "numeric") echo "${key} = ${value}${comment_part}" >> "$temp_file" ;;
+                "boolean") echo "${key} = ${value}${comment_part}" >> "$temp_file" ;;
+                "string"|*) echo "${key} = \"${value}\"${comment_part}" >> "$temp_file" ;;
+            esac
+            updated=true
+        else
+            echo "$line" >> "$temp_file"
+        fi
+    done < "$config_file"
+
+    if ! $updated; then
+        case "$data_type" in
+            "numeric") echo "${key} = ${value}" >> "$temp_file" ;;
+            "boolean") echo "${key} = ${value}" >> "$temp_file" ;;
+            "string"|*) echo "${key} = \"${value}\"" >> "$temp_file" ;;
+        esac
+    fi
+    
+    if mv "$temp_file" "$config_file"; then
+        set_secure_file_permissions "$config_file" "600"
         log_message "INFO" "Updated key '$key' in $config_file."
         release_file_lock "$config_file"
         trap - EXIT HUP INT QUIT TERM
         return 0
     else
-        log_message "ERROR" "Failed to update key '$key' in $config_file with yq."
+        log_message "ERROR" "Failed to move temp file to $config_file."
+        rm -f "$temp_file" # Clean up temp file on failure
         release_file_lock "$config_file"
         trap - EXIT HUP INT QUIT TERM
         return 1
@@ -896,21 +991,21 @@ cleanup_stale_processes_and_files() {
     fi
 
     local temp_patterns=(
-        "$EASYBACKHAUL_APP_DIR/backhaul-*.tmp"
-        "$EASYBACKHAUL_APP_DIR/backhaul-*.pid"
-        "$EASYBACKHAUL_APP_DIR/backhaul-*.log"
-        "$EASYBACKHAUL_APP_DIR/restart_ack_*"
-        "$EASYBACKHAUL_APP_DIR/backhaul-watcher-*.sh"
-        "$EASYBACKHAUL_APP_DIR/backhaul-watcher-*.conf"
-        "$EASYBACKHAUL_APP_DIR/easybackhaul_rate_limit_*.lock"
+        "/tmp/backhaul-*.tmp"
+        "/tmp/backhaul-*.pid"
+        "/tmp/backhaul-*.log"
+        "/tmp/restart_ack_*"
+        "/tmp/backhaul-watcher-*.sh"
+        "/tmp/backhaul-watcher-*.conf"
+        "/tmp/easybackhaul_rate_limit_*.lock"
     )
     log_message "DEBUG" "Checking for stale temporary files..."
     for pattern in "${temp_patterns[@]}"; do
         # Delete files older than 1 day matching the pattern
-        find "$EASYBACKHAUL_APP_DIR" -name "$(basename "$pattern")" -type f -mtime +1 -print -delete 2>/dev/null && ((cleaned_items++))
+        find /tmp -name "$(basename "$pattern")" -type f -mtime +1 -print -delete 2>/dev/null && ((cleaned_items++))
 
         if [[ "$pattern" == *".pid" ]]; then
-            find "$EASYBACKHAUL_APP_DIR" -name "$(basename "$pattern")" -type f -print0 | while IFS= read -r -d $'\0' pid_file; do
+            find /tmp -name "$(basename "$pattern")" -type f -print0 | while IFS= read -r -d $'\0' pid_file; do
                 local pid_val
                 pid_val=$(cat "$pid_file" 2>/dev/null)
                 if [[ -n "$pid_val" ]] && ! ps -p "$pid_val" > /dev/null 2>&1; then
@@ -937,12 +1032,12 @@ cleanup_watcher_files() {
 
     log_message "INFO" "Cleaning up watcher files for tunnel: $tunnel_suffix"
     
-    local watcher_script_path="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_suffix}.sh"
-    local watcher_pid_file_path="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_suffix}.pid"
-    local watcher_log_file_path="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_suffix}.log"
-    local watcher_conf_file_path="$EASYBACKHAUL_APP_DIR/backhaul-watcher-${tunnel_suffix}.conf"
+    local watcher_script_path="/tmp/backhaul-watcher-${tunnel_suffix}.sh"
+    local watcher_pid_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.pid"
+    local watcher_log_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.log"
+    local watcher_conf_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.conf"
     # Assuming service name follows a pattern like backhaul-<suffix>.service
-    local restart_ack_file_path="$EASYBACKHAUL_APP_DIR/restart_ack_backhaul-${tunnel_suffix}.service"
+    local restart_ack_file_path="/tmp/restart_ack_backhaul-${tunnel_suffix}.service"
 
     if [[ -f "$watcher_pid_file_path" ]]; then
         local watcher_pid_val
@@ -951,13 +1046,8 @@ cleanup_watcher_files() {
             log_message "INFO" "Stopping watcher process PID $watcher_pid_val for tunnel $tunnel_suffix."
             kill "$watcher_pid_val" 2>/dev/null
             sleep 0.5
-            if ps -p "$watcher_pid_val" > /dev/null 2>&1; then
-                kill -9 "$watcher_pid_val" 2>/dev/null
-            fi
-        else
-            log_message "INFO" "Stale PID file found for tunnel $tunnel_suffix. Removing."
+            kill -9 "$watcher_pid_val" 2>/dev/null
         fi
-        rm -f "$watcher_pid_file_path"
     fi
     
     rm -f "$watcher_script_path" "$watcher_pid_file_path" "$watcher_log_file_path" "$watcher_conf_file_path" "$restart_ack_file_path"
@@ -974,7 +1064,7 @@ run_with_spinner() {
     shift
     local command_to_run=("$@")
     local spin_chars="|/-\\"
-    local log_file="$EASYBACKHAUL_APP_DIR/spinner_$(date +%s%N).log" # Unique log file for each spinner run
+    local log_file="/tmp/spinner_$(date +%s%N).log" # Unique log file for each spinner run
     
     echo -n "$description "
     # Redirect stdout and stderr of the command to the log file
@@ -1040,12 +1130,7 @@ generate_random_secret() {
     fi
 }
 
-_GENERATED_CERT_PATH=""
-_GENERATED_KEY_PATH=""
-
 generate_self_signed_tls_cert() {
-    _GENERATED_CERT_PATH=""
-    _GENERATED_KEY_PATH=""
     local cert_common_name="${1:-${SERVER_IP:-localhost}}"
     local cert_dir="${CERT_DIR:-/etc/easybackhaul/certs}"
     ensure_dir "$cert_dir" "700"
@@ -1095,10 +1180,6 @@ generate_self_signed_tls_cert() {
     echo "  Private Key: $key_path"
     echo "  Certificate: $cert_path"
     print_info "These paths can be used in your tunnel configurations for WSS/WSSMUX."
-
-    _GENERATED_CERT_PATH="$cert_path"
-    _GENERATED_KEY_PATH="$key_path"
-
     press_any_key
     return 0
 }
@@ -1277,6 +1358,75 @@ retry_operation() {
     return 1 # Failure
 }
 
+# Attempt to recover from common error scenarios
+attempt_generic_error_recovery() {
+    local failed_operation_desc="$1"
+    local error_details="$2" # e.g., service name, file path
+    local recovery_attempt_count="${3:-0}"
+
+    log_message "INFO" "Attempting recovery for '$failed_operation_desc' (Details: $error_details, Attempt: $((recovery_attempt_count + 1)))"
+
+    # Example recovery strategies (can be expanded)
+    case "$failed_operation_desc" in
+        "start_service")
+            # Try cleaning up potential conflicting state then restart
+            if [[ -n "$error_details" ]]; then # error_details is service name
+                cleanup_watcher_files "$error_details" # Clean related watcher state
+                log_message "INFO" "Ensuring service $error_details is stopped before retry..."
+                systemctl stop "$error_details" 2>/dev/null
+                sleep 2
+                log_message "INFO" "Retrying start for service $error_details..."
+                if systemctl start "$error_details"; then
+                    log_message "INFO" "Service $error_details recovered and started."
+                    return 0
+                fi
+            fi
+            ;;
+        "download_file")
+            # Try checking connectivity, or suggest alternative if context allows
+            log_message "INFO" "Checking basic connectivity before retrying download..."
+            if check_basic_connectivity; then
+                log_message "INFO" "Connectivity seems OK. The issue might be with the specific download source for '$error_details'."
+                # Specific retry for download might be handled by the download function itself
+            else
+                log_message "ERROR" "Basic connectivity check failed. Cannot retry download now."
+            fi
+            ;;
+        "update_config")
+            # Try restoring from the most recent backup if available
+            if [[ -n "$error_details" ]]; then # error_details is tunnel name or config path
+                local config_to_restore="$CONFIG_DIR/config-${error_details}.toml" # Assuming tunnel name
+                if [[ ! -f "$config_to_restore" ]]; then config_to_restore="$error_details"; fi # Assuming full path
+
+                local backup_file_path
+                backup_file_path=$(find "$BACKUP_DIR" -name "$(basename "$config_to_restore").*.bak" -type f | sort -r | head -n 1)
+
+                if [[ -f "$backup_file_path" ]]; then
+                    log_message "INFO" "Attempting to restore '$config_to_restore' from backup: $backup_file_path"
+                    if cp "$backup_file_path" "$config_to_restore"; then
+                        set_secure_file_permissions "$config_to_restore"
+                        log_message "INFO" "Config '$config_to_restore' restored from backup. Service may need restart."
+                        return 0
+                    else
+                        log_message "ERROR" "Failed to restore '$config_to_restore' from backup '$backup_file_path'."
+                    fi
+                else
+                    log_message "WARN" "No backup found to restore for '$config_to_restore'."
+                fi
+            fi
+            ;;
+        *)
+            log_message "WARN" "No specific recovery strategy for '$failed_operation_desc'. Generic wait and retry might be applicable elsewhere."
+            # Generic recovery: just wait a bit, usually handled by retry_operation
+            sleep $((recovery_attempt_count + 2)) # Wait a bit longer for generic cases
+            return 0 # Signify that a generic attempt (like waiting) was made
+            ;;
+    esac
+    
+    log_message "ERROR" "Recovery attempt for '$failed_operation_desc' failed."
+    return 1
+}
+
 # --- Prerequisite Checks ---
 # (Moved from prereqs.sh)
 # Checks for essential command-line tool dependencies and attempts to install them.
@@ -1289,7 +1439,6 @@ check_dependencies() {
         ["wget"]="wget"
         ["tar"]="tar"
         ["jq"]="jq"
-        ["yq"]="yq"
         ["nc"]="netcat-openbsd" # Preferred nc, nmap-ncat is fallback
         ["ss"]="iproute2"
         ["systemctl"]="systemd" # Though systemctl itself isn't a package, 'systemd' is.

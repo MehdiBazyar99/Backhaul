@@ -14,13 +14,17 @@ _initial_installation_wizard() {
     # download_backhaul_binary_workflow will handle its own menu and logic.
     # It returns 0 on success (binary installed and verified), 1 on failure/cancellation.
     if download_backhaul_binary_workflow; then
+        # verify_binary_installation is called within install_downloaded_binary,
+        # which is called by the helpers in download_backhaul_binary_workflow.
+        # So, if download_backhaul_binary_workflow returns 0, it implies success.
         handle_success "Backhaul binary installed and verified successfully!"
         press_any_key
         return 0 # Successful installation
     else
-        print_warning "Binary installation was skipped or failed. You can install the binary later from the main menu."
+        handle_error "ERROR" "Backhaul binary installation was cancelled or failed."
+        print_warning "EasyBackhaul may not function correctly without the binary."
         press_any_key
-        return 0 # Allow access to main menu even if binary is missing
+        return 1 # Indicate failure/cancellation of initial setup step
     fi
 }
 
@@ -60,7 +64,7 @@ system_health_monitor_menu() {
         print_info "--- Recent Performance Log ---"
         if [[ -n "$PERFORMANCE_LOG_FILE" && -f "$PERFORMANCE_LOG_FILE" ]]; then tail -n 5 "$PERFORMANCE_LOG_FILE" | sed 's/^/    /' || print_warning "  Could not read performance log."; else print_warning "  Performance log file not configured or not found."; fi; echo
         print_info "--- Active Watcher Processes (Summary) ---"
-        if pgrep -f "${EASYBACKHAUL_APP_DIR:-/var/lib/easybackhaul}/backhaul-watcher-.*\.sh" >/dev/null; then pgrep -af "${EASYBACKHAUL_APP_DIR:-/var/lib/easybackhaul}/backhaul-watcher-.*\.sh" | sed 's/^/    /'; else print_info "  No active watcher processes found."; fi
+        if pgrep -f "${EASYBACKHAUL_TMP_DIR:-/tmp}/backhaul-watcher-.*\.sh" >/dev/null; then pgrep -af "${EASYBACKHAUL_TMP_DIR:-/tmp}/backhaul-watcher-.*\.sh" | sed 's/^/    /'; else print_info "  No active watcher processes found."; fi
 
         menu_loop "Select action" health_menu_options "_health_monitor_menu_help"
         local menu_rc=$?
@@ -112,54 +116,121 @@ system_health_monitor_menu() {
 _perform_full_uninstall() {
     print_menu_header "primary" "Uninstall EasyBackhaul" "Irreversible Action"
     print_warning "WARNING: This will PERMANENTLY REMOVE EasyBackhaul and ALL related data!"
-
-    local paths_to_delete=()
-    paths_to_delete+=("$BIN_PATH")
-    paths_to_delete+=("$(dirname "$CONFIG_DIR")")
-    paths_to_delete+=("$BACKUP_DIR")
-    paths_to_delete+=("$LOG_DIR")
-    paths_to_delete+=("/etc/logrotate.d/easybackhaul")
-
     echo "This includes:"
     echo "  - The Backhaul binary ($BIN_PATH)"
-    echo "  - All tunnel configurations (from $CONFIG_DIR)"
+    echo "  - All tunnel configurations (from $CONFIG_DIR, likely /etc/easybackhaul/configs)"
     echo "  - The main configuration directory structure (e.g., /etc/easybackhaul)"
-    echo "  - All systemd services (e.g., backhaul-*.service)"
-    echo "  - All UFW rules managed by EasyBackhaul"
-    echo "  - All EasyBackhaul-managed cron jobs"
-    echo "  - Temporary files and watcher scripts"
+    echo "  - All systemd services (e.g., backhaul-*.service in $SERVICE_DIR)"
+    echo "  - All UFW rules managed by EasyBackhaul (if UFW is used)"
+    echo "  - All EasyBackhaul-managed cron jobs."
+    echo "  - Temporary files and watcher scripts (typically in ${EASYBACKHAUL_TMP_DIR:-/tmp})"
     echo "  - Backup files ($BACKUP_DIR)"
-    echo "  - Log files and directory ($LOG_DIR)"
+    echo "  - Log files and directory (from $LOG_DIR, likely /var/log/easybackhaul) - you will be asked about this."
     echo "  - Logrotate configuration (/etc/logrotate.d/easybackhaul)"
     
     if ! prompt_yes_no "Are you absolutely sure you want to proceed with uninstallation?" "n"; then
         print_info "Uninstallation cancelled."; press_any_key; return 1; fi
     
-    print_warning "The following directories and their contents will be deleted:"
-    for path in "${paths_to_delete[@]}"; do
-        if [[ -e "$path" ]]; then
-            echo "  - $path"
-        fi
-    done
+    local confirm_uninstall_text="UNINSTALL EASYBACKHAUL NOW"
+    local user_confirmation
+    read -r -p "To confirm, type '$confirm_uninstall_text': " user_confirmation
+    if [[ "$user_confirmation" != "$confirm_uninstall_text" ]]; then
+        handle_error "ERROR" "Confirmation text did not match. Uninstallation aborted."; press_any_key; return 1; fi
     
-    if ! prompt_yes_no "Confirm deletion of the paths listed above?" "n"; then
-        print_info "Uninstallation cancelled."; press_any_key; return 1; fi
-
     log_message "WARN" "Starting full uninstallation of EasyBackhaul..."
     
-    # ... (service stopping, ufw, cron removal logic remains the same) ...
+    print_info "Stopping and disabling all Backhaul services..."
+    mapfile -t service_files < <(systemctl list-unit-files --type=service "backhaul-bh-*.service" "backhaul-watcher-*.service" --no-legend --full --all | awk '{print $1}')
+    if [[ ${#service_files[@]} -gt 0 ]]; then
+        for service_name in "${service_files[@]}"; do
+            run_with_spinner "Stopping $service_name..." systemctl stop "$service_name"
+            run_with_spinner "Disabling $service_name..." systemctl disable "$service_name"
+            local suffix_to_clean
+            if [[ "$service_name" == backhaul-bh-*.service ]]; then
+                suffix_to_clean=${service_name#backhaul-}
+                suffix_to_clean=${suffix_to_clean%.service}
+                cleanup_watcher_files "$suffix_to_clean" "true"
+            elif [[ "$service_name" == backhaul-watcher-*.service ]]; then
+                suffix_to_clean=${service_name#backhaul-watcher-}
+                suffix_to_clean=${suffix_to_clean%.service}
+                cleanup_watcher_files "$suffix_to_clean" "true"
+            fi
+        done
+    else
+        print_info "No 'backhaul-bh-*.service' or 'backhaul-watcher-*.service' services found."
+    fi
+    
+    log_message "INFO" "Performing general watcher file cleanup from ${EASYBACKHAUL_TMP_DIR:-/tmp}..."
+    find "${EASYBACKHAUL_TMP_DIR:-/tmp}" -maxdepth 1 \( -name 'backhaul-watcher-*' -o -name 'restart_ack_*' \) -print -exec rm -rf {} \; &>/dev/null
+    if [[ -n "$EASYBACKHAUL_TMP_DIR" && "$EASYBACKHAUL_TMP_DIR" != "/tmp" && "$EASYBACKHAUL_TMP_DIR" != "/tmp/" ]]; then # Check if it's a different dir
+        find "/tmp" -maxdepth 1 \( -name 'backhaul-watcher-*' -o -name 'restart_ack_*' \) -print -exec rm -rf {} \; &>/dev/null
+    fi
+
+    print_info "Removing systemd service files..."
+    if [[ -d "$SERVICE_DIR" ]]; then
+        secure_delete "${SERVICE_DIR}/backhaul-bh-*.service"
+        secure_delete "${SERVICE_DIR}/backhaul-watcher-*.service"
+        secure_delete "${SERVICE_DIR}/backhaul-*.service"
+    fi
+    run_with_spinner "Reloading systemd daemon..." systemctl daemon-reload
+    
+    print_info "Removing UFW rules..."
+    if type delete_all_easybackhaul_ufw_rules &>/dev/null; then
+        delete_all_easybackhaul_ufw_rules
+    else
+        log_message "WARN" "'delete_all_easybackhaul_ufw_rules' not found. Attempting pattern based deletion."
+        mapfile -t ufw_rules_to_delete < <(ufw status numbered 2>/dev/null | grep -iE "EasyBackhaul:|Backhaul-" | awk -F'[][]' '{print $2}' | sort -nr)
+        if [[ ${#ufw_rules_to_delete[@]} -gt 0 ]]; then
+            print_info "Found ${#ufw_rules_to_delete[@]} UFW rules to delete..."
+            for rule_num in "${ufw_rules_to_delete[@]}"; do
+                run_with_spinner "Deleting UFW rule #$rule_num..." sh -c "echo y | ufw delete $rule_num"
+            done
+            run_with_spinner "Reloading UFW..." ufw reload
+        else
+            print_info "No specific EasyBackhaul UFW rules found by common patterns."
+        fi
+    fi
+    
+    print_info "Removing EasyBackhaul cron jobs..."
+    if command -v crontab &>/dev/null && [[ -n "$CRON_COMMENT_TAG" ]]; then
+        (crontab -l 2>/dev/null | grep -vF "# $CRON_COMMENT_TAG") | crontab -
+        log_message "INFO" "Removed cron jobs tagged with '$CRON_COMMENT_TAG'."
+    else
+        log_message "WARN" "Cannot remove cron jobs (crontab not found or CRON_COMMENT_TAG empty)."
+    fi
     
     print_info "Removing files and directories..."
-    for path in "${paths_to_delete[@]}"; do
-        if [[ -z "$path" || "$path" == "/" || "$path" == "/etc" || "$path" == "/usr" || "$path" == "/var" ]]; then
-            handle_error "CRITICAL" "Skipping deletion of critical path: $path"
-            continue
+    if [[ -n "$BIN_PATH" && -f "$BIN_PATH" ]]; then secure_delete "$BIN_PATH"; fi
+    # CONFIG_DIR is now /etc/easybackhaul/configs. Remove its parent /etc/easybackhaul as well.
+    if [[ -n "$CONFIG_DIR" && -d "$(dirname "$CONFIG_DIR")" ]]; then # Check parent dir
+        secure_delete "$(dirname "$CONFIG_DIR")" # This removes /etc/easybackhaul (and configs within)
+        log_message "INFO" "Removed main config directory structure: $(dirname "$CONFIG_DIR")"
+    elif [[ -n "$CONFIG_DIR" && -d "$CONFIG_DIR" ]]; then # Fallback if parent wasn't as expected
+         secure_delete "$CONFIG_DIR"
+         log_message "INFO" "Removed config directory: $CONFIG_DIR"
+    fi
+
+    if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then secure_delete "$BACKUP_DIR"; fi
+    if [[ -n "$EASYBACKHAUL_TMP_DIR" && -d "$EASYBACKHAUL_TMP_DIR" && "$EASYBACKHAUL_TMP_DIR" != "/tmp" && "$EASYBACKHAUL_TMP_DIR" != "/tmp/" ]]; then
+        secure_delete "$EASYBACKHAUL_TMP_DIR"
+    fi
+
+    # Remove logrotate configuration
+    local logrotate_conf_file="/etc/logrotate.d/easybackhaul"
+    if [[ -f "$logrotate_conf_file" ]]; then
+        secure_delete "$logrotate_conf_file"
+        log_message "INFO" "Removed logrotate configuration file: $logrotate_conf_file"
+    fi
+
+    # LOG_DIR is now /var/log/easybackhaul
+    if [[ -n "$LOG_DIR" && -d "$LOG_DIR" ]]; then
+        if prompt_yes_no "Also delete the main log directory ($LOG_DIR) and all its contents?" "n"; then
+            secure_delete "$LOG_DIR"
+            handle_success "Log directory $LOG_DIR deleted."
+        else
+            print_info "Log directory $LOG_DIR preserved."
         fi
-        if [[ -e "$path" ]]; then
-            secure_delete "$path"
-            log_message "INFO" "Removed: $path"
-        fi
-    done
+    fi
     
     handle_success "EasyBackhaul uninstallation completed."
     print_info "Some manual cleanup of system logs (journalctl) might be desired if services were problematic."
@@ -189,9 +260,6 @@ main_menu_entry() {
     else binary_status_msg+="${COLOR_RED}NOT INSTALLED${COLOR_RESET} (Expected: $BIN_PATH)"; fi
     
     print_menu_header "primary" "EasyBackhaul Management Menu" "$binary_status_msg"
-    if [[ ! -f "$BIN_PATH" ]]; then
-        print_warning "The Backhaul binary is missing. Most tunnel operations will not work until it is installed. Use the main menu to install or configure the binary."
-    fi
     
     local main_menu_options=(
         "1. Configure a New Tunnel"
@@ -293,10 +361,6 @@ main_menu_entry() {
 }
 
 main_script_entry_point() {
-    ensure_dir "$EASYBACKHAUL_APP_DIR"
-    ensure_dir "$EASYBACKHAUL_TMP_DIR"
-    ensure_dir "$BACKUP_DIR"
-    ensure_dir "$(dirname "$BIN_PATH")"
 
     if type init_logging &>/dev/null; then
         init_logging
@@ -308,15 +372,6 @@ main_script_entry_point() {
     trap '_global_ctrl_c_handler' INT
 
     log_message "INFO" "EasyBackhaul script started."
-    log_message "DEBUG" "BIN_PATH is set to: $BIN_PATH"
-    if [[ ! -f "$BIN_PATH" ]]; then
-        log_message "WARN" "Backhaul binary not found at $BIN_PATH. Listing contents of $(dirname "$BIN_PATH"):"
-        ls -l "$(dirname "$BIN_PATH")" 2>&1 | while read -r line; do log_message "DEBUG" "$line"; done
-    elif [[ ! -x "$BIN_PATH" ]]; then
-        log_message "WARN" "Backhaul binary at $BIN_PATH is not executable. Attempting to fix permissions."
-    else
-        log_message "INFO" "Backhaul binary found and appears executable at $BIN_PATH."
-    fi
 
     : "${CONFIG_DIR:=$EASYBACKHAUL_APP_DIR/config}"
     : "${BACKUP_DIR:=$EASYBACKHAUL_APP_DIR/backup}"
@@ -354,20 +409,16 @@ main_script_entry_point() {
 
     if type get_server_info &>/dev/null; then get_server_info; else log_message "WARN" "get_server_info not found."; fi
 
-    if [[ ! -f "$BIN_PATH" ]]; then
-        log_message "WARN" "Backhaul binary not found at $BIN_PATH. Starting installation wizard."
-        _initial_installation_wizard
-        # After installation attempt, log again
-        if [[ ! -f "$BIN_PATH" ]]; then
-            log_message "ERROR" "Backhaul binary STILL missing at $BIN_PATH after installation attempt. Directory contents:" 
-            ls -l "$(dirname "$BIN_PATH")" 2>&1 | while read -r line; do log_message "DEBUG" "$line"; done
-        else
-            log_message "INFO" "Backhaul binary present at $BIN_PATH after installation attempt."
+    if [[ ! -f "$BIN_PATH" ]] || ! verify_binary_installation "quiet"; then
+        log_message "WARN" "Backhaul binary not found or failed verification at $BIN_PATH. Starting installation wizard."
+        if ! _initial_installation_wizard; then
+            if [[ ! -f "$BIN_PATH" ]] || ! verify_binary_installation "quiet"; then
+                 handle_critical_error "Backhaul binary installation was not completed or is invalid. Exiting."
+            else
+                 log_message "INFO" "Binary found and verified after wizard exit. Proceeding."
+            fi
         fi
     fi
-
-    # Remove hard block: allow main menu even if binary is missing
-    # Only show warning in main menu if binary is missing
 
     CURRENT_MENU_FUNCTION="main_menu_entry"
     MENU_STACK=("main_menu_entry")
@@ -377,22 +428,15 @@ main_script_entry_point() {
     while [[ -n "$CURRENT_MENU_FUNCTION" ]]; do
         log_message "DEBUG" "Main loop - Current Menu: $CURRENT_MENU_FUNCTION, Stack: [${MENU_STACK[*]}]"
 
-        case "$CURRENT_MENU_FUNCTION" in
-            "main_menu_entry") main_menu_entry ;;
-            "configure_tunnel") configure_tunnel ;;
-            "manage_tunnels_menu") manage_tunnels_menu ;;
-            "system_health_monitor_menu") system_health_monitor_menu ;;
-            "manage_ufw_main_menu") manage_ufw_main_menu ;;
-            "generate_self_signed_tls_cert") generate_self_signed_tls_cert ;;
-            "run_network_diagnostics_menu") run_network_diagnostics_menu ;;
-            "view_system_log"*) view_system_log "${CURRENT_MENU_FUNCTION#view_system_log }" ;;
-            "manage_specific_tunnel_menu"*) manage_specific_tunnel_menu "${CURRENT_MENU_FUNCTION#manage_specific_tunnel_menu }" ;;
-            "manage_tunnel_watcher"*) manage_tunnel_watcher "${CURRENT_MENU_FUNCTION#manage_tunnel_watcher }" ;;
-            "_view_tunnel_watcher_log"*) _view_tunnel_watcher_log "${CURRENT_MENU_FUNCTION#_view_tunnel_watcher_log }" ;;
-            "_manage_watcher_shared_secret"*) _manage_watcher_shared_secret "${CURRENT_MENU_FUNCTION#_manage_watcher_shared_secret }" ;;
-            "_mng_change_log_level"*) _mng_change_log_level "${CURRENT_MENU_FUNCTION#_mng_change_log_level }" ;;
-            *) handle_critical_error "Unknown menu function: $CURRENT_MENU_FUNCTION" ;;
-        esac
+        local func_name_to_check
+        # Extract the first word as the function name for 'type' command
+        read -r func_name_to_check _ <<< "$CURRENT_MENU_FUNCTION"
+
+        if type "$func_name_to_check" &>/dev/null; then
+            eval "$CURRENT_MENU_FUNCTION" # Use eval to correctly parse function and its arguments
+        else
+            handle_critical_error "Menu function '$func_name_to_check' (from command string '$CURRENT_MENU_FUNCTION') not found. Stack: [${MENU_STACK[*]}]."
+        fi
 
         if [[ ${#MENU_STACK[@]} -eq 0 ]]; then
             log_message "DEBUG" "Menu stack is empty. Exiting main loop."

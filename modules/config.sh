@@ -300,7 +300,8 @@ _prompt_basic_config_params() {
     local -n listen_port_ref=$2 # Output for server mode
     local -n remote_ip_ref=$3   # Output for client mode
     local -n remote_port_ref=$4 # Output for client mode
-    local -n auth_token_ref=$5  # Output: auth token
+    local -n local_fwd_port_ref=$5 # Output for client mode (local port to forward from) - NO LONGER USED for prompting/saving
+    local -n auth_token_ref=$6  # Output: auth token
 
     print_menu_header "secondary" "Basic Configuration" "Step 3: Mandatory Settings"
 
@@ -436,10 +437,16 @@ _prompt_tls_config() {
     case "$menu_rc" in
         0) # Numeric choice
             if (( user_choice == generate_new_opt_num )); then
-                if generate_self_signed_tls_cert; then
-                    if [[ -n "$_GENERATED_CERT_PATH" && -n "$_GENERATED_KEY_PATH" ]]; then
-                        tls_cert_path_ref="$_GENERATED_CERT_PATH"
-                        tls_key_path_ref="$_GENERATED_KEY_PATH"
+                if generate_self_signed_tls_cert; then # This function handles its own output and sets paths
+                    # It should output the paths it created, we need to capture them.
+                    # For now, assume generate_self_signed_tls_cert updates some global vars or returns paths.
+                    # This part needs refinement: generate_self_signed_tls_cert needs to return the paths.
+                    # Let's assume it writes to last_cert.path and last_key.path files for simplicity here.
+                    # This is a placeholder for better path communication.
+                    if [[ -f "$cert_dir_global/last_generated_cert.path" && -f "$cert_dir_global/last_generated_key.path" ]]; then
+                        tls_cert_path_ref=$(cat "$cert_dir_global/last_generated_cert.path")
+                        tls_key_path_ref=$(cat "$cert_dir_global/last_generated_key.path")
+                        rm -f "$cert_dir_global/last_generated_cert.path" "$cert_dir_global/last_generated_key.path"
                         print_success "Using newly generated cert: $tls_cert_path_ref and key: $tls_key_path_ref"
                     else
                         handle_error "ERROR" "Failed to retrieve paths of newly generated certificate/key. Please enter manually."
@@ -544,99 +551,153 @@ _configure_server_forwarding_rules() {
     out_any_udp_rules_ref="false" # Initialize UDP flag
 
     print_menu_header "secondary" "Server Port Forwarding" "Step 4: Configure Forwarding Rules"
+    echo "Enter server ports to forward traffic from."
+    echo "Examples:"
+    echo "  - Single port (TCP): 80 (forwards server's public port 80 to client's port 80)"
+    echo "  - Single port (UDP): 53/udp (forwards server's 53/udp to client's 53/udp; requires 'accept_udp=true')"
+    echo "  - Port to specific client port: 8080:80 (forwards server's 8080 to client's port 80)"
+    echo "  - Port range: 7000-7010 (forwards server range 7000-7010 to client's range 7000-7010)"
+    echo "  - Port range to single client port: 7000-7010:6000 (forwards server range 7000-7010 to client's single port 6000)"
+    echo "  - To specific client IP & port: 2222=192.168.0.10:22 (forwards server's 2222 to 192.168.0.10:22 on client side)"
+    echo "Separate multiple rules with a comma. Examples:"
+    echo "  Ex 1: 80, 443:8443, 7000-7010, 53/udp"
+    echo "  Ex 2: 2222=10.0.0.5:22, 8000-8010:9000, 999/udp"
+    echo "Leave blank for no forwarding."
+    echo
 
-    while true; do
-        echo "You can add multiple port forwarding rules. Leave the input blank to finish."
-        echo "Examples of rules:"
-        echo "  - 80                        (Forward TCP port 80 to the client's port 80)"
-        echo "  - 53/udp                    (Forward UDP port 53 to the client's port 53)"
-        echo "  - 8080:80                   (Forward TCP port 8080 to the client's port 80)"
-        echo "  - 7000-7010                 (Forward TCP port range 7000-7010 to the client)"
-        echo "  - 2222=192.168.0.10:22      (Forward TCP port 2222 to a specific IP and port on the client's network)"
-        echo
+    local user_input_str
+    read -r -p "Enter forwarding rules: " user_input_str
 
-        local user_input_str
-        read -r -p "Enter a single forwarding rule (or press Enter to continue): " user_input_str
+    if [[ -z "$user_input_str" ]]; then
+        print_info "No port forwarding rules entered."
+        return 0 # Success, but no rules
+    fi
 
-        if [[ -z "$user_input_str" ]]; then
-            break
-        fi
+    local IFS=',' # Set Internal Field Separator to comma for splitting
+    read -ra raw_rules <<< "$user_input_str" # Split into array
+    local IFS=$' \t\n' # Reset IFS
 
+    local rule_valid
+    for rule_str_raw in "${raw_rules[@]}"; do
         local rule_str
-        rule_str=$(echo "$user_input_str" | xargs) # Trim whitespace
+        rule_str=$(echo "$rule_str_raw" | xargs) # Trim whitespace
 
+        if [[ -z "$rule_str" ]]; then continue; fi # Skip empty rules if user entered ",,"
+
+        local listen_spec listen_type listen_port1 listen_port2 listen_protocol_suffix
+        local dest_ip dest_port
         local toml_rule=""
-        local rule_valid=false
+        rule_valid=false
 
+        # Try to parse listen_spec=dest_ip:dest_port format
         if [[ "$rule_str" =~ ^([^=]+)=([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}):([0-9]+(/udp)?)$ ]]; then
             listen_spec="${BASH_REMATCH[1]}"
             dest_ip="${BASH_REMATCH[2]}"
-            dest_port_full="${BASH_REMATCH[3]}"
-            dest_port_no_udp="${dest_port_full%/udp}"
+            local dest_port_full="${BASH_REMATCH[3]}" # e.g., "22" or "22/udp"
 
-            if _validate_port_or_range_with_udp "$listen_spec" && validate_ip "$dest_ip" && validate_port "$dest_port_no_udp"; then
-                rule_valid=true
-                toml_rule=$(_get_toml_rule_from_parsed_parts "$dest_ip" "$dest_port_no_udp")
+            local dest_port_no_udp="$dest_port_full"
+            local dest_protocol_suffix=""
+            if [[ "$dest_port_full" == */udp ]]; then
+                dest_protocol_suffix="/udp"
+                dest_port_no_udp="${dest_port_full%/udp}"
             fi
+
+            if _validate_port_or_range_with_udp "$listen_spec" && \
+               validate_ip "$dest_ip" && \
+               validate_port "$dest_port_no_udp"; then
+
+                listen_type="${_VALIDATED_PORT_RANGE_PARTS[0]}"
+                listen_port1="${_VALIDATED_PORT_RANGE_PARTS[1]}"
+                listen_port2="${_VALIDATED_PORT_RANGE_PARTS[2]}"
+                listen_protocol_suffix="${_VALIDATED_PORT_RANGE_PARTS[3]}"
+
+                if [[ "$listen_protocol_suffix" == "/udp" || "$dest_protocol_suffix" == "/udp" ]]; then
+                    out_any_udp_rules_ref="true"
+                    # Backhaul's `ports` array does not seem to use /udp. `accept_udp=true` handles it.
+                fi
+
+                local toml_listen_part="$listen_port1"
+                if [[ "$listen_type" == "range" ]]; then toml_listen_part="${listen_port1}-${listen_port2}"; fi
+
+                toml_rule="${toml_listen_part}=${dest_ip}:${dest_port_no_udp}" # UDP suffix not part of TOML rule string
+                rule_valid=true
+            fi
+
+        # Try to parse listen_spec:dest_port format
         elif [[ "$rule_str" =~ ^([^:]+):([0-9]+(/udp)?)$ ]]; then
             listen_spec="${BASH_REMATCH[1]}"
-            dest_port_full="${BASH_REMATCH[2]}"
-            dest_port_no_udp="${dest_port_full%/udp}"
+            local dest_port_full="${BASH_REMATCH[2]}"
 
-            if _validate_port_or_range_with_udp "$listen_spec" && validate_port "$dest_port_no_udp"; then
-                rule_valid=true
-                toml_rule=$(_get_toml_rule_from_parsed_parts "" "$dest_port_no_udp")
+            local dest_port_no_udp="$dest_port_full"
+            local dest_protocol_suffix=""
+            if [[ "$dest_port_full" == */udp ]]; then
+                dest_protocol_suffix="/udp"
+                dest_port_no_udp="${dest_port_full%/udp}"
             fi
+
+            if _validate_port_or_range_with_udp "$listen_spec" && \
+               validate_port "$dest_port_no_udp"; then
+
+                listen_type="${_VALIDATED_PORT_RANGE_PARTS[0]}"
+                listen_port1="${_VALIDATED_PORT_RANGE_PARTS[1]}"
+                listen_port2="${_VALIDATED_PORT_RANGE_PARTS[2]}"
+                listen_protocol_suffix="${_VALIDATED_PORT_RANGE_PARTS[3]}"
+
+                if [[ "$listen_protocol_suffix" == "/udp" || "$dest_protocol_suffix" == "/udp" ]]; then
+                    out_any_udp_rules_ref="true"
+                fi
+
+                local toml_listen_part="$listen_port1"
+                if [[ "$listen_type" == "range" ]]; then toml_listen_part="${listen_port1}-${listen_port2}"; fi
+
+                toml_rule="${toml_listen_part}:${dest_port_no_udp}" # UDP suffix not part of TOML rule string
+                rule_valid=true
+            fi
+
+        # Try to parse listen_spec (single port or range, with optional /udp)
         elif _validate_port_or_range_with_udp "$rule_str"; then
+            listen_type="${_VALIDATED_PORT_RANGE_PARTS[0]}"
+            listen_port1="${_VALIDATED_PORT_RANGE_PARTS[1]}"
+            listen_port2="${_VALIDATED_PORT_RANGE_PARTS[2]}"
+            listen_protocol_suffix="${_VALIDATED_PORT_RANGE_PARTS[3]}"
+
+            if [[ "$listen_protocol_suffix" == "/udp" ]]; then
+                out_any_udp_rules_ref="true"
+            fi
+
+            # For 'local_port' or 'local_range' shorthand, Backhaul expects just the port/range.
+            # Example: "443" implies "443:443". "443-600" implies "443-600:443-600" (effectively).
+            if [[ "$listen_type" == "single" ]]; then
+                toml_rule="$listen_port1"
+            elif [[ "$listen_type" == "range" ]]; then
+                toml_rule="${listen_port1}-${listen_port2}"
+            fi
             rule_valid=true
-            toml_rule=$(_get_toml_rule_from_parsed_parts)
         fi
 
         if $rule_valid; then
             out_rules_array_ref+=("$toml_rule")
-            print_success "Rule added: \"$toml_rule\""
-            if [[ "${_VALIDATED_PORT_RANGE_PARTS[3]}" == "/udp" ]]; then
-                out_any_udp_rules_ref="true"
-            fi
+            print_success "  Rule parsed: \"$rule_str\" -> TOML: \"$toml_rule\""
         else
-            print_warning "Invalid rule format: '$rule_str'. Please try again."
+            print_warning "  Invalid rule format or component: '$rule_str'. Skipping."
+            # Optionally, ask user to retry this specific rule or continue?
+            # For now, just skip invalid parts of the comma-separated string.
         fi
-        echo
     done
 
-    if [[ ${#out_rules_array_ref[@]} -gt 0 ]]; then
-        print_success "Finished adding ${#out_rules_array_ref[@]} forwarding rule(s)."
-    else
-        print_info "No port forwarding rules were added."
+    if [[ ${#out_rules_array_ref[@]} -eq 0 && -n "$user_input_str" ]]; then
+        print_warning "No valid forwarding rules were extracted from the input."
+        # No 'return 1' here, let it proceed with empty rules if all were invalid.
+    elif [[ ${#out_rules_array_ref[@]} -gt 0 ]]; then
+        print_success "All rules processed. Total valid rules: ${#out_rules_array_ref[@]}"
     fi
 
     if [[ "$out_any_udp_rules_ref" == "true" ]]; then
         print_info "Note: UDP rules specified. Ensure 'accept_udp = true' is set in server's advanced options if not using UDP transport directly."
     fi
 
-    press_any_key
+    press_any_key # Allow user to see results before continuing wizard
     return 0
-}
-
-_get_toml_rule_from_parsed_parts() {
-    local dest_ip="$1"
-    local dest_port="$2"
-    local listen_type="${_VALIDATED_PORT_RANGE_PARTS[0]}"
-    local listen_port1="${_VALIDATED_PORT_RANGE_PARTS[1]}"
-    local listen_port2="${_VALIDATED_PORT_RANGE_PARTS[2]}"
-
-    local toml_listen_part="$listen_port1"
-    if [[ "$listen_type" == "range" ]]; then
-        toml_listen_part="${listen_port1}-${listen_port2}"
-    fi
-
-    if [[ -n "$dest_ip" ]]; then
-        echo "${toml_listen_part}=${dest_ip}:${dest_port}"
-    elif [[ -n "$dest_port" ]]; then
-        echo "${toml_listen_part}:${dest_port}"
-    else
-        echo "$toml_listen_part"
-    fi
 }
 
 # Prompts user for advanced optional parameters
@@ -840,7 +901,7 @@ configure_tunnel() {
                 ;;
             3) # Step 3: Basic Configuration Parameters
                 _prompt_basic_config_params "$tunnel_mode" \
-                    server_listen_port client_remote_ip client_remote_port \
+                    server_listen_port client_remote_ip client_remote_port client_local_fwd_port \
                     common_auth_token
                 step_rc=$?
                 case "$step_rc" in
@@ -1000,7 +1061,7 @@ configure_tunnel() {
                 update_toml_value "$config_file_path" "token" "$common_auth_token" "string"
 
                 if [[ "$tunnel_mode" == "server" ]]; then
-                    update_toml_value "$config_file_path" "bind_addr" "0.0.0.0:$server_listen_port" "string"
+                    update_toml_value "$config_file_path" "bind_addr" ":$server_listen_port" "string"
                     # Add the ports array
                     if [[ ${#server_port_rules[@]} -gt 0 ]]; then
                         echo "ports = [" >> "$config_file_path"

@@ -140,17 +140,12 @@ manage_ufw_main_menu() {
     local user_choice menu_rc
 
     while true; do
-    local ufw_current_status
-    _get_ufw_status() {
-        if ! command -v ufw &>/dev/null; then
-            ufw_current_status="Not Installed"
-        elif ufw status 2>/dev/null | grep -q "Status: active"; then
+        local ufw_current_status="Inactive"
+        if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
             ufw_current_status="Active"
-        else
-            ufw_current_status="Inactive"
+        elif ! command -v ufw &>/dev/null; then
+            ufw_current_status="Not Installed"
         fi
-    }
-    _get_ufw_status
         print_menu_header "primary" "UFW Firewall Management" "Status: $ufw_current_status"
         
         menu_loop "Select UFW option" ufw_menu_options "_ufw_menu_help"
