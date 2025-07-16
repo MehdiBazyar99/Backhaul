@@ -5886,6 +5886,11 @@ _mng_delete_tunnel() {
     local tunnel_suffix="$2"
     local config_file_path="$3"
 
+    # Enforce root check
+    if [[ $EUID -ne 0 ]]; then
+        handle_error "CRITICAL" "You must run this script as root to delete tunnel services and system files."; press_any_key; return 1
+    fi
+
     # Header printed by calling menu. This function provides specific prompts.
     print_warning "--- Delete Tunnel: $tunnel_suffix ---"
     print_warning "WARNING: This will PERMANENTLY delete the tunnel and all associated data!"
@@ -5935,7 +5940,9 @@ _mng_delete_tunnel() {
             handle_error "ERROR" "Failed to remove systemd service file: $systemd_service_file_path"
         fi
         if [[ -f "$systemd_service_file_path" ]]; then
-            handle_error "ERROR" "Failed to delete systemd service file: $systemd_service_file_path"
+            handle_error "CRITICAL" "Systemd service file still exists after attempted deletion: $systemd_service_file_path. Check permissions or run as root."
+            press_any_key
+            return 1
         fi
     fi
     
@@ -5946,6 +5953,11 @@ _mng_delete_tunnel() {
             log_message "INFO" "Removed configuration file: $config_file_path"
         else
             handle_error "ERROR" "Failed to remove configuration file: $config_file_path"
+        fi
+        if [[ -f "$config_file_path" ]]; then
+            handle_error "CRITICAL" "Configuration file still exists after attempted deletion: $config_file_path. Check permissions or run as root."
+            press_any_key
+            return 1
         fi
     fi
 
