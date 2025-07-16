@@ -49,25 +49,25 @@ _globals_ensure_config_dir_for_secret() {
         if [[ ! -d "$parent_dir" ]]; then
             mkdir -p "$parent_dir"
             if [[ $? -ne 0 ]]; then
-                echo "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create parent directory: $parent_dir. Please check permissions." >&2
+                printf "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create parent directory: %s. Please check permissions.\n" "$parent_dir" >&2
                 return 1
             fi
             # Set ownership to root:nogroup and permissions to 0750 for the parent directory
             # This allows members of 'nogroup' (like 'nobody') to traverse into /etc/easybackhaul
-            chown root:nogroup "$parent_dir"
-            chmod 0750 "$parent_dir"
+            chown root:nogroup "$parent_dir" || { printf "ERROR: Failed to chown %s\n" "$parent_dir"; return 1; }
+            chmod 0750 "$parent_dir" || { printf "ERROR: Failed to chmod %s\n" "$parent_dir"; return 1; }
         fi
 
         mkdir -p "$CONFIG_DIR"
         if [[ $? -ne 0 ]]; then
-            echo "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create CONFIG_DIR: $CONFIG_DIR. Please check permissions." >&2
+            printf "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create CONFIG_DIR: %s. Please check permissions.\n" "$CONFIG_DIR" >&2
             return 1
         fi
         # Set ownership to root:nogroup and permissions to 0770 for the configs directory
         # This allows 'nogroup' to read/write/execute (list files) in this directory.
         # Individual config files will be 'nobody:nogroup' and '640'.
-        chown root:nogroup "$CONFIG_DIR"
-        chmod 0770 "$CONFIG_DIR"
+        chown root:nogroup "$CONFIG_DIR" || { printf "ERROR: Failed to chown %s\n" "$CONFIG_DIR"; return 1; }
+        chmod 0770 "$CONFIG_DIR" || { printf "ERROR: Failed to chmod %s\n" "$CONFIG_DIR"; return 1; }
         return 0
     fi
 
@@ -78,22 +78,22 @@ _globals_ensure_config_dir_for_secret() {
         local existing_parent_dir
         existing_parent_dir=$(dirname "$CONFIG_DIR")
         if [[ -d "$existing_parent_dir" ]]; then
-            if [[ $(stat -c "%U:%G" "$existing_parent_dir") != "root:nogroup" ]]; then
-                chown root:nogroup "$existing_parent_dir" || echo "WARNING: Failed to chown $existing_parent_dir to root:nogroup" >&2
+            if [[ "$(stat -c "%U:%G" "$existing_parent_dir")" != "root:nogroup" ]]; then
+                chown root:nogroup "$existing_parent_dir" || printf "WARNING: Failed to chown %s to root:nogroup\n" "$existing_parent_dir" >&2
             fi
-            if [[ $(stat -c "%a" "$existing_parent_dir") != "750" ]]; then
+            if [[ "$(stat -c "%a" "$existing_parent_dir")" != "750" ]]; then
                  # Check if current perms are more open, e.g. 755, if so, leave them. Otherwise set to 750.
                 current_perms_parent=$(stat -c "%a" "$existing_parent_dir")
                 if [[ "$current_perms_parent" -lt "750" && "$current_perms_parent" != "750" ]]; then # if less than 0750, set it
-                    chmod 0750 "$existing_parent_dir" || echo "WARNING: Failed to chmod $existing_parent_dir to 0750" >&2
+                    chmod 0750 "$existing_parent_dir" || printf "WARNING: Failed to chmod %s to 0750\n" "$existing_parent_dir" >&2
                 fi
             fi
         fi
 
         # Check and set CONFIG_DIR permissions
-        if [[ $(stat -c "%U:%G" "$CONFIG_DIR") != "root:nogroup" ]]; then
+        if [[ "$(stat -c "%U:%G" "$CONFIG_DIR")" != "root:nogroup" ]]; then
             chown root:nogroup "$CONFIG_DIR" || {
-                echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to chown existing CONFIG_DIR $CONFIG_DIR to root:nogroup." >&2
+                printf "WARNING: [_globals_ensure_config_dir_for_secret] Failed to chown existing CONFIG_DIR %s to root:nogroup.\n" "$CONFIG_DIR" >&2
             }
         fi
         # Current permissions for CONFIG_DIR should be 0770.
@@ -101,7 +101,7 @@ _globals_ensure_config_dir_for_secret() {
         current_perms_config_dir=$(stat -c "%a" "$CONFIG_DIR")
         if [[ "$current_perms_config_dir" -lt "770" && "$current_perms_config_dir" != "770" ]]; then # if less than 0770, set it
             chmod 0770 "$CONFIG_DIR" || {
-                echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to ensure 0770 permissions on existing CONFIG_DIR: $CONFIG_DIR." >&2
+                printf "WARNING: [_globals_ensure_config_dir_for_secret] Failed to ensure 0770 permissions on existing CONFIG_DIR: %s.\n" "$CONFIG_DIR" >&2
             }
         fi
     fi
@@ -118,7 +118,7 @@ else
     # Ensure config directory exists before trying to read from it.
     if _globals_ensure_config_dir_for_secret; then
         if [[ -f "$GLOBAL_WATCHER_SECRET_FILE" ]]; then
-            RESTART_WATCHER_SECRET_VALUE=$(cat "$GLOBAL_WATCHER_SECRET_FILE" 2>/dev/null)
+            RESTART_WATCHER_SECRET_VALUE=$(<"$GLOBAL_WATCHER_SECRET_FILE")
         fi
     fi
 fi
@@ -129,20 +129,20 @@ if [[ -z "$RESTART_WATCHER_SECRET_VALUE" ]]; then
         # Use direct command as helpers.sh (where generate_random_secret is) isn't sourced yet.
         GENERATED_SECRET_FALLBACK=$(openssl rand -hex 32 2>/dev/null || tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 64)
         if [[ -n "$GENERATED_SECRET_FALLBACK" ]]; then
-            echo "$GENERATED_SECRET_FALLBACK" > "$GLOBAL_WATCHER_SECRET_FILE"
+            printf "%s" "$GENERATED_SECRET_FALLBACK" > "$GLOBAL_WATCHER_SECRET_FILE"
             if [[ $? -eq 0 ]]; then # Check if write was successful
                 chmod 600 "$GLOBAL_WATCHER_SECRET_FILE"
                 RESTART_WATCHER_SECRET_VALUE="$GENERATED_SECRET_FALLBACK"
             else
                 # Failed to write to file, don't use the generated secret if it couldn't be persisted.
-                echo "ERROR: [_globals_ensure_config_dir_for_secret] Failed to write to $GLOBAL_WATCHER_SECRET_FILE. Watcher secret not set." >&2
+                printf "ERROR: [_globals_ensure_config_dir_for_secret] Failed to write to %s. Watcher secret not set.\n" "$GLOBAL_WATCHER_SECRET_FILE" >&2
                 RESTART_WATCHER_SECRET_VALUE="" # Ensure it remains empty
             fi
         else
-            echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to generate random string for RESTART_WATCHER_SECRET." >&2
+            printf "WARNING: [_globals_ensure_config_dir_for_secret] Failed to generate random string for RESTART_WATCHER_SECRET.\n" >&2
         fi
     else
-         echo "WARNING: [_globals_ensure_config_dir_for_secret] CONFIG_DIR '$CONFIG_DIR' not usable. Cannot generate/store global watcher secret." >&2
+         printf "WARNING: [_globals_ensure_config_dir_for_secret] CONFIG_DIR '%s' not usable. Cannot generate/store global watcher secret.\n" "$CONFIG_DIR" >&2
     fi
 fi
 RESTART_WATCHER_SECRET="$RESTART_WATCHER_SECRET_VALUE" # Assign to the final global var
@@ -236,11 +236,11 @@ ICON_WARNING="⚠"
 ICON_ERROR="✗"
 
 # --- Basic Print Functions ---
-print_info() { echo -e "${COLOR_BLUE}${ICON_INFO} $1${COLOR_RESET}"; }
-print_success() { echo -e "${COLOR_GREEN}${ICON_SUCCESS} $1${COLOR_RESET}"; }
-print_warning() { echo -e "${COLOR_YELLOW}${ICON_WARNING} $1${COLOR_RESET}"; }
-print_error() { echo -e "${COLOR_RED}${ICON_ERROR} $1${COLOR_RESET}"; }
-press_any_key() { read -n 1 -s -r -p "Press any key to continue..."; echo; }
+print_info() { printf "%b%s %s%b\n" "${COLOR_BLUE}" "${ICON_INFO}" "$1" "${COLOR_RESET}"; }
+print_success() { printf "%b%s %s%b\n" "${COLOR_GREEN}" "${ICON_SUCCESS}" "$1" "${COLOR_RESET}"; }
+print_warning() { printf "%b%s %s%b\n" "${COLOR_YELLOW}" "${ICON_WARNING}" "$1" "${COLOR_RESET}"; }
+print_error() { printf "%b%s %s%b\n" "${COLOR_RED}" "${ICON_ERROR}" "$1" "${COLOR_RESET}"; }
+press_any_key() { read -n 1 -s -r -p "Press any key to continue..."; }
 
 # --- Unified Logging System ---
 # LOG_LEVEL, LOG_DIR, LOG_MAX_FILES, LOG_FORMAT should be set in globals.sh
@@ -346,7 +346,7 @@ ${current_log_dir}/*.log {
     endscript
 }
 EOF
-    chmod 0644 "$logrotate_conf_target"
+    chmod 0644 "$logrotate_conf_target" || { log_message "WARN" "Failed to chmod logrotate config file."; return 1; }
     log_message "DEBUG" "Logrotate configuration created/updated at $logrotate_conf_target."
 }
 
@@ -375,13 +375,14 @@ log_message() {
     local log_entry
     if [[ "$current_log_format" == "json" ]]; then
         # Basic JSON escaping for the message
-        local escaped_message=$(echo "$message" | sed 's/"/\\"/g' | sed 's/\\/\\\\/g')
+        local escaped_message
+        escaped_message=$(printf "%s" "$message" | sed 's/"/\\"/g' | sed 's/\\/\\\\/g')
         log_entry="{\"timestamp\":\"$timestamp\",\"level\":\"$level\",\"message\":\"$escaped_message\"}"
     else
         log_entry="[$timestamp] [$level] $message"
     fi
 
-    echo "$log_entry" >> "$log_file_to_use"
+    printf "%s\n" "$log_entry" >> "$log_file_to_use"
 }
 
 # Logging convenience functions
@@ -398,7 +399,7 @@ handle_error() {
     local exit_code="${3:-1}"
 
     local upper_error_type
-    upper_error_type=$(echo "$error_type" | tr '[:lower:]' '[:upper:]')
+    upper_error_type=$(tr '[:lower:]' '[:upper:]' <<< "$error_type")
 
     case "$upper_error_type" in
         "CRITICAL")
@@ -443,7 +444,7 @@ sanitize_input() {
     # Remove dangerous characters and limit length.
     # Added @ . : / - _ to allow common characters in paths, IPs, etc.
     # Still restrictive, consider carefully if this is too aggressive.
-    echo "$input" | sed "s/[^a-zA-Z0-9@.:/\-_ ]/_/g" | head -c "$max_length"
+    sed "s/[^a-zA-Z0-9@.:/\-_ ]/_/g" <<< "$input" | head -c "$max_length"
 }
 
 validate_ip() {
@@ -488,27 +489,16 @@ check_port_availability() {
         return 1
     fi
     
-    # Try ss first (more modern)
     if command -v ss &>/dev/null; then
-        if ss -tuln | grep -q ":${port_to_check}[[:space:]]"; then # Added [[:space:]] to avoid matching substrings like 8080 for 80
+        if ss -tuln | grep -q ":${port_to_check}[[:space:]]"; then
             return 1 # Port in use
+        else
+            return 0 # Port available
         fi
-    # Fallback to netstat
-    elif command -v netstat &>/dev/null; then
-        if netstat -tuln | grep -q ":${port_to_check}[[:space:]]"; then
-            return 1 # Port in use
-        fi
-    # Fallback to lsof (can be slower)
-    elif command -v lsof &>/dev/null; then
-        if lsof -i ":$port_to_check" -sTCP:LISTEN -sUDP:LISTEN -P -n -- 2>/dev/null | grep -q LISTEN; then # More specific lsof
-            return 1 # Port in use
-        fi
-    else
-        log_message "WARN" "No suitable tool (ss, netstat, lsof) found to check port availability."
-        return 2 # Cannot determine
     fi
-    
-    return 0 # Port available
+
+    log_message "WARN" "No suitable tool (ss) found to check port availability."
+    return 2 # Cannot determine
 }
 
 check_nc_compatibility() {
@@ -516,14 +506,14 @@ check_nc_compatibility() {
     local nc_test_result=""
     
     if command -v timeout &>/dev/null; then
-        nc_test_result=$(timeout 3s bash -c 'echo | nc -l -p 0 -w 1 2>&1' 2>/dev/null || echo "timeout_or_error")
+        nc_test_result=$(timeout 3s bash -c 'printf "" | nc -l -p 0 -w 1 2>&1' 2>/dev/null || printf "timeout_or_error")
     else
         # Fallback without timeout command - riskier
-        ( nc -l -p 0 -w 1 >/dev/null 2>&1 & )
+        ( printf "" | nc -l -p 0 -w 1 >/dev/null 2>&1 & )
         local nc_pid=$!
         sleep 3
-        if kill -0 $nc_pid 2>/dev/null; then
-            kill -9 $nc_pid 2>/dev/null
+        if kill -0 "$nc_pid" 2>/dev/null; then
+            kill -9 "$nc_pid" 2>/dev/null
             nc_test_result="timeout_or_error"
         else
             # This path is tricky; if nc fails very fast due to incompatibility, it might seem like success.
@@ -535,7 +525,7 @@ check_nc_compatibility() {
     fi
     
     if [[ "$nc_test_result" == "timeout_or_error" ]] || \
-       echo "$nc_test_result" | grep -qiE 'usage|invalid|unknown option|must be used with|Ncat: Could not resolve hostname'; then
+       grep -qiE 'usage|invalid|unknown option|must be used with|Ncat: Could not resolve hostname' <<< "$nc_test_result"; then
         log_message "WARN" "Netcat (nc) may not support '-l -p -w 1' or test timed out/errored. Restart watcher and some features might not work reliably."
         print_warning "Netcat (nc) may not be fully compatible. Restart watcher might be unreliable."
         print_info "Consider installing 'netcat-openbsd' (Debian/Ubuntu) or 'nmap-ncat' (CentOS/RHEL/Fedora)."
@@ -576,16 +566,27 @@ ensure_netcat_installed() {
 
 check_basic_connectivity() {
     local test_hosts=("8.8.8.8" "1.1.1.1" "github.com")
+    local pids=()
     local success_count=0
 
     print_info "Testing basic network connectivity..."
 
     for host_to_test in "${test_hosts[@]}"; do
-        if ping -c 1 -W 2 "$host_to_test" >/dev/null 2>&1; then
-            log_message "DEBUG" "Successfully pinged $host_to_test."
+        (
+            if ping -c 1 -W 2 "$host_to_test" >/dev/null 2>&1; then
+                log_message "DEBUG" "Successfully pinged $host_to_test."
+                exit 0
+            else
+                log_message "WARN" "Failed to ping $host_to_test."
+                exit 1
+            fi
+        ) &
+        pids+=($!)
+    done
+
+    for pid in "${pids[@]}"; do
+        if wait "$pid"; then
             ((success_count++))
-        else
-            log_message "WARN" "Failed to ping $host_to_test."
         fi
     done
     
@@ -605,7 +606,7 @@ get_system_resources_summary() {
     mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}')
     disk_usage=$(df -P / | awk 'NR==2 {print $5}' | sed 's/%//') # Added -P for POSIX output
     
-    echo "CPU: ${cpu_usage}% | Memory: ${mem_usage}% | Disk: ${disk_usage}%"
+    printf "CPU: %s%% | Memory: %s%% | Disk: %s%%\n" "$cpu_usage" "$mem_usage" "$disk_usage"
 }
 
 display_system_resources() {
@@ -615,9 +616,9 @@ display_system_resources() {
     mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}')
     disk_usage=$(df -P / | awk 'NR==2 {print $5}' | sed 's/%//')
     
-    echo "  CPU Usage: ${cpu_usage}%"
-    echo "  Memory Usage: ${mem_usage}%"
-    echo "  Root Disk Usage: ${disk_usage}%"
+    printf "  CPU Usage: %s%%\n" "$cpu_usage"
+    printf "  Memory Usage: %s%%\n" "$mem_usage"
+    printf "  Root Disk Usage: %s%%\n" "$disk_usage"
     
     if (( cpu_usage > 85 )); then print_warning "  High CPU usage detected!"; fi
     if (( mem_usage > 85 )); then print_warning "  High memory usage detected!"; fi
@@ -652,10 +653,10 @@ with_performance_tracking() {
         else
             perf_log_entry="[$(date '+%Y-%m-%d %H:%M:%S')] [PERF] Operation: \"$operation_description\", Duration: ${duration_secs}s, Success: $success_status, ExitCode: $exit_code"
         fi
-        echo "$perf_log_entry" >> "$PERFORMANCE_LOG_FILE"
+        printf "%s\n" "$perf_log_entry" >> "$PERFORMANCE_LOG_FILE"
     fi
     
-    if (( $(echo "$duration_secs > 30" | bc -l 2>/dev/null || echo 0) )); then
+    if (( $(printf "%s" "$duration_secs" | bc -l 2>/dev/null || printf "0") )); then
         log_message "WARN" "Slow operation: \"$operation_description\" took ${duration_secs}s."
     fi
     
@@ -741,10 +742,10 @@ update_toml_value() {
     local key_regex="^[[:space:]]*${key}[[:space:]]*=[[:space:]]*"
 
     while IFS= read -r line || [[ -n "$line" ]]; do
-        if echo "$line" | grep -qE "$key_regex"; then
+        if grep -qE "$key_regex" <<< "$line"; then
             local comment_part=""
-            if echo "$line" | grep -q "#"; then
-                comment_part=" #"$(echo "$line" | sed 's/.*#//')
+            if grep -q "#" <<< "$line"; then
+                comment_part=" #$(sed 's/.*#//' <<< "$line")"
             fi
             case "$data_type" in
                 "numeric") echo "${key} = ${value}${comment_part}" >> "$temp_file" ;;
@@ -834,7 +835,7 @@ acquire_file_lock() {
 
         if [[ -f "$lock_file_path" ]]; then
             local lock_owner_pid
-            lock_owner_pid=$(cat "$lock_file_path" 2>/dev/null)
+    lock_owner_pid=$(<"$lock_file_path")
             if [[ -n "$lock_owner_pid" ]] && ! ps -p "$lock_owner_pid" > /dev/null 2>&1; then
                 log_message "WARN" "Stale lock file found for '$file_to_lock' (PID $lock_owner_pid). Removing."
                 rm -f "$lock_file_path"
@@ -860,7 +861,7 @@ release_file_lock() {
 
     if [[ -f "$lock_file_path" ]]; then
         local lock_owner_pid
-        lock_owner_pid=$(cat "$lock_file_path" 2>/dev/null)
+        lock_owner_pid=$(<"$lock_file_path")
         if [[ "$lock_owner_pid" == "$current_pid" ]] || [[ -z "$lock_owner_pid" ]]; then
             rm -f "$lock_file_path"
         else
@@ -937,8 +938,13 @@ print_menu_header() {
     local version_string="${SCRIPT_VERSION:-v14.0-dev}"
 
     if [[ "$type" == "primary" ]]; then
-        echo
-        echo "      EasyBackhaul Management Menu ($version_string)"
+        echo -e "${COLOR_BLUE}"
+        echo " ____    _    ____  __  __   _    _   _ ____   _    _     _    "
+        echo "| __ )  / \  / ___||  \/  | / \  | | | |  _ \ / \  | |   | |   "
+        echo "|  _ \ / _ \ \___ \| |\/| |/ _ \ | |_| | |_) / _ \ | |   | |   "
+        echo "| |_) / ___ \ ___) | |  | / ___ \|  _  |  __/ ___ \| |___| |___"
+        echo "|____/_/   \_\____/|_|  |_\_/   \_\_| |_|_| /_/   \_\_____|_____|"
+        echo -e "${COLOR_RESET}"
         echo "================================================================="
         echo "  Core by Musixal  |  Installer by @N4Xon"
         echo "-----------------------------------------------------------------"
@@ -1054,7 +1060,7 @@ prompt_for_ip() {
 # Unified menu footer printing
 print_menu_footer() {
     echo "----------------------------------------------------------------"
-    echo " [?] Help | [r] Return/Back/Cancel | [m] Main Menu | [x] Exit Script"
+    echo -e " [${COLOR_YELLOW}?${COLOR_RESET}] Help | [${COLOR_YELLOW}r${COLOR_RESET}] Return/Back/Cancel | [${COLOR_YELLOW}m${COLOR_RESET}] Main Menu | [${COLOR_YELLOW}x${COLOR_RESET}] Exit Script"
 }
 
 prompt_yes_no() {
@@ -1070,7 +1076,7 @@ prompt_yes_no() {
 
     while true; do
         read -r -p "$prompt_message $yn_prompt: " user_input
-        user_input=$(echo "${user_input:-$default_answer}" | tr '[:upper:]' '[:lower:]')
+        user_input=$(tr '[:upper:]' '[:lower:]' <<< "${user_input:-$default_answer}")
 
         case "$user_input" in
             y|yes) return 0 ;;
@@ -1080,105 +1086,42 @@ prompt_yes_no() {
     done
 }
 
-MENU_CHOICE="" # Global variable to store the result of menu_loop
-
-# Standardized menu loop.
-# Usage: menu_loop "Prompt Message" "options_array_name" ["custom_help_function_name"]
-# Sets MENU_CHOICE globally.
-# Returns:
-#   0: Valid NUMERIC choice. MENU_CHOICE holds the number string.
-#   2: '?' (Help) was pressed. MENU_CHOICE holds '?'. (Help function, if any, was called).
-#   3: 'm' (Main Menu) was pressed. MENU_CHOICE holds 'm'.
-#   4: 'x' (Exit Script) was pressed. MENU_CHOICE holds 'x'.
-#   5: 'r' (Return/Back/Cancel) was pressed. MENU_CHOICE holds 'r'.
-#   6: Invalid input (empty or non-matching). Warning printed by menu_loop for non-empty invalid. MENU_CHOICE holds the invalid input. Caller should redraw.
+# Refactored menu loop to be more concise and avoid global variables.
 menu_loop() {
     local prompt_msg="$1"
-    local -n options_ref=$2 # Array of menu options like "1. Do X"
-    local custom_help_function_name="${3:-}"
+    local -n options_ref=$2
+    local -n choice_ref=$3 # Nameref for the output variable
 
-    local min_numeric_opt=1
+    echo
+    for opt_str in "${options_ref[@]}"; do
+        echo -e "  ${COLOR_GREEN}${opt_str}${COLOR_RESET}"
+    done
+
+    print_menu_footer
+
     local max_numeric_opt=${#options_ref[@]}
-    
-    local prompt_numeric_choices_str=""
-    if (( max_numeric_opt > 0 )); then
-        if (( max_numeric_opt == 1 )); then
-            prompt_numeric_choices_str="1"
-        else
-            prompt_numeric_choices_str="${min_numeric_opt}-${max_numeric_opt}"
-        fi
+    local numeric_choices_str="1-${max_numeric_opt}"
+    if (( max_numeric_opt == 0 )); then
+        numeric_choices_str="none"
+    elif (( max_numeric_opt == 1 )); then
+        numeric_choices_str="1"
     fi
     
-    # This loop is now only for re-prompting on truly empty input after processing.
-    # All other paths (special keys, valid numeric, invalid non-empty) will RETURN from the function.
-    while true; do
-        for opt_str in "${options_ref[@]}"; do
-            echo "  $opt_str"
-        done
+    local full_prompt_str="$prompt_msg [${numeric_choices_str}, ?, r, m, x]: "
+    read -r -p "$full_prompt_str" choice_ref
+    choice_ref=$(xargs <<< "$(tr '[:upper:]' '[:lower:]' <<< "$choice_ref")")
 
-        print_menu_footer # Display updated footer
-
-        local full_prompt_str="$prompt_msg"
-        local available_choices_display=""
-        if [[ -n "$prompt_numeric_choices_str" ]]; then
-            available_choices_display="$prompt_numeric_choices_str, "
+    if [[ "$choice_ref" =~ ^[0-9]+$ ]]; then
+        if (( max_numeric_opt > 0 && choice_ref >= 1 && choice_ref <= max_numeric_opt )); then
+            return 0 # Valid numeric choice
         fi
-        available_choices_display+="?, r, m, x"
+    elif [[ "$choice_ref" =~ ^[?rmx]$ ]]; then
+        return 0 # Valid special command
+    fi
 
-        full_prompt_str+=" [${available_choices_display}]: "
-
-        local raw_choice
-        read -r -p "$full_prompt_str" raw_choice
-
-        local processed_choice
-        processed_choice=$(echo "$raw_choice" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        MENU_CHOICE="$processed_choice"
-
-        if [[ "$processed_choice" == "?" ]]; then
-            if [[ -n "$custom_help_function_name" ]] && type "$custom_help_function_name" &>/dev/null; then
-                "$custom_help_function_name"
-            else
-                print_info "No specific help available for this menu."
-                press_any_key
-            fi
-            return 2
-        elif [[ "$processed_choice" == "m" ]]; then
-            return 3
-        elif [[ "$processed_choice" == "x" ]]; then
-            return 4
-        elif [[ "$processed_choice" == "r" ]]; then
-            return 5
-        fi
-
-        if [[ "$processed_choice" =~ ^[0-9]+$ ]]; then
-            if (( max_numeric_opt == 0 )); then
-                 print_warning "Invalid option: '$processed_choice'. No numeric options available. Use navigation keys."
-                 press_any_key
-                 return 6
-            elif (( processed_choice >= min_numeric_opt && processed_choice <= max_numeric_opt )); then
-                return 0
-            else
-                 print_warning "Invalid numeric option: '$processed_choice'. Choose from ${prompt_numeric_choices_str} or navigation keys."
-                 press_any_key
-                 return 6
-            fi
-        else # Not numeric, and wasn't a special key
-            if [[ -n "$processed_choice" ]]; then
-                print_warning "Invalid option: '$processed_choice'. Please use numbers or navigation keys: ?, r, m, x."
-                press_any_key
-                return 6
-            else
-                # processed_choice IS empty (user just pressed Enter or entered only spaces)
-                # Return 6 to allow caller to redraw the full screen.
-                # No warning or press_any_key from menu_loop for this specific case.
-                return 6
-            fi
-        fi
-        # Unreachable code due to returns in all paths above, unless processed_choice was initially empty
-        # and the "else" for empty choice didn't return 6.
-        # The loop should only continue if processed_choice was empty AND the "else" above didn't return 6.
-        # Corrected logic: empty input now also returns 6. So this loop should not be hit again unless error.
-    done
+    print_warning "Invalid option: '$choice_ref'."
+    press_any_key
+    return 1 # Invalid choice
 }
 
 # --- Process Management & Cleanup ---
@@ -1229,7 +1172,7 @@ cleanup_stale_processes_and_files() {
         if [[ "$pattern" == *".pid" ]]; then
             find /tmp -name "$(basename "$pattern")" -type f -print0 | while IFS= read -r -d $'\0' pid_file; do
                 local pid_val
-                pid_val=$(cat "$pid_file" 2>/dev/null)
+                pid_val=$(<"$pid_file")
                 if [[ -n "$pid_val" ]] && ! ps -p "$pid_val" > /dev/null 2>&1; then
                     log_message "INFO" "Removing stale PID file $pid_file for dead process $pid_val."
                     rm -f "$pid_file" && ((cleaned_items++))
@@ -1263,7 +1206,7 @@ cleanup_watcher_files() {
 
     if [[ -f "$watcher_pid_file_path" ]]; then
         local watcher_pid_val
-        watcher_pid_val=$(cat "$watcher_pid_file_path" 2>/dev/null)
+        watcher_pid_val=$(<"$watcher_pid_file_path")
         if [[ -n "$watcher_pid_val" ]] && ps -p "$watcher_pid_val" > /dev/null 2>&1; then
             log_message "INFO" "Stopping watcher process PID $watcher_pid_val for tunnel $tunnel_suffix."
             kill "$watcher_pid_val" 2>/dev/null
@@ -1302,7 +1245,7 @@ run_with_spinner() {
 
     while ps -p $pid > /dev/null 2>&1; do
         printf "\b%s" "${spin_chars:i++%${#spin_chars}:1}"
-        sleep 0.1
+        sleep 0.05
     done
     printf "\b" # Clear spinner char
     
@@ -1353,7 +1296,9 @@ generate_random_secret() {
 }
 
 generate_self_signed_tls_cert() {
-    local cert_common_name="${1:-${SERVER_IP:-localhost}}"
+    local -n out_cert_path=$1
+    local -n out_key_path=$2
+    local cert_common_name="${3:-${SERVER_IP:-localhost}}"
     local cert_dir="${CERT_DIR:-/etc/easybackhaul/certs}"
     ensure_dir "$cert_dir" "700"
 
@@ -1379,29 +1324,34 @@ generate_self_signed_tls_cert() {
 
     local timestamp
     timestamp=$(date +%Y%m%d-%H%M%S)
-    local key_path="$cert_dir/privkey-$timestamp.pem"
-    local cert_path="$cert_dir/fullchain-$timestamp.pem"
+    local key_path_local="$cert_dir/privkey-$timestamp.pem"
+    local cert_path_local="$cert_dir/fullchain-$timestamp.pem"
     local subject_line="/C=$country_code/ST=$state_name/L=$locality_name/O=$org_name/CN=$final_cn"
 
-    print_info "Generating private key: $key_path"
-    if ! run_with_spinner "Generating private key..." openssl genpkey -algorithm RSA -out "$key_path" -pkeyopt rsa_keygen_bits:2048; then
+    print_info "Generating private key: $key_path_local"
+    if ! run_with_spinner "Generating private key..." openssl genpkey -algorithm RSA -out "$key_path_local" -pkeyopt rsa_keygen_bits:2048; then
         handle_error "ERROR" "OpenSSL private key generation failed. Check spinner log for details."
         press_any_key; return 1
     fi
-    set_secure_file_permissions "$key_path" "600"
+    set_secure_file_permissions "$key_path_local" "600"
 
-    print_info "Generating self-signed certificate: $cert_path"
-    if ! run_with_spinner "Generating certificate..." openssl req -new -x509 -key "$key_path" -out "$cert_path" -days 365 -subj "$subject_line"; then
+    print_info "Generating self-signed certificate: $cert_path_local"
+    if ! run_with_spinner "Generating certificate..." openssl req -new -x509 -key "$key_path_local" -out "$cert_path_local" -days 365 -subj "$subject_line"; then
         handle_error "ERROR" "OpenSSL certificate generation failed. Check spinner log for details."
-        rm -f "$key_path"
+        rm -f "$key_path_local"
         press_any_key; return 1
     fi
-    set_secure_file_permissions "$cert_path" "644"
+    set_secure_file_permissions "$cert_path_local" "644"
 
     print_success "TLS Certificate and Key generated successfully!"
-    echo "  Private Key: $key_path"
-    echo "  Certificate: $cert_path"
+    echo "  Private Key: $key_path_local"
+    echo "  Certificate: $cert_path_local"
     print_info "These paths can be used in your tunnel configurations for WSS/WSSMUX."
+
+    # Set the output nameref variables
+    out_cert_path="$cert_path_local"
+    out_key_path="$key_path_local"
+
     press_any_key
     return 0
 }
@@ -1761,6 +1711,10 @@ SERVER_ISP="N/A"
 # Fetches server's public IP and geo-information.
 # Populates SERVER_IP, SERVER_COUNTRY, SERVER_ISP global variables.
 get_server_info() {
+    if [[ "$SERVER_IP" != "N/A" && -n "$SERVER_IP" ]]; then
+        log_message "DEBUG" "Server info already cached. Skipping fetch."
+        return 0
+    fi
     log_message "INFO" "Attempting to fetch server IP and geo-information..."
     SERVER_IP="N/A"
     SERVER_COUNTRY="N/A"
@@ -1931,7 +1885,7 @@ install_downloaded_binary() {
         return 1
     fi
 
-    chmod +x "$BIN_PATH"
+    chmod +x "$BIN_PATH" || { handle_error "ERROR" "Failed to make binary executable: $BIN_PATH"; return 1; }
     set_secure_file_permissions "$BIN_PATH" "755" # Executable for owner, readable for others
 
     rm -rf "$temp_extract_dir"
@@ -2085,35 +2039,40 @@ _download_from_github() {
     local arch_suffix="$2"
     local latest_version=""
     
-    log_message "INFO" "Fetching latest Backhaul version from GitHub API..."
-    local api_response
-    api_response=$(curl -s --connect-timeout 10 "https://api.github.com/repos/Musixal/Backhaul/releases/latest")
+    _get_latest_version() {
+        log_message "INFO" "Fetching latest Backhaul version from GitHub API..."
+        local api_response
+        api_response=$(curl -s --connect-timeout 10 "https://api.github.com/repos/Musixal/Backhaul/releases/latest")
 
-    if [[ -n "$api_response" ]] && echo "$api_response" | jq -e .tag_name >/dev/null 2>&1; then
-        latest_version=$(echo "$api_response" | jq -r .tag_name)
-        if [[ -z "$latest_version" || "$latest_version" == "null" ]]; then
-            log_message "WARN" "Could not parse tag_name from GitHub API response. Will try a common fallback."
-            latest_version="v0.6.6" # Fallback, consider making this more dynamic or removing
-        else
-            log_message "INFO" "Latest version from GitHub: $latest_version"
+        if [[ -n "$api_response" ]] && echo "$api_response" | jq -e .tag_name >/dev/null 2>&1; then
+            latest_version=$(echo "$api_response" | jq -r .tag_name)
+            if [[ -z "$latest_version" || "$latest_version" == "null" ]]; then
+                return 1
+            fi
+            return 0
         fi
-    else
-        handle_error "WARNING" "Failed to fetch latest version from GitHub API. Check connectivity or API rate limits."
-        log_message "WARN" "Using fallback version v0.6.6 due to API fetch failure."
-        latest_version="v0.6.6"
+        return 1
+    }
+
+    if ! retry_operation "Get latest version from GitHub" 3 2 _get_latest_version; then
+        handle_error "WARNING" "Failed to fetch latest version from GitHub API after multiple retries. Check connectivity or API rate limits."
+        log_message "WARN" "Using fallback version v0.6.5 due to API fetch failure."
+        latest_version="v0.6.5"
     fi
+
+    log_message "INFO" "Using version: $latest_version"
 
     local download_url="https://github.com/Musixal/Backhaul/releases/download/${latest_version}/backhaul_${os}_${arch_suffix}.tar.gz"
     print_info "Attempting to download Backhaul ${latest_version} for ${os}/${arch_suffix}..."
-    echo "URL: $download_url"
+    printf "URL: %s\n" "$download_url"
 
     if run_with_spinner "Downloading from GitHub..." \
         wget --progress=dot:giga -O /tmp/backhaul.tar.gz "$download_url"; then
-        if install_downloaded_binary; then # install_downloaded_binary returns 0 on success
-            return 0 # Overall success
+        if install_downloaded_binary; then
+            return 0
         else
             handle_error "ERROR" "Binary installation failed after download."
-            return 1 # Installation part failed
+            return 1
         fi
     else
         handle_error "ERROR" "Download from GitHub failed. URL: $download_url"
@@ -2135,7 +2094,7 @@ _download_from_local_file() {
     while true; do
         read -e -r -p "Enter path to local .tar.gz file (or type 'cancel' to return): " local_file_path
         local lower_case_input
-        lower_case_input=$(echo "$local_file_path" | tr '[:upper:]' '[:lower:]')
+        lower_case_input=$(tr '[:upper:]' '[:lower:]' <<< "$local_file_path")
 
         if [[ "$lower_case_input" == "cancel" ]]; then
             print_info "Local file installation cancelled."
@@ -2203,7 +2162,7 @@ _use_existing_local_binary() {
     while true; do
         read -e -r -p "Enter full path to your local Backhaul binary file (or type 'cancel' to return): " local_binary_path
         local lower_case_input
-        lower_case_input=$(echo "$local_binary_path" | tr '[:upper:]' '[:lower:]')
+        lower_case_input=$(tr '[:upper:]' '[:lower:]' <<< "$local_binary_path")
 
         if [[ "$lower_case_input" == "cancel" ]]; then
             print_info "Using existing local binary cancelled."
@@ -2343,17 +2302,16 @@ _get_port_process_info() {
     log_message "DEBUG" "Checking process for port $port_to_check"
     
     if command -v ss &>/dev/null; then
-        # Using ss for more detailed info, including user if possible
-        ss -lntupe "sport = :$port_to_check" 2>/dev/null | awk 'NR>1 {print "  - Process (ss): " $0}' && return 0
+        ss -lntupe "sport = :$port_to_check" 2>/dev/null | awk 'NR>1 {printf "  - Process (ss): %s\n", $0}'
+    elif command -v netstat &>/dev/null; then
+        netstat -tlnp 2>/dev/null | grep ":${port_to_check}[[:space:]]" | awk '{printf "  - Process (netstat): %s\n", $0}'
+    elif command -v lsof &>/dev/null; then
+        lsof -i ":$port_to_check" -sTCP:LISTEN -P -n -- 2>/dev/null | awk 'NR>1 {printf "  - Process (lsof): %s\n", $0}'
+    else
+        print_info "  Port $port_to_check is in use, but detailed process info unavailable with current tools."
+        return 1
     fi
-    if command -v netstat &>/dev/null; then
-        netstat -tlnp 2>/dev/null | grep ":${port_to_check}[[:space:]]" | awk '{print "  - Process (netstat): " $0}' && return 0
-    fi
-    if command -v lsof &>/dev/null; then # More resource intensive
-        lsof -i ":$port_to_check" -sTCP:LISTEN -P -n -- 2>/dev/null | awk 'NR>1 {print "  - Process (lsof): " $0}' && return 0
-    fi
-    print_info "  Port $port_to_check is in use, but detailed process info unavailable with current tools."
-    return 1
+    return 0
 }
 
 
@@ -2575,7 +2533,7 @@ _prompt_transport_protocol() {
             0) # Numeric choice
                 if $show_all_options_now; then
                     if [[ "$MENU_CHOICE" -ge 1 && "$MENU_CHOICE" -le ${#transport_options_arr[@]} ]]; then
-                        transport_ref=$(echo "${transport_options_arr[$(($MENU_CHOICE-1))]}" | awk '{print $1}')
+                        transport_ref=$(awk '{print $1}' <<< "${transport_options_arr[$(($MENU_CHOICE-1))]}")
                         log_message "INFO" "Selected transport: $transport_ref"
                         return 0 # Success
                     else
@@ -2663,7 +2621,7 @@ _prompt_basic_config_params() {
     print_info "Set an authentication token (must match on both server and client)."
     while true; do
         read -r -s -p "Enter token (min 8 chars, or type 'cancel'): " auth_token_val
-        echo # Newline after secret input
+        printf "\n" # Newline after secret input
         if [[ "$auth_token_val" == "cancel" ]]; then
             print_info "Token input cancelled by user."
             return 1 # Signal cancellation
@@ -2770,19 +2728,16 @@ _prompt_tls_config() {
     case "$menu_rc" in
         0) # Numeric choice
             if (( user_choice == generate_new_opt_num )); then
-                if generate_self_signed_tls_cert; then # This function handles its own output and sets paths
-                    # It should output the paths it created, we need to capture them.
-                    # For now, assume generate_self_signed_tls_cert updates some global vars or returns paths.
-                    # This part needs refinement: generate_self_signed_tls_cert needs to return the paths.
-                    # Let's assume it writes to last_cert.path and last_key.path files for simplicity here.
-                    # This is a placeholder for better path communication.
-                    if [[ -f "$cert_dir_global/last_generated_cert.path" && -f "$cert_dir_global/last_generated_key.path" ]]; then
-                        tls_cert_path_ref=$(cat "$cert_dir_global/last_generated_cert.path")
-                        tls_key_path_ref=$(cat "$cert_dir_global/last_generated_key.path")
-                        rm -f "$cert_dir_global/last_generated_cert.path" "$cert_dir_global/last_generated_key.path"
+                # generate_self_signed_tls_cert now takes namerefs to store the paths
+                local generated_cert_path=""
+                local generated_key_path=""
+                if generate_self_signed_tls_cert generated_cert_path generated_key_path; then
+                    if [[ -n "$generated_cert_path" && -n "$generated_key_path" ]]; then
+                        tls_cert_path_ref="$generated_cert_path"
+                        tls_key_path_ref="$generated_key_path"
                         print_success "Using newly generated cert: $tls_cert_path_ref and key: $tls_key_path_ref"
                     else
-                        handle_error "ERROR" "Failed to retrieve paths of newly generated certificate/key. Please enter manually."
+                        handle_error "ERROR" "Certificate generation function completed but did not return paths. Please enter manually."
                         # Fallback to manual entry
                         read -e -r -p "Enter full path to TLS certificate file (.crt or .pem): " tls_cert_path_ref
                         read -e -r -p "Enter full path to TLS private key file (.key or .pem): " tls_key_path_ref
@@ -2792,7 +2747,12 @@ _prompt_tls_config() {
                     fi
                 else
                     print_warning "Self-signed certificate generation failed or was cancelled."
-                    if prompt_yes_no "Retry TLS configuration?" "y"; then _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $?; else return 1; fi
+                    if prompt_yes_no "Retry TLS configuration?" "y"; then
+                        _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref
+                        return $?
+                    else
+                        return 1
+                    fi
                 fi
             elif (( user_choice == manual_paths_opt_num )); then
                 read -e -r -p "Enter full path to TLS certificate file (.crt or .pem): " tls_cert_path_ref
@@ -2884,17 +2844,25 @@ _configure_server_forwarding_rules() {
     out_any_udp_rules_ref="false" # Initialize UDP flag
 
     print_menu_header "secondary" "Server Port Forwarding" "Step 4: Configure Forwarding Rules"
-    echo "Enter server ports to forward traffic from."
-    echo "Examples:"
-    echo "  - Single port (TCP): 80 (forwards server's public port 80 to client's port 80)"
-    echo "  - Single port (UDP): 53/udp (forwards server's 53/udp to client's 53/udp; requires 'accept_udp=true')"
-    echo "  - Port to specific client port: 8080:80 (forwards server's 8080 to client's port 80)"
-    echo "  - Port range: 7000-7010 (forwards server range 7000-7010 to client's range 7000-7010)"
-    echo "  - Port range to single client port: 7000-7010:6000 (forwards server range 7000-7010 to client's single port 6000)"
-    echo "  - To specific client IP & port: 2222=192.168.0.10:22 (forwards server's 2222 to 192.168.0.10:22 on client side)"
-    echo "Separate multiple rules with a comma. Examples:"
-    echo "  Ex 1: 80, 443:8443, 7000-7010, 53/udp"
-    echo "  Ex 2: 2222=10.0.0.5:22, 8000-8010:9000, 999/udp"
+    echo "Define how the server forwards incoming traffic to the client."
+    echo "You can specify multiple rules separated by commas."
+    echo
+    print_info "Rule Formats:"
+    echo "  - Port Forwarding: <server_port>:<client_port>"
+    echo "    e.g., '8080:80' forwards TCP traffic from server's port 8080 to client's port 80."
+    echo "  - Port Range Forwarding: <start>-<end>:<client_start>"
+    echo "    e.g., '7000-7010:7000' forwards server ports 7000-7010 to client ports 7000-7010."
+    echo "  - Simple Port Forwarding: <port>"
+    echo "    e.g., '443' is a shortcut for '443:443'."
+    echo "  - UDP Forwarding: Add '/udp' to the server port."
+    echo "    e.g., '53/udp' forwards UDP traffic from server's port 53 to client's port 53."
+    echo "    (Requires 'accept_udp = true' in advanced options for non-UDP transports)."
+    echo "  - Forward to Specific Client IP: <server_port>=<client_ip>:<client_port>"
+    echo "    e.g., '2222=192.168.0.10:22' forwards to a specific IP on the client's network."
+    echo
+    print_info "Example Entry:"
+    echo "  80, 443:8443, 7000-7010:7000, 53/udp, 2222=10.0.0.5:22"
+    echo
     echo "Leave blank for no forwarding."
     echo
 
@@ -2913,7 +2881,7 @@ _configure_server_forwarding_rules() {
     local rule_valid
     for rule_str_raw in "${raw_rules[@]}"; do
         local rule_str
-        rule_str=$(echo "$rule_str_raw" | xargs) # Trim whitespace
+        rule_str=$(xargs <<< "$rule_str_raw") # Trim whitespace
 
         if [[ -z "$rule_str" ]]; then continue; fi # Skip empty rules if user entered ",,"
 
@@ -4560,7 +4528,7 @@ create_systemd_service() {
     # Added User and Group. Increased LimitNOFILE.
     # Added ReadWritePaths for the new CONFIG_DIR and LOG_DIR.
     # Set PrivateTmp=false explicitly.
-    cat > "$service_file_path" <<EOL
+    cat > "$service_file_path" <<EOL || { handle_error "ERROR" "Failed to write to service file: $service_file_path"; return 1; }
 [Unit]
 Description=Backhaul Tunnel Service (${name_suffix})
 Documentation=https://github.com/Musixal/Backhaul
@@ -4574,8 +4542,8 @@ Restart=always
 RestartSec=5s
 TimeoutStopSec=10s
 LimitNOFILE=1048576
-$( [[ -n "$effective_user" ]] && echo "User=${effective_user}" )
-$( [[ -n "$effective_group" ]] && echo "Group=${effective_group}" )
+$( [[ -n "$effective_user" ]] && printf "User=%s\n" "$effective_user" )
+$( [[ -n "$effective_group" ]] && printf "Group=%s\n" "$effective_group" )
 
 # Security Hardening Options (optional, but good practice)
 # Security Hardening Options
@@ -4780,9 +4748,9 @@ _set_service_cron_job() {
     current_crontab=$(crontab -l 2>/dev/null)
 
     if [[ -z "$current_crontab" ]]; then
-        echo "$new_cron_job_line" | crontab -
+        printf "%s\n" "$new_cron_job_line" | crontab -
     else
-        (echo "$current_crontab"; echo "$new_cron_job_line") | crontab -
+        (printf "%s\n" "$current_crontab"; printf "%s\n" "$new_cron_job_line") | crontab -
     fi
 
     if crontab -l 2>/dev/null | grep -Fq "$new_cron_job_line"; then
@@ -5188,7 +5156,7 @@ _enable_tunnel_watcher() {
 
     # Create watcher configuration file (e.g., /tmp/backhaul-watcher-suffix.conf)
     local watcher_conf_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.conf"
-    cat > "$watcher_conf_file_path" <<EOL
+    cat > "$watcher_conf_file_path" <<EOL || { handle_error "ERROR" "Failed to write watcher config file: $watcher_conf_file_path"; return 1; }
 # Watcher configuration for tunnel: $tunnel_suffix
 SERVICE_NAME="$service_name"
 LOG_PATTERN="$w_log_pattern"
@@ -5201,7 +5169,7 @@ MAX_RETRIES="$w_max_retries"
 ROLE="$w_role"
 LISTEN_PORT="$w_listen_port"
 EOL
-    chmod 600 "$watcher_conf_file_path"
+    chmod 600 "$watcher_conf_file_path" || { handle_error "WARN" "Failed to chmod watcher config file."; }
     log_message "INFO" "Watcher config file created: $watcher_conf_file_path"
 
     # Create watcher launcher script (e.g., /tmp/backhaul-watcher-suffix.sh)
@@ -5688,20 +5656,22 @@ manage_tunnels_menu() {
             local status_str="Unknown"
             local status_color="$COLOR_YELLOW"
 
-            if systemctl list-units --full --all --type=service --no-legend "$current_service_name" | grep -q "$current_service_name"; then
-                if systemctl is-active --quiet "$current_service_name"; then
-                    status_str="Running"
-                    status_color="$COLOR_GREEN"
-                elif systemctl is-failed --quiet "$current_service_name"; then
-                    status_str="Failed"
-                    status_color="$COLOR_RED"
-                else
-                    status_str="Stopped"
-                    status_color="$COLOR_YELLOW"
-                fi
+            local service_status
+            service_status=$(systemctl show "$current_service_name" --property=ActiveState,SubState --value)
+            read -r active_state sub_state <<<"$service_status"
+
+            if [[ "$active_state" == "active" ]]; then
+                status_str="Running"
+                status_color="$COLOR_GREEN"
+            elif [[ "$active_state" == "failed" ]]; then
+                status_str="Failed"
+                status_color="$COLOR_RED"
+            elif [[ "$active_state" == "inactive" ]]; then
+                status_str="Stopped"
+                status_color="$COLOR_YELLOW"
             else
-                 status_str="No Service"
-                 status_color="$COLOR_RED"
+                status_str="No Service"
+                status_color="$COLOR_RED"
             fi
 
             tunnel_options+=("$idx. $current_tunnel_suffix [${status_color}${status_str}${COLOR_RESET}]")
@@ -5713,41 +5683,23 @@ manage_tunnels_menu() {
         # local exit_options=("0. Back to Main Menu") # No longer needed
         local user_choice menu_rc # menu_rc declared here, user_choice will be local too
 
-        menu_loop "Select tunnel to manage" tunnel_options "_manage_tunnels_menu_help"
-        menu_rc=$? # Capture $? first
-        user_choice="$MENU_CHOICE" # Then MENU_CHOICE
+        local choice
+        if ! menu_loop "Select tunnel to manage" tunnel_options choice; then
+            continue # Re-display menu on invalid input
+        fi
 
-        case "$menu_rc" in
-            0) # Numeric choice
-                if [[ -n "${service_name_map[$user_choice]}" ]]; then
-                    local selected_service="${service_name_map[$user_choice]}"
-                    local selected_suffix="${tunnel_suffix_map[$user_choice]}"
+        case "$choice" in
+            "?"|"?") _manage_tunnels_menu_help ;;
+            "m") go_to_main_menu; return 0 ;;
+            "r"|"x") return_from_menu; return 0 ;;
+            *)
+                if [[ "$choice" =~ ^[0-9]+$ ]] && [[ -n "${service_name_map[$choice]}" ]]; then
+                    local selected_service="${service_name_map[$choice]}"
+                    local selected_suffix="${tunnel_suffix_map[$choice]}"
                     navigate_to_menu "manage_specific_tunnel_menu \"$selected_service\" \"$selected_suffix\""
                     return 0 # Let main loop call the new menu function
-                else
-                    # This case should ideally not be reached if menu_loop validates numeric range
-                    print_warning "Invalid numeric selection: $user_choice. Please try again."
-                    press_any_key
                 fi
                 ;;
-            2) # '?' Help
-                # Help function already called by menu_loop. Loop again to show menu.
-                continue ;;
-            3) # 'm' Main Menu
-                go_to_main_menu
-                return 0 ;; # Return to main script loop
-            4) # 'x' Exit script
-                request_script_exit
-                return 0 ;; # Return to main script loop
-            5) # 'r' Return/Back/Cancel (to previous menu, likely main menu)
-                return_from_menu # This pops the stack
-                return 0 ;; # Return to main script loop
-            6) # Invalid input in menu_loop (warning and press_any_key handled by menu_loop)
-                continue ;; # Re-display this menu
-            *)
-                print_warning "Unexpected menu_loop return code in manage_tunnels_menu: $menu_rc (Choice: $user_choice)"
-                press_any_key
-                continue ;; # Re-display this menu
         esac
     done
 }
@@ -5813,76 +5765,51 @@ manage_specific_tunnel_menu() {
         
         print_menu_header "secondary" "Managing Tunnel: $tunnel_suffix" "Service: $service_name" "Status: ${current_status_color}${current_status_str}${COLOR_RESET}"
         
-        menu_loop "Select action" menu_options "_specific_tunnel_menu_help"
-        local menu_rc=$?
-        local user_choice="$MENU_CHOICE" # Capture MENU_CHOICE after $? is captured
+        local choice
+        if ! menu_loop "Select action" menu_options choice; then
+            continue # Re-display menu on invalid input
+        fi
 
-        # local action_performed_and_continue=false # May not be needed if all actions handle their own flow
-
-        case "$menu_rc" in
-            0) # Numeric choice
-                case "$user_choice" in
-                    "1") _mng_start_tunnel "$service_name" ;;
-                    "2") _mng_stop_tunnel "$service_name" ;;
-                    "3") _mng_restart_tunnel "$service_name" ;;
-                    "4")
-                        # view_system_log is a self-contained menu, use navigate_to_menu
-                        navigate_to_menu "view_system_log \"journalctl\" \"$service_name\" \"Logs for $tunnel_suffix\""
-                        return 0 ;;
-                    "5") _mng_view_configuration "$config_file_path" "$tunnel_suffix" ;;
-                    "6") _mng_edit_configuration "$config_file_path" "$service_name" ;;
-                    "7")
-                        # _mng_change_log_level is a self-contained menu, use navigate_to_menu
-                        navigate_to_menu "_mng_change_log_level \"$config_file_path\" \"$service_name\""
-                        return 0 ;;
-                    "8") _mng_hot_reload_service "$service_name" ;;
-                    "9") _mng_test_connection "$config_file_path" ;;
-                    "10")
-                         if type manage_tunnel_watcher &>/dev/null; then
-                            navigate_to_menu "manage_tunnel_watcher \"$service_name\" \"$tunnel_suffix\" \"$config_file_path\""
-                            return 0
-                         else
-                            handle_error "ERROR" "Watcher management module not loaded correctly."
-                            press_any_key
-                         fi
-                         ;;
-                    "11")
-                        if type validate_tunnel_config &>/dev/null; then # Assuming this is the correct validation function
-                            validate_tunnel_config "$config_file_path" # Or validate_specific_tunnel_config if it exists
-                        else
-                            handle_error "INFO" "Config validation function not available."
-                        fi
-                        press_any_key
-                        ;;
-                    "12")
-                        if _mng_delete_tunnel "$service_name" "$tunnel_suffix" "$config_file_path"; then
-                            return_from_menu # Deletion successful, return to tunnel list
-                            return 0
-                        fi
-                        # If deletion cancelled, _mng_delete_tunnel handles press_any_key and returns 1
-                        # The loop will continue to re-display this menu.
-                        ;;
-                    *) print_warning "Invalid option: $user_choice"; press_any_key ;;
-                esac
-                ;;
-            2) # '?' Help
-                # Help function already called by menu_loop. Loop again to show menu.
-                continue ;;
-            3) # 'm' Main Menu
-                go_to_main_menu
-                return 0 ;; # Return to main script loop
-            4) # 'x' Exit script
-                request_script_exit
-                return 0 ;; # Return to main script loop
-            5) # 'r' Return/Back/Cancel (to previous menu, tunnel list)
-                return_from_menu # This pops the stack
-                return 0 ;; # Return to main script loop
-            6) # Invalid input in menu_loop (warning and press_any_key handled by menu_loop)
-                continue ;; # Re-display this menu
-            *)
-                print_warning "Unexpected menu_loop return code in manage_specific_tunnel_menu: $menu_rc (Choice: $user_choice)"
+        case "$choice" in
+            "1") _mng_start_tunnel "$service_name" ;;
+            "2") _mng_stop_tunnel "$service_name" ;;
+            "3") _mng_restart_tunnel "$service_name" ;;
+            "4")
+                navigate_to_menu "view_system_log \"journalctl\" \"$service_name\" \"Logs for $tunnel_suffix\""
+                return 0 ;;
+            "5") _mng_view_configuration "$config_file_path" "$tunnel_suffix" ;;
+            "6") _mng_edit_configuration "$config_file_path" "$service_name" ;;
+            "7")
+                navigate_to_menu "_mng_change_log_level \"$config_file_path\" \"$service_name\""
+                return 0 ;;
+            "8") _mng_hot_reload_service "$service_name" ;;
+            "9") _mng_test_connection "$config_file_path" ;;
+            "10")
+                 if type manage_tunnel_watcher &>/dev/null; then
+                    navigate_to_menu "manage_tunnel_watcher \"$service_name\" \"$tunnel_suffix\" \"$config_file_path\""
+                    return 0
+                 else
+                    handle_error "ERROR" "Watcher management module not loaded correctly."
+                    press_any_key
+                 fi
+                 ;;
+            "11")
+                if type validate_tunnel_config &>/dev/null; then
+                    validate_tunnel_config "$config_file_path"
+                else
+                    handle_error "INFO" "Config validation function not available."
+                fi
                 press_any_key
-                continue ;; # Re-display this menu
+                ;;
+            "12")
+                if _mng_delete_tunnel "$service_name" "$tunnel_suffix" "$config_file_path"; then
+            return_from_menu
+                    return 0
+                fi
+                ;;
+            "?") _specific_tunnel_menu_help ;;
+            "m") go_to_main_menu; return 0 ;;
+            "r"|"x") return_from_menu; return 0 ;;
         esac
     done
 }
@@ -6138,19 +6065,10 @@ _mng_delete_tunnel() {
     echo "  - Associated UFW rules (comment: EasyBackhaul: tunnel-${tunnel_suffix})"
     echo "  - Associated watcher scripts, logs, and PID files in $EASYBACKHAUL_TMP_DIR and $LOG_DIR" # Use globals
 
-    if ! prompt_yes_no "Are you ABSOLUTELY SURE you want to delete tunnel '$tunnel_suffix'?" "n"; then
+    if ! prompt_yes_no "Are you sure you want to delete tunnel '$tunnel_suffix'?" "n"; then
         print_info "Tunnel deletion cancelled."
         press_any_key
-        return 1 # Indicate cancellation, stay in specific tunnel menu
-    fi
-    
-    local confirmation_text_expected="DELETE $tunnel_suffix"
-    local user_confirmation
-    read -r -p "To confirm, type exactly '$confirmation_text_expected': " user_confirmation
-    if [[ "$user_confirmation" != "$confirmation_text_expected" ]]; then
-        handle_error "ERROR" "Confirmation text did not match. Deletion aborted."
-        press_any_key
-        return 1 # Indicate cancellation
+        return 1
     fi
 
     log_message "WARN" "Proceeding with deletion of tunnel: $tunnel_suffix"
@@ -6268,49 +6186,26 @@ system_health_monitor_menu() {
         print_info "--- Active Watcher Processes (Summary) ---"
         if pgrep -f "${EASYBACKHAUL_TMP_DIR:-/tmp}/backhaul-watcher-.*\.sh" >/dev/null; then pgrep -af "${EASYBACKHAUL_TMP_DIR:-/tmp}/backhaul-watcher-.*\.sh" | sed 's/^/    /'; else print_info "  No active watcher processes found."; fi
 
-        menu_loop "Select action" health_menu_options "_health_monitor_menu_help"
-        local menu_rc=$?
-        local user_choice="$MENU_CHOICE" # Capture MENU_CHOICE after $? is captured
+        local choice
+        if ! menu_loop "Select action" health_menu_options choice; then
+            continue # Re-display menu on invalid input
+        fi
 
-        case "$menu_rc" in
-            0) # Numeric choice
-                case "$user_choice" in
-                    "1") continue ;; # Refresh by re-looping
-                    "2") run_with_spinner "Cleaning stale processes and files..." cleanup_stale_processes_and_files; press_any_key ;;
-                    "3")
-                        if [[ -n "$LOG_DIR" ]]; then
-                            # navigate_to_menu will push to stack, then current function returns 0
-                            # main loop will pick up the new function from stack.
-                            navigate_to_menu "view_system_log \"file\" \"$LOG_DIR/easybackhaul.log\" \"EasyBackhaul Main Log\""
-                            return 0 # Return to main script loop to process navigation
-                        else
-                            handle_error "WARNING" "LOG_DIR not defined."
-                            press_any_key
-                        fi
-                        ;;
-                    *) print_warning "Invalid option: $user_choice"; press_any_key ;;
-                esac
+        case "$choice" in
+            "1") continue ;; # Refresh by re-looping
+            "2") run_with_spinner "Cleaning stale processes and files..." cleanup_stale_processes_and_files; press_any_key ;;
+            "3")
+                if [[ -n "$LOG_DIR" ]]; then
+                    navigate_to_menu "view_system_log \"file\" \"$LOG_DIR/easybackhaul.log\" \"EasyBackhaul Main Log\""
+                    return 0 # Return to main script loop to process navigation
+                else
+                    handle_error "WARNING" "LOG_DIR not defined."
+                    press_any_key
+                fi
                 ;;
-            2) # '?' Help
-                # Help function already called by menu_loop. Loop again to show menu.
-                continue ;;
-            3) # 'm' Main Menu
-                go_to_main_menu
-                return 0 ;; # Return to main script loop
-            4) # 'x' Exit script
-                request_script_exit
-                return 0 ;; # Return to main script loop
-            5) # 'r' Return/Back/Cancel (to previous menu, likely main menu)
-                return_from_menu
-                return 0 ;; # Return to main script loop
-            6) # Invalid input in menu_loop (warning already printed by menu_loop)
-                # press_any_key was already handled by menu_loop before returning 6.
-                # Loop again to show the health monitor menu.
-                continue ;;
-            *)
-                print_warning "Unexpected menu_loop return code in system_health_monitor_menu: $menu_rc (Choice: $user_choice)"
-                press_any_key
-                continue ;; # Re-draw menu on unexpected code
+            "?") _health_monitor_menu_help ;;
+            "m") go_to_main_menu; return 0 ;;
+            "r"|"x") return_from_menu; return 0 ;;
         esac
     done
 }
@@ -6330,14 +6225,8 @@ _perform_full_uninstall() {
     echo "  - Log files and directory (from $LOG_DIR, likely /var/log/easybackhaul) - you will be asked about this."
     echo "  - Logrotate configuration (/etc/logrotate.d/easybackhaul)"
     
-    if ! prompt_yes_no "Are you absolutely sure you want to proceed with uninstallation?" "n"; then
+    if ! prompt_yes_no "Are you sure you want to uninstall EasyBackhaul?" "n"; then
         print_info "Uninstallation cancelled."; press_any_key; return 1; fi
-    
-    local confirm_uninstall_text="UNINSTALL EASYBACKHAUL NOW"
-    local user_confirmation
-    read -r -p "To confirm, type '$confirm_uninstall_text': " user_confirmation
-    if [[ "$user_confirmation" != "$confirm_uninstall_text" ]]; then
-        handle_error "ERROR" "Confirmation text did not match. Uninstallation aborted."; press_any_key; return 1; fi
     
     log_message "WARN" "Starting full uninstallation of EasyBackhaul..."
     
@@ -6436,6 +6325,13 @@ _perform_full_uninstall() {
     
     handle_success "EasyBackhaul uninstallation completed."
     print_info "Some manual cleanup of system logs (journalctl) might be desired if services were problematic."
+
+    # Self-delete the script
+    if [[ -n "$EASYBACKHAUL_INSTALL_PATH" && -f "$EASYBACKHAUL_INSTALL_PATH" ]]; then
+        secure_delete "$EASYBACKHAUL_INSTALL_PATH"
+        log_message "INFO" "Removed script from installation path: $EASYBACKHAUL_INSTALL_PATH"
+    fi
+
     print_info "Exiting now."
     exit 0
 }
@@ -6453,13 +6349,20 @@ _global_ctrl_c_handler() {
 main_menu_entry() {
     local binary_status_msg="Binary Status: "
     if [[ -f "$BIN_PATH" ]]; then
-        if [[ ! -x "$BIN_PATH" ]]; then binary_status_msg+="${COLOR_YELLOW}Found but NOT EXECUTABLE${COLOR_RESET} at $BIN_PATH"
+        if [[ ! -x "$BIN_PATH" ]]; then
+            binary_status_msg+="${COLOR_YELLOW}Found but NOT EXECUTABLE${COLOR_RESET} at $BIN_PATH"
         else
-            local version_info; version_info=$("$BIN_PATH" --version 2>/dev/null || "$BIN_PATH" -v 2>/dev/null | head -n1)
-            if [[ -n "$version_info" ]]; then binary_status_msg+="${COLOR_GREEN}OK ($version_info)${COLOR_RESET}"
-            else binary_status_msg+="${COLOR_GREEN}OK (Version unknown)${COLOR_RESET}"; fi
+            local version_info
+            version_info=$("$BIN_PATH" --version 2>/dev/null || "$BIN_PATH" -v 2>/dev/null | head -n1)
+            if [[ -n "$version_info" ]]; then
+                binary_status_msg+="${COLOR_GREEN}OK ($version_info)${COLOR_RESET}"
+            else
+                binary_status_msg+="${COLOR_GREEN}OK (Version unknown)${COLOR_RESET}"
+            fi
         fi
-    else binary_status_msg+="${COLOR_RED}NOT INSTALLED${COLOR_RESET} (Expected: $BIN_PATH)"; fi
+    else
+        binary_status_msg+="${COLOR_RED}NOT INSTALLED${COLOR_RESET} (Expected: $BIN_PATH)"
+    fi
     
     print_menu_header "primary" "EasyBackhaul Management Menu" "$binary_status_msg"
     
@@ -6473,93 +6376,49 @@ main_menu_entry() {
         "7. Manage UFW Firewall (if installed)"
         "8. Uninstall EasyBackhaul"
     )
-    local user_choice menu_rc
-
-    local help_func_name="show_main_application_help"
-    if ! type "$help_func_name" &>/dev/null; then
-        _generic_main_menu_help() {
-            print_menu_header "secondary" "Main Menu Help"
-            echo "This is the main control panel for EasyBackhaul."
-            echo "Use the number keys to select an option from the menu."
-            echo "Follow prompts for each section."
-            echo "The footer shows navigation keys: [?] Help | [c] Cancel Op | [r] Return/Back | [m] Main Menu | [x] Exit Script."
-            press_any_key
-        }
-        help_func_name="_generic_main_menu_help"
+    local choice
+    if ! menu_loop "Select option" main_menu_options choice; then
+        return 0 # Re-display menu on invalid input
     fi
 
-    menu_loop "Select option" main_menu_options "$help_func_name"
-    local menu_rc=$?
-    local user_choice="$MENU_CHOICE" # Capture MENU_CHOICE after $? is captured
-    
-    case "$menu_rc" in
-        0) # Numeric choice
-            case "$user_choice" in
-                "1") navigate_to_menu "configure_tunnel" ;;
-                "2") navigate_to_menu "manage_tunnels_menu" ;;
-                "3")
-                    # download_backhaul_binary_workflow handles its own user feedback and press_any_key.
-                    # It returns 0 for actual install success, 1 for failure/cancel,
-                    # and will be updated to return 2 if only diagnostics were run then cancelled.
-                    local workflow_rc
-                    download_backhaul_binary_workflow
-                    workflow_rc=$?
-                    if [[ "$workflow_rc" -eq 0 ]]; then
-                        # Optionally, a very brief confirmation here if needed, but primary feedback is in workflow.
-                        log_message "INFO" "Backhaul binary workflow completed successfully (main_menu_entry)."
-                    elif [[ "$workflow_rc" -eq 1 ]]; then
-                        log_message "WARN" "Backhaul binary workflow cancelled or failed (main_menu_entry)."
-                    # else # e.g. rc=2, diagnostics run then cancelled - no specific message here needed yet
-                    fi
-                    # No generic handle_success/error or press_any_key here.
-                    ;;
-                "4")
-                    # generate_self_signed_tls_cert handles its own user feedback and press_any_key.
-                    generate_self_signed_tls_cert
-                    # No generic handle_success/error or press_any_key here.
-                    ;;
-                "5") navigate_to_menu "system_health_monitor_menu" ;;
-                "6") run_with_spinner "Cleaning stale processes and temporary files..." cleanup_stale_processes_and_files; press_any_key ;;
-                "7")
-                    if command -v ufw &>/dev/null; then
-                        navigate_to_menu "manage_ufw_main_menu"
-                    else
-                        handle_error "WARNING" "UFW is not installed or not found in PATH."
-                        press_any_key
-                    fi
-                    ;;
-                "8")
-                    _perform_full_uninstall
-                    # If uninstallation was cancelled (returns 1), we want to stay in the main menu loop.
-                    # main_menu_entry will be called again by the main script loop.
-                    if [[ $? -eq 1 ]]; then return 0; fi
-                    # If uninstallation happened (returns 0), script exits, so this path isn't critical.
-                    ;;
-                 *) print_warning "Invalid selection from main_menu_entry: $user_choice"; press_any_key ;;
-            esac
+    case "$choice" in
+        "1") navigate_to_menu "configure_tunnel" ;;
+        "2") navigate_to_menu "manage_tunnels_menu" ;;
+        "3")
+            download_backhaul_binary_workflow
             ;;
-        2) # '?' Help
-            # Help function was already called by menu_loop.
-            # Loop again to show the main menu.
-            return 0 ;;
-        3) # 'm' Main Menu
-            # Already in main menu, so just re-display.
-            return 0 ;;
-        4) # 'x' Exit Script
-            request_script_exit
-            return 0 ;;
-        5) # 'r' Return/Back/Cancel
-            # In main menu, 'r' acts as 'x' (exit).
-            request_script_exit
-            return 0 ;;
-        6)  # Invalid input from menu_loop (warning and press_any_key already done by menu_loop)
-            # Just need to ensure main_menu_entry is re-displayed.
-            return 0 ;; # Fall through to the end of function's return 0 is fine.
-        *)
-            print_warning "Unexpected menu_loop return code in main_menu_entry: $menu_rc (Choice: $user_choice)"
-            press_any_key ;; # Fall through to the end of function's return 0.
+        "4")
+            local cert_path key_path
+            generate_self_signed_tls_cert cert_path key_path
+            ;;
+        "5") navigate_to_menu "system_health_monitor_menu" ;;
+        "6") run_with_spinner "Cleaning stale processes and temporary files..." cleanup_stale_processes_and_files; press_any_key ;;
+        "7")
+            if command -v ufw &>/dev/null; then
+                navigate_to_menu "manage_ufw_main_menu"
+            else
+                handle_error "WARNING" "UFW is not installed or not found in PATH."
+                press_any_key
+            fi
+            ;;
+        "8")
+            _perform_full_uninstall
+            ;;
+        "?") _generic_main_menu_help ;;
+        "m") # Already in main menu
+            ;;
+        "r"|"x") request_script_exit ;;
     esac
     return 0
+}
+
+_generic_main_menu_help() {
+    print_menu_header "secondary" "Main Menu Help"
+    echo "This is the main control panel for EasyBackhaul."
+    echo "Use the number keys to select an option from the menu."
+    echo "Follow prompts for each section."
+    echo "The footer shows navigation keys: [?] Help | [r] Return/Back/Cancel | [m] Main Menu | [x] Exit Script."
+    press_any_key
 }
 
 main_script_entry_point() {
@@ -6567,7 +6426,7 @@ main_script_entry_point() {
     if type init_logging &>/dev/null; then
         init_logging
     else
-        echo "FATAL ERROR: init_logging function not found. Cannot proceed." >&2
+        printf "FATAL ERROR: init_logging function not found. Cannot proceed.\n" >&2
         exit 1
     fi
 

@@ -10,17 +10,16 @@ _get_port_process_info() {
     log_message "DEBUG" "Checking process for port $port_to_check"
     
     if command -v ss &>/dev/null; then
-        # Using ss for more detailed info, including user if possible
-        ss -lntupe "sport = :$port_to_check" 2>/dev/null | awk 'NR>1 {print "  - Process (ss): " $0}' && return 0
+        ss -lntupe "sport = :$port_to_check" 2>/dev/null | awk 'NR>1 {printf "  - Process (ss): %s\n", $0}'
+    elif command -v netstat &>/dev/null; then
+        netstat -tlnp 2>/dev/null | grep ":${port_to_check}[[:space:]]" | awk '{printf "  - Process (netstat): %s\n", $0}'
+    elif command -v lsof &>/dev/null; then
+        lsof -i ":$port_to_check" -sTCP:LISTEN -P -n -- 2>/dev/null | awk 'NR>1 {printf "  - Process (lsof): %s\n", $0}'
+    else
+        print_info "  Port $port_to_check is in use, but detailed process info unavailable with current tools."
+        return 1
     fi
-    if command -v netstat &>/dev/null; then
-        netstat -tlnp 2>/dev/null | grep ":${port_to_check}[[:space:]]" | awk '{print "  - Process (netstat): " $0}' && return 0
-    fi
-    if command -v lsof &>/dev/null; then # More resource intensive
-        lsof -i ":$port_to_check" -sTCP:LISTEN -P -n -- 2>/dev/null | awk 'NR>1 {print "  - Process (lsof): " $0}' && return 0
-    fi
-    print_info "  Port $port_to_check is in use, but detailed process info unavailable with current tools."
-    return 1
+    return 0
 }
 
 
@@ -242,7 +241,7 @@ _prompt_transport_protocol() {
             0) # Numeric choice
                 if $show_all_options_now; then
                     if [[ "$MENU_CHOICE" -ge 1 && "$MENU_CHOICE" -le ${#transport_options_arr[@]} ]]; then
-                        transport_ref=$(echo "${transport_options_arr[$(($MENU_CHOICE-1))]}" | awk '{print $1}')
+                        transport_ref=$(awk '{print $1}' <<< "${transport_options_arr[$(($MENU_CHOICE-1))]}")
                         log_message "INFO" "Selected transport: $transport_ref"
                         return 0 # Success
                     else
@@ -330,7 +329,7 @@ _prompt_basic_config_params() {
     print_info "Set an authentication token (must match on both server and client)."
     while true; do
         read -r -s -p "Enter token (min 8 chars, or type 'cancel'): " auth_token_val
-        echo # Newline after secret input
+        printf "\n" # Newline after secret input
         if [[ "$auth_token_val" == "cancel" ]]; then
             print_info "Token input cancelled by user."
             return 1 # Signal cancellation
@@ -437,19 +436,16 @@ _prompt_tls_config() {
     case "$menu_rc" in
         0) # Numeric choice
             if (( user_choice == generate_new_opt_num )); then
-                if generate_self_signed_tls_cert; then # This function handles its own output and sets paths
-                    # It should output the paths it created, we need to capture them.
-                    # For now, assume generate_self_signed_tls_cert updates some global vars or returns paths.
-                    # This part needs refinement: generate_self_signed_tls_cert needs to return the paths.
-                    # Let's assume it writes to last_cert.path and last_key.path files for simplicity here.
-                    # This is a placeholder for better path communication.
-                    if [[ -f "$cert_dir_global/last_generated_cert.path" && -f "$cert_dir_global/last_generated_key.path" ]]; then
-                        tls_cert_path_ref=$(cat "$cert_dir_global/last_generated_cert.path")
-                        tls_key_path_ref=$(cat "$cert_dir_global/last_generated_key.path")
-                        rm -f "$cert_dir_global/last_generated_cert.path" "$cert_dir_global/last_generated_key.path"
+                # generate_self_signed_tls_cert now takes namerefs to store the paths
+                local generated_cert_path=""
+                local generated_key_path=""
+                if generate_self_signed_tls_cert generated_cert_path generated_key_path; then
+                    if [[ -n "$generated_cert_path" && -n "$generated_key_path" ]]; then
+                        tls_cert_path_ref="$generated_cert_path"
+                        tls_key_path_ref="$generated_key_path"
                         print_success "Using newly generated cert: $tls_cert_path_ref and key: $tls_key_path_ref"
                     else
-                        handle_error "ERROR" "Failed to retrieve paths of newly generated certificate/key. Please enter manually."
+                        handle_error "ERROR" "Certificate generation function completed but did not return paths. Please enter manually."
                         # Fallback to manual entry
                         read -e -r -p "Enter full path to TLS certificate file (.crt or .pem): " tls_cert_path_ref
                         read -e -r -p "Enter full path to TLS private key file (.key or .pem): " tls_key_path_ref
@@ -459,7 +455,12 @@ _prompt_tls_config() {
                     fi
                 else
                     print_warning "Self-signed certificate generation failed or was cancelled."
-                    if prompt_yes_no "Retry TLS configuration?" "y"; then _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref; return $?; else return 1; fi
+                    if prompt_yes_no "Retry TLS configuration?" "y"; then
+                        _prompt_tls_config "$transport" tls_cert_path_ref tls_key_path_ref
+                        return $?
+                    else
+                        return 1
+                    fi
                 fi
             elif (( user_choice == manual_paths_opt_num )); then
                 read -e -r -p "Enter full path to TLS certificate file (.crt or .pem): " tls_cert_path_ref
@@ -551,17 +552,25 @@ _configure_server_forwarding_rules() {
     out_any_udp_rules_ref="false" # Initialize UDP flag
 
     print_menu_header "secondary" "Server Port Forwarding" "Step 4: Configure Forwarding Rules"
-    echo "Enter server ports to forward traffic from."
-    echo "Examples:"
-    echo "  - Single port (TCP): 80 (forwards server's public port 80 to client's port 80)"
-    echo "  - Single port (UDP): 53/udp (forwards server's 53/udp to client's 53/udp; requires 'accept_udp=true')"
-    echo "  - Port to specific client port: 8080:80 (forwards server's 8080 to client's port 80)"
-    echo "  - Port range: 7000-7010 (forwards server range 7000-7010 to client's range 7000-7010)"
-    echo "  - Port range to single client port: 7000-7010:6000 (forwards server range 7000-7010 to client's single port 6000)"
-    echo "  - To specific client IP & port: 2222=192.168.0.10:22 (forwards server's 2222 to 192.168.0.10:22 on client side)"
-    echo "Separate multiple rules with a comma. Examples:"
-    echo "  Ex 1: 80, 443:8443, 7000-7010, 53/udp"
-    echo "  Ex 2: 2222=10.0.0.5:22, 8000-8010:9000, 999/udp"
+    echo "Define how the server forwards incoming traffic to the client."
+    echo "You can specify multiple rules separated by commas."
+    echo
+    print_info "Rule Formats:"
+    echo "  - Port Forwarding: <server_port>:<client_port>"
+    echo "    e.g., '8080:80' forwards TCP traffic from server's port 8080 to client's port 80."
+    echo "  - Port Range Forwarding: <start>-<end>:<client_start>"
+    echo "    e.g., '7000-7010:7000' forwards server ports 7000-7010 to client ports 7000-7010."
+    echo "  - Simple Port Forwarding: <port>"
+    echo "    e.g., '443' is a shortcut for '443:443'."
+    echo "  - UDP Forwarding: Add '/udp' to the server port."
+    echo "    e.g., '53/udp' forwards UDP traffic from server's port 53 to client's port 53."
+    echo "    (Requires 'accept_udp = true' in advanced options for non-UDP transports)."
+    echo "  - Forward to Specific Client IP: <server_port>=<client_ip>:<client_port>"
+    echo "    e.g., '2222=192.168.0.10:22' forwards to a specific IP on the client's network."
+    echo
+    print_info "Example Entry:"
+    echo "  80, 443:8443, 7000-7010:7000, 53/udp, 2222=10.0.0.5:22"
+    echo
     echo "Leave blank for no forwarding."
     echo
 
@@ -580,7 +589,7 @@ _configure_server_forwarding_rules() {
     local rule_valid
     for rule_str_raw in "${raw_rules[@]}"; do
         local rule_str
-        rule_str=$(echo "$rule_str_raw" | xargs) # Trim whitespace
+        rule_str=$(xargs <<< "$rule_str_raw") # Trim whitespace
 
         if [[ -z "$rule_str" ]]; then continue; fi # Skip empty rules if user entered ",,"
 

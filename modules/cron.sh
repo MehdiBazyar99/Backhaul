@@ -137,9 +137,9 @@ _set_service_cron_job() {
     current_crontab=$(crontab -l 2>/dev/null)
 
     if [[ -z "$current_crontab" ]]; then
-        echo "$new_cron_job_line" | crontab -
+        printf "%s\n" "$new_cron_job_line" | crontab -
     else
-        (echo "$current_crontab"; echo "$new_cron_job_line") | crontab -
+        (printf "%s\n" "$current_crontab"; printf "%s\n" "$new_cron_job_line") | crontab -
     fi
 
     if crontab -l 2>/dev/null | grep -Fq "$new_cron_job_line"; then

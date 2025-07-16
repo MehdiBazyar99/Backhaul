@@ -9,6 +9,10 @@ SERVER_ISP="N/A"
 # Fetches server's public IP and geo-information.
 # Populates SERVER_IP, SERVER_COUNTRY, SERVER_ISP global variables.
 get_server_info() {
+    if [[ "$SERVER_IP" != "N/A" && -n "$SERVER_IP" ]]; then
+        log_message "DEBUG" "Server info already cached. Skipping fetch."
+        return 0
+    fi
     log_message "INFO" "Attempting to fetch server IP and geo-information..."
     SERVER_IP="N/A"
     SERVER_COUNTRY="N/A"
@@ -179,7 +183,7 @@ install_downloaded_binary() {
         return 1
     fi
 
-    chmod +x "$BIN_PATH"
+    chmod +x "$BIN_PATH" || { handle_error "ERROR" "Failed to make binary executable: $BIN_PATH"; return 1; }
     set_secure_file_permissions "$BIN_PATH" "755" # Executable for owner, readable for others
 
     rm -rf "$temp_extract_dir"
@@ -333,35 +337,40 @@ _download_from_github() {
     local arch_suffix="$2"
     local latest_version=""
     
-    log_message "INFO" "Fetching latest Backhaul version from GitHub API..."
-    local api_response
-    api_response=$(curl -s --connect-timeout 10 "https://api.github.com/repos/Musixal/Backhaul/releases/latest")
+    _get_latest_version() {
+        log_message "INFO" "Fetching latest Backhaul version from GitHub API..."
+        local api_response
+        api_response=$(curl -s --connect-timeout 10 "https://api.github.com/repos/Musixal/Backhaul/releases/latest")
 
-    if [[ -n "$api_response" ]] && echo "$api_response" | jq -e .tag_name >/dev/null 2>&1; then
-        latest_version=$(echo "$api_response" | jq -r .tag_name)
-        if [[ -z "$latest_version" || "$latest_version" == "null" ]]; then
-            log_message "WARN" "Could not parse tag_name from GitHub API response. Will try a common fallback."
-            latest_version="v0.6.6" # Fallback, consider making this more dynamic or removing
-        else
-            log_message "INFO" "Latest version from GitHub: $latest_version"
+        if [[ -n "$api_response" ]] && echo "$api_response" | jq -e .tag_name >/dev/null 2>&1; then
+            latest_version=$(echo "$api_response" | jq -r .tag_name)
+            if [[ -z "$latest_version" || "$latest_version" == "null" ]]; then
+                return 1
+            fi
+            return 0
         fi
-    else
-        handle_error "WARNING" "Failed to fetch latest version from GitHub API. Check connectivity or API rate limits."
-        log_message "WARN" "Using fallback version v0.6.6 due to API fetch failure."
-        latest_version="v0.6.6"
+        return 1
+    }
+
+    if ! retry_operation "Get latest version from GitHub" 3 2 _get_latest_version; then
+        handle_error "WARNING" "Failed to fetch latest version from GitHub API after multiple retries. Check connectivity or API rate limits."
+        log_message "WARN" "Using fallback version v0.6.5 due to API fetch failure."
+        latest_version="v0.6.5"
     fi
+
+    log_message "INFO" "Using version: $latest_version"
 
     local download_url="https://github.com/Musixal/Backhaul/releases/download/${latest_version}/backhaul_${os}_${arch_suffix}.tar.gz"
     print_info "Attempting to download Backhaul ${latest_version} for ${os}/${arch_suffix}..."
-    echo "URL: $download_url"
+    printf "URL: %s\n" "$download_url"
 
     if run_with_spinner "Downloading from GitHub..." \
         wget --progress=dot:giga -O /tmp/backhaul.tar.gz "$download_url"; then
-        if install_downloaded_binary; then # install_downloaded_binary returns 0 on success
-            return 0 # Overall success
+        if install_downloaded_binary; then
+            return 0
         else
             handle_error "ERROR" "Binary installation failed after download."
-            return 1 # Installation part failed
+            return 1
         fi
     else
         handle_error "ERROR" "Download from GitHub failed. URL: $download_url"
@@ -383,7 +392,7 @@ _download_from_local_file() {
     while true; do
         read -e -r -p "Enter path to local .tar.gz file (or type 'cancel' to return): " local_file_path
         local lower_case_input
-        lower_case_input=$(echo "$local_file_path" | tr '[:upper:]' '[:lower:]')
+        lower_case_input=$(tr '[:upper:]' '[:lower:]' <<< "$local_file_path")
 
         if [[ "$lower_case_input" == "cancel" ]]; then
             print_info "Local file installation cancelled."
@@ -451,7 +460,7 @@ _use_existing_local_binary() {
     while true; do
         read -e -r -p "Enter full path to your local Backhaul binary file (or type 'cancel' to return): " local_binary_path
         local lower_case_input
-        lower_case_input=$(echo "$local_binary_path" | tr '[:upper:]' '[:lower:]')
+        lower_case_input=$(tr '[:upper:]' '[:lower:]' <<< "$local_binary_path")
 
         if [[ "$lower_case_input" == "cancel" ]]; then
             print_info "Using existing local binary cancelled."

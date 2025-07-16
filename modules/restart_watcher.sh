@@ -348,7 +348,7 @@ _enable_tunnel_watcher() {
 
     # Create watcher configuration file (e.g., /tmp/backhaul-watcher-suffix.conf)
     local watcher_conf_file_path="/tmp/backhaul-watcher-${tunnel_suffix}.conf"
-    cat > "$watcher_conf_file_path" <<EOL
+    cat > "$watcher_conf_file_path" <<EOL || { handle_error "ERROR" "Failed to write watcher config file: $watcher_conf_file_path"; return 1; }
 # Watcher configuration for tunnel: $tunnel_suffix
 SERVICE_NAME="$service_name"
 LOG_PATTERN="$w_log_pattern"
@@ -361,7 +361,7 @@ MAX_RETRIES="$w_max_retries"
 ROLE="$w_role"
 LISTEN_PORT="$w_listen_port"
 EOL
-    chmod 600 "$watcher_conf_file_path"
+    chmod 600 "$watcher_conf_file_path" || { handle_error "WARN" "Failed to chmod watcher config file."; }
     log_message "INFO" "Watcher config file created: $watcher_conf_file_path"
 
     # Create watcher launcher script (e.g., /tmp/backhaul-watcher-suffix.sh)

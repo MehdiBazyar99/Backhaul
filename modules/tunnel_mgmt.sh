@@ -85,20 +85,22 @@ manage_tunnels_menu() {
             local status_str="Unknown"
             local status_color="$COLOR_YELLOW"
 
-            if systemctl list-units --full --all --type=service --no-legend "$current_service_name" | grep -q "$current_service_name"; then
-                if systemctl is-active --quiet "$current_service_name"; then
-                    status_str="Running"
-                    status_color="$COLOR_GREEN"
-                elif systemctl is-failed --quiet "$current_service_name"; then
-                    status_str="Failed"
-                    status_color="$COLOR_RED"
-                else
-                    status_str="Stopped"
-                    status_color="$COLOR_YELLOW"
-                fi
+            local service_status
+            service_status=$(systemctl show "$current_service_name" --property=ActiveState,SubState --value)
+            read -r active_state sub_state <<<"$service_status"
+
+            if [[ "$active_state" == "active" ]]; then
+                status_str="Running"
+                status_color="$COLOR_GREEN"
+            elif [[ "$active_state" == "failed" ]]; then
+                status_str="Failed"
+                status_color="$COLOR_RED"
+            elif [[ "$active_state" == "inactive" ]]; then
+                status_str="Stopped"
+                status_color="$COLOR_YELLOW"
             else
-                 status_str="No Service"
-                 status_color="$COLOR_RED"
+                status_str="No Service"
+                status_color="$COLOR_RED"
             fi
 
             tunnel_options+=("$idx. $current_tunnel_suffix [${status_color}${status_str}${COLOR_RESET}]")
@@ -110,41 +112,23 @@ manage_tunnels_menu() {
         # local exit_options=("0. Back to Main Menu") # No longer needed
         local user_choice menu_rc # menu_rc declared here, user_choice will be local too
 
-        menu_loop "Select tunnel to manage" tunnel_options "_manage_tunnels_menu_help"
-        menu_rc=$? # Capture $? first
-        user_choice="$MENU_CHOICE" # Then MENU_CHOICE
+        local choice
+        if ! menu_loop "Select tunnel to manage" tunnel_options choice; then
+            continue # Re-display menu on invalid input
+        fi
 
-        case "$menu_rc" in
-            0) # Numeric choice
-                if [[ -n "${service_name_map[$user_choice]}" ]]; then
-                    local selected_service="${service_name_map[$user_choice]}"
-                    local selected_suffix="${tunnel_suffix_map[$user_choice]}"
+        case "$choice" in
+            "?"|"?") _manage_tunnels_menu_help ;;
+            "m") go_to_main_menu; return 0 ;;
+            "r"|"x") return_from_menu; return 0 ;;
+            *)
+                if [[ "$choice" =~ ^[0-9]+$ ]] && [[ -n "${service_name_map[$choice]}" ]]; then
+                    local selected_service="${service_name_map[$choice]}"
+                    local selected_suffix="${tunnel_suffix_map[$choice]}"
                     navigate_to_menu "manage_specific_tunnel_menu \"$selected_service\" \"$selected_suffix\""
                     return 0 # Let main loop call the new menu function
-                else
-                    # This case should ideally not be reached if menu_loop validates numeric range
-                    print_warning "Invalid numeric selection: $user_choice. Please try again."
-                    press_any_key
                 fi
                 ;;
-            2) # '?' Help
-                # Help function already called by menu_loop. Loop again to show menu.
-                continue ;;
-            3) # 'm' Main Menu
-                go_to_main_menu
-                return 0 ;; # Return to main script loop
-            4) # 'x' Exit script
-                request_script_exit
-                return 0 ;; # Return to main script loop
-            5) # 'r' Return/Back/Cancel (to previous menu, likely main menu)
-                return_from_menu # This pops the stack
-                return 0 ;; # Return to main script loop
-            6) # Invalid input in menu_loop (warning and press_any_key handled by menu_loop)
-                continue ;; # Re-display this menu
-            *)
-                print_warning "Unexpected menu_loop return code in manage_tunnels_menu: $menu_rc (Choice: $user_choice)"
-                press_any_key
-                continue ;; # Re-display this menu
         esac
     done
 }
@@ -210,76 +194,51 @@ manage_specific_tunnel_menu() {
         
         print_menu_header "secondary" "Managing Tunnel: $tunnel_suffix" "Service: $service_name" "Status: ${current_status_color}${current_status_str}${COLOR_RESET}"
         
-        menu_loop "Select action" menu_options "_specific_tunnel_menu_help"
-        local menu_rc=$?
-        local user_choice="$MENU_CHOICE" # Capture MENU_CHOICE after $? is captured
+        local choice
+        if ! menu_loop "Select action" menu_options choice; then
+            continue # Re-display menu on invalid input
+        fi
 
-        # local action_performed_and_continue=false # May not be needed if all actions handle their own flow
-
-        case "$menu_rc" in
-            0) # Numeric choice
-                case "$user_choice" in
-                    "1") _mng_start_tunnel "$service_name" ;;
-                    "2") _mng_stop_tunnel "$service_name" ;;
-                    "3") _mng_restart_tunnel "$service_name" ;;
-                    "4")
-                        # view_system_log is a self-contained menu, use navigate_to_menu
-                        navigate_to_menu "view_system_log \"journalctl\" \"$service_name\" \"Logs for $tunnel_suffix\""
-                        return 0 ;;
-                    "5") _mng_view_configuration "$config_file_path" "$tunnel_suffix" ;;
-                    "6") _mng_edit_configuration "$config_file_path" "$service_name" ;;
-                    "7")
-                        # _mng_change_log_level is a self-contained menu, use navigate_to_menu
-                        navigate_to_menu "_mng_change_log_level \"$config_file_path\" \"$service_name\""
-                        return 0 ;;
-                    "8") _mng_hot_reload_service "$service_name" ;;
-                    "9") _mng_test_connection "$config_file_path" ;;
-                    "10")
-                         if type manage_tunnel_watcher &>/dev/null; then
-                            navigate_to_menu "manage_tunnel_watcher \"$service_name\" \"$tunnel_suffix\" \"$config_file_path\""
-                            return 0
-                         else
-                            handle_error "ERROR" "Watcher management module not loaded correctly."
-                            press_any_key
-                         fi
-                         ;;
-                    "11")
-                        if type validate_tunnel_config &>/dev/null; then # Assuming this is the correct validation function
-                            validate_tunnel_config "$config_file_path" # Or validate_specific_tunnel_config if it exists
-                        else
-                            handle_error "INFO" "Config validation function not available."
-                        fi
-                        press_any_key
-                        ;;
-                    "12")
-                        if _mng_delete_tunnel "$service_name" "$tunnel_suffix" "$config_file_path"; then
-                            return_from_menu # Deletion successful, return to tunnel list
-                            return 0
-                        fi
-                        # If deletion cancelled, _mng_delete_tunnel handles press_any_key and returns 1
-                        # The loop will continue to re-display this menu.
-                        ;;
-                    *) print_warning "Invalid option: $user_choice"; press_any_key ;;
-                esac
-                ;;
-            2) # '?' Help
-                # Help function already called by menu_loop. Loop again to show menu.
-                continue ;;
-            3) # 'm' Main Menu
-                go_to_main_menu
-                return 0 ;; # Return to main script loop
-            4) # 'x' Exit script
-                request_script_exit
-                return 0 ;; # Return to main script loop
-            5) # 'r' Return/Back/Cancel (to previous menu, tunnel list)
-                return_from_menu # This pops the stack
-                return 0 ;; # Return to main script loop
-            6) # Invalid input in menu_loop (warning and press_any_key handled by menu_loop)
-                continue ;; # Re-display this menu
-            *)
-                print_warning "Unexpected menu_loop return code in manage_specific_tunnel_menu: $menu_rc (Choice: $user_choice)"
+        case "$choice" in
+            "1") _mng_start_tunnel "$service_name" ;;
+            "2") _mng_stop_tunnel "$service_name" ;;
+            "3") _mng_restart_tunnel "$service_name" ;;
+            "4")
+                navigate_to_menu "view_system_log \"journalctl\" \"$service_name\" \"Logs for $tunnel_suffix\""
+                return 0 ;;
+            "5") _mng_view_configuration "$config_file_path" "$tunnel_suffix" ;;
+            "6") _mng_edit_configuration "$config_file_path" "$service_name" ;;
+            "7")
+                navigate_to_menu "_mng_change_log_level \"$config_file_path\" \"$service_name\""
+                return 0 ;;
+            "8") _mng_hot_reload_service "$service_name" ;;
+            "9") _mng_test_connection "$config_file_path" ;;
+            "10")
+                 if type manage_tunnel_watcher &>/dev/null; then
+                    navigate_to_menu "manage_tunnel_watcher \"$service_name\" \"$tunnel_suffix\" \"$config_file_path\""
+                    return 0
+                 else
+                    handle_error "ERROR" "Watcher management module not loaded correctly."
+                    press_any_key
+                 fi
+                 ;;
+            "11")
+                if type validate_tunnel_config &>/dev/null; then
+                    validate_tunnel_config "$config_file_path"
+                else
+                    handle_error "INFO" "Config validation function not available."
+                fi
                 press_any_key
-                continue ;; # Re-display this menu
+                ;;
+            "12")
+                if _mng_delete_tunnel "$service_name" "$tunnel_suffix" "$config_file_path"; then
+            return_from_menu
+                    return 0
+                fi
+                ;;
+            "?") _specific_tunnel_menu_help ;;
+            "m") go_to_main_menu; return 0 ;;
+            "r"|"x") return_from_menu; return 0 ;;
         esac
     done
 }
@@ -535,19 +494,10 @@ _mng_delete_tunnel() {
     echo "  - Associated UFW rules (comment: EasyBackhaul: tunnel-${tunnel_suffix})"
     echo "  - Associated watcher scripts, logs, and PID files in $EASYBACKHAUL_TMP_DIR and $LOG_DIR" # Use globals
 
-    if ! prompt_yes_no "Are you ABSOLUTELY SURE you want to delete tunnel '$tunnel_suffix'?" "n"; then
+    if ! prompt_yes_no "Are you sure you want to delete tunnel '$tunnel_suffix'?" "n"; then
         print_info "Tunnel deletion cancelled."
         press_any_key
-        return 1 # Indicate cancellation, stay in specific tunnel menu
-    fi
-    
-    local confirmation_text_expected="DELETE $tunnel_suffix"
-    local user_confirmation
-    read -r -p "To confirm, type exactly '$confirmation_text_expected': " user_confirmation
-    if [[ "$user_confirmation" != "$confirmation_text_expected" ]]; then
-        handle_error "ERROR" "Confirmation text did not match. Deletion aborted."
-        press_any_key
-        return 1 # Indicate cancellation
+        return 1
     fi
 
     log_message "WARN" "Proceeding with deletion of tunnel: $tunnel_suffix"

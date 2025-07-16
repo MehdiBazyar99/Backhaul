@@ -14,11 +14,11 @@ ICON_WARNING="⚠"
 ICON_ERROR="✗"
 
 # --- Basic Print Functions ---
-print_info() { echo -e "${COLOR_BLUE}${ICON_INFO} $1${COLOR_RESET}"; }
-print_success() { echo -e "${COLOR_GREEN}${ICON_SUCCESS} $1${COLOR_RESET}"; }
-print_warning() { echo -e "${COLOR_YELLOW}${ICON_WARNING} $1${COLOR_RESET}"; }
-print_error() { echo -e "${COLOR_RED}${ICON_ERROR} $1${COLOR_RESET}"; }
-press_any_key() { read -n 1 -s -r -p "Press any key to continue..."; echo; }
+print_info() { printf "%b%s %s%b\n" "${COLOR_BLUE}" "${ICON_INFO}" "$1" "${COLOR_RESET}"; }
+print_success() { printf "%b%s %s%b\n" "${COLOR_GREEN}" "${ICON_SUCCESS}" "$1" "${COLOR_RESET}"; }
+print_warning() { printf "%b%s %s%b\n" "${COLOR_YELLOW}" "${ICON_WARNING}" "$1" "${COLOR_RESET}"; }
+print_error() { printf "%b%s %s%b\n" "${COLOR_RED}" "${ICON_ERROR}" "$1" "${COLOR_RESET}"; }
+press_any_key() { read -n 1 -s -r -p "Press any key to continue..."; }
 
 # --- Unified Logging System ---
 # LOG_LEVEL, LOG_DIR, LOG_MAX_FILES, LOG_FORMAT should be set in globals.sh
@@ -124,7 +124,7 @@ ${current_log_dir}/*.log {
     endscript
 }
 EOF
-    chmod 0644 "$logrotate_conf_target"
+    chmod 0644 "$logrotate_conf_target" || { log_message "WARN" "Failed to chmod logrotate config file."; return 1; }
     log_message "DEBUG" "Logrotate configuration created/updated at $logrotate_conf_target."
 }
 
@@ -153,13 +153,14 @@ log_message() {
     local log_entry
     if [[ "$current_log_format" == "json" ]]; then
         # Basic JSON escaping for the message
-        local escaped_message=$(echo "$message" | sed 's/"/\\"/g' | sed 's/\\/\\\\/g')
+        local escaped_message
+        escaped_message=$(printf "%s" "$message" | sed 's/"/\\"/g' | sed 's/\\/\\\\/g')
         log_entry="{\"timestamp\":\"$timestamp\",\"level\":\"$level\",\"message\":\"$escaped_message\"}"
     else
         log_entry="[$timestamp] [$level] $message"
     fi
 
-    echo "$log_entry" >> "$log_file_to_use"
+    printf "%s\n" "$log_entry" >> "$log_file_to_use"
 }
 
 # Logging convenience functions
@@ -176,7 +177,7 @@ handle_error() {
     local exit_code="${3:-1}"
 
     local upper_error_type
-    upper_error_type=$(echo "$error_type" | tr '[:lower:]' '[:upper:]')
+    upper_error_type=$(tr '[:lower:]' '[:upper:]' <<< "$error_type")
 
     case "$upper_error_type" in
         "CRITICAL")
@@ -221,7 +222,7 @@ sanitize_input() {
     # Remove dangerous characters and limit length.
     # Added @ . : / - _ to allow common characters in paths, IPs, etc.
     # Still restrictive, consider carefully if this is too aggressive.
-    echo "$input" | sed "s/[^a-zA-Z0-9@.:/\-_ ]/_/g" | head -c "$max_length"
+    sed "s/[^a-zA-Z0-9@.:/\-_ ]/_/g" <<< "$input" | head -c "$max_length"
 }
 
 validate_ip() {
@@ -266,27 +267,16 @@ check_port_availability() {
         return 1
     fi
     
-    # Try ss first (more modern)
     if command -v ss &>/dev/null; then
-        if ss -tuln | grep -q ":${port_to_check}[[:space:]]"; then # Added [[:space:]] to avoid matching substrings like 8080 for 80
+        if ss -tuln | grep -q ":${port_to_check}[[:space:]]"; then
             return 1 # Port in use
+        else
+            return 0 # Port available
         fi
-    # Fallback to netstat
-    elif command -v netstat &>/dev/null; then
-        if netstat -tuln | grep -q ":${port_to_check}[[:space:]]"; then
-            return 1 # Port in use
-        fi
-    # Fallback to lsof (can be slower)
-    elif command -v lsof &>/dev/null; then
-        if lsof -i ":$port_to_check" -sTCP:LISTEN -sUDP:LISTEN -P -n -- 2>/dev/null | grep -q LISTEN; then # More specific lsof
-            return 1 # Port in use
-        fi
-    else
-        log_message "WARN" "No suitable tool (ss, netstat, lsof) found to check port availability."
-        return 2 # Cannot determine
     fi
-    
-    return 0 # Port available
+
+    log_message "WARN" "No suitable tool (ss) found to check port availability."
+    return 2 # Cannot determine
 }
 
 check_nc_compatibility() {
@@ -294,14 +284,14 @@ check_nc_compatibility() {
     local nc_test_result=""
     
     if command -v timeout &>/dev/null; then
-        nc_test_result=$(timeout 3s bash -c 'echo | nc -l -p 0 -w 1 2>&1' 2>/dev/null || echo "timeout_or_error")
+        nc_test_result=$(timeout 3s bash -c 'printf "" | nc -l -p 0 -w 1 2>&1' 2>/dev/null || printf "timeout_or_error")
     else
         # Fallback without timeout command - riskier
-        ( nc -l -p 0 -w 1 >/dev/null 2>&1 & )
+        ( printf "" | nc -l -p 0 -w 1 >/dev/null 2>&1 & )
         local nc_pid=$!
         sleep 3
-        if kill -0 $nc_pid 2>/dev/null; then
-            kill -9 $nc_pid 2>/dev/null
+        if kill -0 "$nc_pid" 2>/dev/null; then
+            kill -9 "$nc_pid" 2>/dev/null
             nc_test_result="timeout_or_error"
         else
             # This path is tricky; if nc fails very fast due to incompatibility, it might seem like success.
@@ -313,7 +303,7 @@ check_nc_compatibility() {
     fi
     
     if [[ "$nc_test_result" == "timeout_or_error" ]] || \
-       echo "$nc_test_result" | grep -qiE 'usage|invalid|unknown option|must be used with|Ncat: Could not resolve hostname'; then
+       grep -qiE 'usage|invalid|unknown option|must be used with|Ncat: Could not resolve hostname' <<< "$nc_test_result"; then
         log_message "WARN" "Netcat (nc) may not support '-l -p -w 1' or test timed out/errored. Restart watcher and some features might not work reliably."
         print_warning "Netcat (nc) may not be fully compatible. Restart watcher might be unreliable."
         print_info "Consider installing 'netcat-openbsd' (Debian/Ubuntu) or 'nmap-ncat' (CentOS/RHEL/Fedora)."
@@ -354,16 +344,27 @@ ensure_netcat_installed() {
 
 check_basic_connectivity() {
     local test_hosts=("8.8.8.8" "1.1.1.1" "github.com")
+    local pids=()
     local success_count=0
 
     print_info "Testing basic network connectivity..."
 
     for host_to_test in "${test_hosts[@]}"; do
-        if ping -c 1 -W 2 "$host_to_test" >/dev/null 2>&1; then
-            log_message "DEBUG" "Successfully pinged $host_to_test."
+        (
+            if ping -c 1 -W 2 "$host_to_test" >/dev/null 2>&1; then
+                log_message "DEBUG" "Successfully pinged $host_to_test."
+                exit 0
+            else
+                log_message "WARN" "Failed to ping $host_to_test."
+                exit 1
+            fi
+        ) &
+        pids+=($!)
+    done
+
+    for pid in "${pids[@]}"; do
+        if wait "$pid"; then
             ((success_count++))
-        else
-            log_message "WARN" "Failed to ping $host_to_test."
         fi
     done
     
@@ -383,7 +384,7 @@ get_system_resources_summary() {
     mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}')
     disk_usage=$(df -P / | awk 'NR==2 {print $5}' | sed 's/%//') # Added -P for POSIX output
     
-    echo "CPU: ${cpu_usage}% | Memory: ${mem_usage}% | Disk: ${disk_usage}%"
+    printf "CPU: %s%% | Memory: %s%% | Disk: %s%%\n" "$cpu_usage" "$mem_usage" "$disk_usage"
 }
 
 display_system_resources() {
@@ -393,9 +394,9 @@ display_system_resources() {
     mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}')
     disk_usage=$(df -P / | awk 'NR==2 {print $5}' | sed 's/%//')
     
-    echo "  CPU Usage: ${cpu_usage}%"
-    echo "  Memory Usage: ${mem_usage}%"
-    echo "  Root Disk Usage: ${disk_usage}%"
+    printf "  CPU Usage: %s%%\n" "$cpu_usage"
+    printf "  Memory Usage: %s%%\n" "$mem_usage"
+    printf "  Root Disk Usage: %s%%\n" "$disk_usage"
     
     if (( cpu_usage > 85 )); then print_warning "  High CPU usage detected!"; fi
     if (( mem_usage > 85 )); then print_warning "  High memory usage detected!"; fi
@@ -430,10 +431,10 @@ with_performance_tracking() {
         else
             perf_log_entry="[$(date '+%Y-%m-%d %H:%M:%S')] [PERF] Operation: \"$operation_description\", Duration: ${duration_secs}s, Success: $success_status, ExitCode: $exit_code"
         fi
-        echo "$perf_log_entry" >> "$PERFORMANCE_LOG_FILE"
+        printf "%s\n" "$perf_log_entry" >> "$PERFORMANCE_LOG_FILE"
     fi
     
-    if (( $(echo "$duration_secs > 30" | bc -l 2>/dev/null || echo 0) )); then
+    if (( $(printf "%s" "$duration_secs" | bc -l 2>/dev/null || printf "0") )); then
         log_message "WARN" "Slow operation: \"$operation_description\" took ${duration_secs}s."
     fi
     
@@ -519,10 +520,10 @@ update_toml_value() {
     local key_regex="^[[:space:]]*${key}[[:space:]]*=[[:space:]]*"
 
     while IFS= read -r line || [[ -n "$line" ]]; do
-        if echo "$line" | grep -qE "$key_regex"; then
+        if grep -qE "$key_regex" <<< "$line"; then
             local comment_part=""
-            if echo "$line" | grep -q "#"; then
-                comment_part=" #"$(echo "$line" | sed 's/.*#//')
+            if grep -q "#" <<< "$line"; then
+                comment_part=" #$(sed 's/.*#//' <<< "$line")"
             fi
             case "$data_type" in
                 "numeric") echo "${key} = ${value}${comment_part}" >> "$temp_file" ;;
@@ -612,7 +613,7 @@ acquire_file_lock() {
 
         if [[ -f "$lock_file_path" ]]; then
             local lock_owner_pid
-            lock_owner_pid=$(cat "$lock_file_path" 2>/dev/null)
+    lock_owner_pid=$(<"$lock_file_path")
             if [[ -n "$lock_owner_pid" ]] && ! ps -p "$lock_owner_pid" > /dev/null 2>&1; then
                 log_message "WARN" "Stale lock file found for '$file_to_lock' (PID $lock_owner_pid). Removing."
                 rm -f "$lock_file_path"
@@ -638,7 +639,7 @@ release_file_lock() {
 
     if [[ -f "$lock_file_path" ]]; then
         local lock_owner_pid
-        lock_owner_pid=$(cat "$lock_file_path" 2>/dev/null)
+        lock_owner_pid=$(<"$lock_file_path")
         if [[ "$lock_owner_pid" == "$current_pid" ]] || [[ -z "$lock_owner_pid" ]]; then
             rm -f "$lock_file_path"
         else
@@ -715,8 +716,13 @@ print_menu_header() {
     local version_string="${SCRIPT_VERSION:-v14.0-dev}"
 
     if [[ "$type" == "primary" ]]; then
-        echo
-        echo "      EasyBackhaul Management Menu ($version_string)"
+        echo -e "${COLOR_BLUE}"
+        echo " ____    _    ____  __  __   _    _   _ ____   _    _     _    "
+        echo "| __ )  / \  / ___||  \/  | / \  | | | |  _ \ / \  | |   | |   "
+        echo "|  _ \ / _ \ \___ \| |\/| |/ _ \ | |_| | |_) / _ \ | |   | |   "
+        echo "| |_) / ___ \ ___) | |  | / ___ \|  _  |  __/ ___ \| |___| |___"
+        echo "|____/_/   \_\____/|_|  |_\_/   \_\_| |_|_| /_/   \_\_____|_____|"
+        echo -e "${COLOR_RESET}"
         echo "================================================================="
         echo "  Core by Musixal  |  Installer by @N4Xon"
         echo "-----------------------------------------------------------------"
@@ -832,7 +838,7 @@ prompt_for_ip() {
 # Unified menu footer printing
 print_menu_footer() {
     echo "----------------------------------------------------------------"
-    echo " [?] Help | [r] Return/Back/Cancel | [m] Main Menu | [x] Exit Script"
+    echo -e " [${COLOR_YELLOW}?${COLOR_RESET}] Help | [${COLOR_YELLOW}r${COLOR_RESET}] Return/Back/Cancel | [${COLOR_YELLOW}m${COLOR_RESET}] Main Menu | [${COLOR_YELLOW}x${COLOR_RESET}] Exit Script"
 }
 
 prompt_yes_no() {
@@ -848,7 +854,7 @@ prompt_yes_no() {
 
     while true; do
         read -r -p "$prompt_message $yn_prompt: " user_input
-        user_input=$(echo "${user_input:-$default_answer}" | tr '[:upper:]' '[:lower:]')
+        user_input=$(tr '[:upper:]' '[:lower:]' <<< "${user_input:-$default_answer}")
 
         case "$user_input" in
             y|yes) return 0 ;;
@@ -858,105 +864,42 @@ prompt_yes_no() {
     done
 }
 
-MENU_CHOICE="" # Global variable to store the result of menu_loop
-
-# Standardized menu loop.
-# Usage: menu_loop "Prompt Message" "options_array_name" ["custom_help_function_name"]
-# Sets MENU_CHOICE globally.
-# Returns:
-#   0: Valid NUMERIC choice. MENU_CHOICE holds the number string.
-#   2: '?' (Help) was pressed. MENU_CHOICE holds '?'. (Help function, if any, was called).
-#   3: 'm' (Main Menu) was pressed. MENU_CHOICE holds 'm'.
-#   4: 'x' (Exit Script) was pressed. MENU_CHOICE holds 'x'.
-#   5: 'r' (Return/Back/Cancel) was pressed. MENU_CHOICE holds 'r'.
-#   6: Invalid input (empty or non-matching). Warning printed by menu_loop for non-empty invalid. MENU_CHOICE holds the invalid input. Caller should redraw.
+# Refactored menu loop to be more concise and avoid global variables.
 menu_loop() {
     local prompt_msg="$1"
-    local -n options_ref=$2 # Array of menu options like "1. Do X"
-    local custom_help_function_name="${3:-}"
+    local -n options_ref=$2
+    local -n choice_ref=$3 # Nameref for the output variable
 
-    local min_numeric_opt=1
+    echo
+    for opt_str in "${options_ref[@]}"; do
+        echo -e "  ${COLOR_GREEN}${opt_str}${COLOR_RESET}"
+    done
+
+    print_menu_footer
+
     local max_numeric_opt=${#options_ref[@]}
-    
-    local prompt_numeric_choices_str=""
-    if (( max_numeric_opt > 0 )); then
-        if (( max_numeric_opt == 1 )); then
-            prompt_numeric_choices_str="1"
-        else
-            prompt_numeric_choices_str="${min_numeric_opt}-${max_numeric_opt}"
-        fi
+    local numeric_choices_str="1-${max_numeric_opt}"
+    if (( max_numeric_opt == 0 )); then
+        numeric_choices_str="none"
+    elif (( max_numeric_opt == 1 )); then
+        numeric_choices_str="1"
     fi
     
-    # This loop is now only for re-prompting on truly empty input after processing.
-    # All other paths (special keys, valid numeric, invalid non-empty) will RETURN from the function.
-    while true; do
-        for opt_str in "${options_ref[@]}"; do
-            echo "  $opt_str"
-        done
+    local full_prompt_str="$prompt_msg [${numeric_choices_str}, ?, r, m, x]: "
+    read -r -p "$full_prompt_str" choice_ref
+    choice_ref=$(xargs <<< "$(tr '[:upper:]' '[:lower:]' <<< "$choice_ref")")
 
-        print_menu_footer # Display updated footer
-
-        local full_prompt_str="$prompt_msg"
-        local available_choices_display=""
-        if [[ -n "$prompt_numeric_choices_str" ]]; then
-            available_choices_display="$prompt_numeric_choices_str, "
+    if [[ "$choice_ref" =~ ^[0-9]+$ ]]; then
+        if (( max_numeric_opt > 0 && choice_ref >= 1 && choice_ref <= max_numeric_opt )); then
+            return 0 # Valid numeric choice
         fi
-        available_choices_display+="?, r, m, x"
+    elif [[ "$choice_ref" =~ ^[?rmx]$ ]]; then
+        return 0 # Valid special command
+    fi
 
-        full_prompt_str+=" [${available_choices_display}]: "
-
-        local raw_choice
-        read -r -p "$full_prompt_str" raw_choice
-
-        local processed_choice
-        processed_choice=$(echo "$raw_choice" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        MENU_CHOICE="$processed_choice"
-
-        if [[ "$processed_choice" == "?" ]]; then
-            if [[ -n "$custom_help_function_name" ]] && type "$custom_help_function_name" &>/dev/null; then
-                "$custom_help_function_name"
-            else
-                print_info "No specific help available for this menu."
-                press_any_key
-            fi
-            return 2
-        elif [[ "$processed_choice" == "m" ]]; then
-            return 3
-        elif [[ "$processed_choice" == "x" ]]; then
-            return 4
-        elif [[ "$processed_choice" == "r" ]]; then
-            return 5
-        fi
-
-        if [[ "$processed_choice" =~ ^[0-9]+$ ]]; then
-            if (( max_numeric_opt == 0 )); then
-                 print_warning "Invalid option: '$processed_choice'. No numeric options available. Use navigation keys."
-                 press_any_key
-                 return 6
-            elif (( processed_choice >= min_numeric_opt && processed_choice <= max_numeric_opt )); then
-                return 0
-            else
-                 print_warning "Invalid numeric option: '$processed_choice'. Choose from ${prompt_numeric_choices_str} or navigation keys."
-                 press_any_key
-                 return 6
-            fi
-        else # Not numeric, and wasn't a special key
-            if [[ -n "$processed_choice" ]]; then
-                print_warning "Invalid option: '$processed_choice'. Please use numbers or navigation keys: ?, r, m, x."
-                press_any_key
-                return 6
-            else
-                # processed_choice IS empty (user just pressed Enter or entered only spaces)
-                # Return 6 to allow caller to redraw the full screen.
-                # No warning or press_any_key from menu_loop for this specific case.
-                return 6
-            fi
-        fi
-        # Unreachable code due to returns in all paths above, unless processed_choice was initially empty
-        # and the "else" for empty choice didn't return 6.
-        # The loop should only continue if processed_choice was empty AND the "else" above didn't return 6.
-        # Corrected logic: empty input now also returns 6. So this loop should not be hit again unless error.
-    done
+    print_warning "Invalid option: '$choice_ref'."
+    press_any_key
+    return 1 # Invalid choice
 }
 
 # --- Process Management & Cleanup ---
@@ -1007,7 +950,7 @@ cleanup_stale_processes_and_files() {
         if [[ "$pattern" == *".pid" ]]; then
             find /tmp -name "$(basename "$pattern")" -type f -print0 | while IFS= read -r -d $'\0' pid_file; do
                 local pid_val
-                pid_val=$(cat "$pid_file" 2>/dev/null)
+                pid_val=$(<"$pid_file")
                 if [[ -n "$pid_val" ]] && ! ps -p "$pid_val" > /dev/null 2>&1; then
                     log_message "INFO" "Removing stale PID file $pid_file for dead process $pid_val."
                     rm -f "$pid_file" && ((cleaned_items++))
@@ -1041,7 +984,7 @@ cleanup_watcher_files() {
 
     if [[ -f "$watcher_pid_file_path" ]]; then
         local watcher_pid_val
-        watcher_pid_val=$(cat "$watcher_pid_file_path" 2>/dev/null)
+        watcher_pid_val=$(<"$watcher_pid_file_path")
         if [[ -n "$watcher_pid_val" ]] && ps -p "$watcher_pid_val" > /dev/null 2>&1; then
             log_message "INFO" "Stopping watcher process PID $watcher_pid_val for tunnel $tunnel_suffix."
             kill "$watcher_pid_val" 2>/dev/null
@@ -1080,7 +1023,7 @@ run_with_spinner() {
 
     while ps -p $pid > /dev/null 2>&1; do
         printf "\b%s" "${spin_chars:i++%${#spin_chars}:1}"
-        sleep 0.1
+        sleep 0.05
     done
     printf "\b" # Clear spinner char
     
@@ -1131,7 +1074,9 @@ generate_random_secret() {
 }
 
 generate_self_signed_tls_cert() {
-    local cert_common_name="${1:-${SERVER_IP:-localhost}}"
+    local -n out_cert_path=$1
+    local -n out_key_path=$2
+    local cert_common_name="${3:-${SERVER_IP:-localhost}}"
     local cert_dir="${CERT_DIR:-/etc/easybackhaul/certs}"
     ensure_dir "$cert_dir" "700"
 
@@ -1157,29 +1102,34 @@ generate_self_signed_tls_cert() {
 
     local timestamp
     timestamp=$(date +%Y%m%d-%H%M%S)
-    local key_path="$cert_dir/privkey-$timestamp.pem"
-    local cert_path="$cert_dir/fullchain-$timestamp.pem"
+    local key_path_local="$cert_dir/privkey-$timestamp.pem"
+    local cert_path_local="$cert_dir/fullchain-$timestamp.pem"
     local subject_line="/C=$country_code/ST=$state_name/L=$locality_name/O=$org_name/CN=$final_cn"
 
-    print_info "Generating private key: $key_path"
-    if ! run_with_spinner "Generating private key..." openssl genpkey -algorithm RSA -out "$key_path" -pkeyopt rsa_keygen_bits:2048; then
+    print_info "Generating private key: $key_path_local"
+    if ! run_with_spinner "Generating private key..." openssl genpkey -algorithm RSA -out "$key_path_local" -pkeyopt rsa_keygen_bits:2048; then
         handle_error "ERROR" "OpenSSL private key generation failed. Check spinner log for details."
         press_any_key; return 1
     fi
-    set_secure_file_permissions "$key_path" "600"
+    set_secure_file_permissions "$key_path_local" "600"
 
-    print_info "Generating self-signed certificate: $cert_path"
-    if ! run_with_spinner "Generating certificate..." openssl req -new -x509 -key "$key_path" -out "$cert_path" -days 365 -subj "$subject_line"; then
+    print_info "Generating self-signed certificate: $cert_path_local"
+    if ! run_with_spinner "Generating certificate..." openssl req -new -x509 -key "$key_path_local" -out "$cert_path_local" -days 365 -subj "$subject_line"; then
         handle_error "ERROR" "OpenSSL certificate generation failed. Check spinner log for details."
-        rm -f "$key_path"
+        rm -f "$key_path_local"
         press_any_key; return 1
     fi
-    set_secure_file_permissions "$cert_path" "644"
+    set_secure_file_permissions "$cert_path_local" "644"
 
     print_success "TLS Certificate and Key generated successfully!"
-    echo "  Private Key: $key_path"
-    echo "  Certificate: $cert_path"
+    echo "  Private Key: $key_path_local"
+    echo "  Certificate: $cert_path_local"
     print_info "These paths can be used in your tunnel configurations for WSS/WSSMUX."
+
+    # Set the output nameref variables
+    out_cert_path="$cert_path_local"
+    out_key_path="$key_path_local"
+
     press_any_key
     return 0
 }

@@ -87,7 +87,7 @@ create_systemd_service() {
     # Added User and Group. Increased LimitNOFILE.
     # Added ReadWritePaths for the new CONFIG_DIR and LOG_DIR.
     # Set PrivateTmp=false explicitly.
-    cat > "$service_file_path" <<EOL
+    cat > "$service_file_path" <<EOL || { handle_error "ERROR" "Failed to write to service file: $service_file_path"; return 1; }
 [Unit]
 Description=Backhaul Tunnel Service (${name_suffix})
 Documentation=https://github.com/Musixal/Backhaul
@@ -101,8 +101,8 @@ Restart=always
 RestartSec=5s
 TimeoutStopSec=10s
 LimitNOFILE=1048576
-$( [[ -n "$effective_user" ]] && echo "User=${effective_user}" )
-$( [[ -n "$effective_group" ]] && echo "Group=${effective_group}" )
+$( [[ -n "$effective_user" ]] && printf "User=%s\n" "$effective_user" )
+$( [[ -n "$effective_group" ]] && printf "Group=%s\n" "$effective_group" )
 
 # Security Hardening Options (optional, but good practice)
 # Security Hardening Options
