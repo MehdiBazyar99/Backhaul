@@ -29,25 +29,25 @@ _globals_ensure_config_dir_for_secret() {
         if [[ ! -d "$parent_dir" ]]; then
             mkdir -p "$parent_dir"
             if [[ $? -ne 0 ]]; then
-                printf "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create parent directory: %s. Please check permissions.\n" "$parent_dir" >&2
+                echo "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create parent directory: $parent_dir. Please check permissions." >&2
                 return 1
             fi
             # Set ownership to root:nogroup and permissions to 0750 for the parent directory
             # This allows members of 'nogroup' (like 'nobody') to traverse into /etc/easybackhaul
-            chown root:nogroup "$parent_dir" || { printf "ERROR: Failed to chown %s\n" "$parent_dir"; return 1; }
-            chmod 0750 "$parent_dir" || { printf "ERROR: Failed to chmod %s\n" "$parent_dir"; return 1; }
+            chown root:nogroup "$parent_dir"
+            chmod 0750 "$parent_dir"
         fi
 
         mkdir -p "$CONFIG_DIR"
         if [[ $? -ne 0 ]]; then
-            printf "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create CONFIG_DIR: %s. Please check permissions.\n" "$CONFIG_DIR" >&2
+            echo "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create CONFIG_DIR: $CONFIG_DIR. Please check permissions." >&2
             return 1
         fi
         # Set ownership to root:nogroup and permissions to 0770 for the configs directory
         # This allows 'nogroup' to read/write/execute (list files) in this directory.
         # Individual config files will be 'nobody:nogroup' and '640'.
-        chown root:nogroup "$CONFIG_DIR" || { printf "ERROR: Failed to chown %s\n" "$CONFIG_DIR"; return 1; }
-        chmod 0770 "$CONFIG_DIR" || { printf "ERROR: Failed to chmod %s\n" "$CONFIG_DIR"; return 1; }
+        chown root:nogroup "$CONFIG_DIR"
+        chmod 0770 "$CONFIG_DIR"
         return 0
     fi
 
@@ -58,22 +58,22 @@ _globals_ensure_config_dir_for_secret() {
         local existing_parent_dir
         existing_parent_dir=$(dirname "$CONFIG_DIR")
         if [[ -d "$existing_parent_dir" ]]; then
-            if [[ "$(stat -c "%U:%G" "$existing_parent_dir")" != "root:nogroup" ]]; then
-                chown root:nogroup "$existing_parent_dir" || printf "WARNING: Failed to chown %s to root:nogroup\n" "$existing_parent_dir" >&2
+            if [[ $(stat -c "%U:%G" "$existing_parent_dir") != "root:nogroup" ]]; then
+                chown root:nogroup "$existing_parent_dir" || echo "WARNING: Failed to chown $existing_parent_dir to root:nogroup" >&2
             fi
-            if [[ "$(stat -c "%a" "$existing_parent_dir")" != "750" ]]; then
+            if [[ $(stat -c "%a" "$existing_parent_dir") != "750" ]]; then
                  # Check if current perms are more open, e.g. 755, if so, leave them. Otherwise set to 750.
                 current_perms_parent=$(stat -c "%a" "$existing_parent_dir")
                 if [[ "$current_perms_parent" -lt "750" && "$current_perms_parent" != "750" ]]; then # if less than 0750, set it
-                    chmod 0750 "$existing_parent_dir" || printf "WARNING: Failed to chmod %s to 0750\n" "$existing_parent_dir" >&2
+                    chmod 0750 "$existing_parent_dir" || echo "WARNING: Failed to chmod $existing_parent_dir to 0750" >&2
                 fi
             fi
         fi
 
         # Check and set CONFIG_DIR permissions
-        if [[ "$(stat -c "%U:%G" "$CONFIG_DIR")" != "root:nogroup" ]]; then
+        if [[ $(stat -c "%U:%G" "$CONFIG_DIR") != "root:nogroup" ]]; then
             chown root:nogroup "$CONFIG_DIR" || {
-                printf "WARNING: [_globals_ensure_config_dir_for_secret] Failed to chown existing CONFIG_DIR %s to root:nogroup.\n" "$CONFIG_DIR" >&2
+                echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to chown existing CONFIG_DIR $CONFIG_DIR to root:nogroup." >&2
             }
         fi
         # Current permissions for CONFIG_DIR should be 0770.
@@ -81,7 +81,7 @@ _globals_ensure_config_dir_for_secret() {
         current_perms_config_dir=$(stat -c "%a" "$CONFIG_DIR")
         if [[ "$current_perms_config_dir" -lt "770" && "$current_perms_config_dir" != "770" ]]; then # if less than 0770, set it
             chmod 0770 "$CONFIG_DIR" || {
-                printf "WARNING: [_globals_ensure_config_dir_for_secret] Failed to ensure 0770 permissions on existing CONFIG_DIR: %s.\n" "$CONFIG_DIR" >&2
+                echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to ensure 0770 permissions on existing CONFIG_DIR: $CONFIG_DIR." >&2
             }
         fi
     fi
@@ -98,7 +98,7 @@ else
     # Ensure config directory exists before trying to read from it.
     if _globals_ensure_config_dir_for_secret; then
         if [[ -f "$GLOBAL_WATCHER_SECRET_FILE" ]]; then
-            RESTART_WATCHER_SECRET_VALUE=$(<"$GLOBAL_WATCHER_SECRET_FILE")
+            RESTART_WATCHER_SECRET_VALUE=$(cat "$GLOBAL_WATCHER_SECRET_FILE" 2>/dev/null)
         fi
     fi
 fi
@@ -109,20 +109,20 @@ if [[ -z "$RESTART_WATCHER_SECRET_VALUE" ]]; then
         # Use direct command as helpers.sh (where generate_random_secret is) isn't sourced yet.
         GENERATED_SECRET_FALLBACK=$(openssl rand -hex 32 2>/dev/null || tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 64)
         if [[ -n "$GENERATED_SECRET_FALLBACK" ]]; then
-            printf "%s" "$GENERATED_SECRET_FALLBACK" > "$GLOBAL_WATCHER_SECRET_FILE"
+            echo "$GENERATED_SECRET_FALLBACK" > "$GLOBAL_WATCHER_SECRET_FILE"
             if [[ $? -eq 0 ]]; then # Check if write was successful
                 chmod 600 "$GLOBAL_WATCHER_SECRET_FILE"
                 RESTART_WATCHER_SECRET_VALUE="$GENERATED_SECRET_FALLBACK"
             else
                 # Failed to write to file, don't use the generated secret if it couldn't be persisted.
-                printf "ERROR: [_globals_ensure_config_dir_for_secret] Failed to write to %s. Watcher secret not set.\n" "$GLOBAL_WATCHER_SECRET_FILE" >&2
+                echo "ERROR: [_globals_ensure_config_dir_for_secret] Failed to write to $GLOBAL_WATCHER_SECRET_FILE. Watcher secret not set." >&2
                 RESTART_WATCHER_SECRET_VALUE="" # Ensure it remains empty
             fi
         else
-            printf "WARNING: [_globals_ensure_config_dir_for_secret] Failed to generate random string for RESTART_WATCHER_SECRET.\n" >&2
+            echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to generate random string for RESTART_WATCHER_SECRET." >&2
         fi
     else
-         printf "WARNING: [_globals_ensure_config_dir_for_secret] CONFIG_DIR '%s' not usable. Cannot generate/store global watcher secret.\n" "$CONFIG_DIR" >&2
+         echo "WARNING: [_globals_ensure_config_dir_for_secret] CONFIG_DIR '$CONFIG_DIR' not usable. Cannot generate/store global watcher secret." >&2
     fi
 fi
 RESTART_WATCHER_SECRET="$RESTART_WATCHER_SECRET_VALUE" # Assign to the final global var

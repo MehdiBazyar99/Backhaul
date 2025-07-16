@@ -66,26 +66,49 @@ system_health_monitor_menu() {
         print_info "--- Active Watcher Processes (Summary) ---"
         if pgrep -f "${EASYBACKHAUL_TMP_DIR:-/tmp}/backhaul-watcher-.*\.sh" >/dev/null; then pgrep -af "${EASYBACKHAUL_TMP_DIR:-/tmp}/backhaul-watcher-.*\.sh" | sed 's/^/    /'; else print_info "  No active watcher processes found."; fi
 
-        local choice
-        if ! menu_loop "Select action" health_menu_options choice "_health_monitor_menu_help"; then
-            continue # Re-display menu on invalid input
-        fi
+        menu_loop "Select action" health_menu_options "_health_monitor_menu_help"
+        local menu_rc=$?
+        local user_choice="$MENU_CHOICE" # Capture MENU_CHOICE after $? is captured
 
-        case "$choice" in
-            "1") continue ;; # Refresh by re-looping
-            "2") run_with_spinner "Cleaning stale processes and files..." cleanup_stale_processes_and_files; press_any_key ;;
-            "3")
-                if [[ -n "$LOG_DIR" ]]; then
-                    navigate_to_menu "view_system_log \"file\" \"$LOG_DIR/easybackhaul.log\" \"EasyBackhaul Main Log\""
-                    return 0 # Return to main script loop to process navigation
-                else
-                    handle_error "WARNING" "LOG_DIR not defined."
-                    press_any_key
-                fi
+        case "$menu_rc" in
+            0) # Numeric choice
+                case "$user_choice" in
+                    "1") continue ;; # Refresh by re-looping
+                    "2") run_with_spinner "Cleaning stale processes and files..." cleanup_stale_processes_and_files; press_any_key ;;
+                    "3")
+                        if [[ -n "$LOG_DIR" ]]; then
+                            # navigate_to_menu will push to stack, then current function returns 0
+                            # main loop will pick up the new function from stack.
+                            navigate_to_menu "view_system_log \"file\" \"$LOG_DIR/easybackhaul.log\" \"EasyBackhaul Main Log\""
+                            return 0 # Return to main script loop to process navigation
+                        else
+                            handle_error "WARNING" "LOG_DIR not defined."
+                            press_any_key
+                        fi
+                        ;;
+                    *) print_warning "Invalid option: $user_choice"; press_any_key ;;
+                esac
                 ;;
-            "?") _health_monitor_menu_help ;;
-            "m") go_to_main_menu; return 0 ;;
-            "r"|"x") return_from_menu; return 0 ;;
+            2) # '?' Help
+                # Help function already called by menu_loop. Loop again to show menu.
+                continue ;;
+            3) # 'm' Main Menu
+                go_to_main_menu
+                return 0 ;; # Return to main script loop
+            4) # 'x' Exit script
+                request_script_exit
+                return 0 ;; # Return to main script loop
+            5) # 'r' Return/Back/Cancel (to previous menu, likely main menu)
+                return_from_menu
+                return 0 ;; # Return to main script loop
+            6) # Invalid input in menu_loop (warning already printed by menu_loop)
+                # press_any_key was already handled by menu_loop before returning 6.
+                # Loop again to show the health monitor menu.
+                continue ;;
+            *)
+                print_warning "Unexpected menu_loop return code in system_health_monitor_menu: $menu_rc (Choice: $user_choice)"
+                press_any_key
+                continue ;; # Re-draw menu on unexpected code
         esac
     done
 }
@@ -105,8 +128,14 @@ _perform_full_uninstall() {
     echo "  - Log files and directory (from $LOG_DIR, likely /var/log/easybackhaul) - you will be asked about this."
     echo "  - Logrotate configuration (/etc/logrotate.d/easybackhaul)"
     
-    if ! prompt_yes_no "Are you sure you want to uninstall EasyBackhaul?" "n"; then
+    if ! prompt_yes_no "Are you absolutely sure you want to proceed with uninstallation?" "n"; then
         print_info "Uninstallation cancelled."; press_any_key; return 1; fi
+    
+    local confirm_uninstall_text="UNINSTALL EASYBACKHAUL NOW"
+    local user_confirmation
+    read -r -p "To confirm, type '$confirm_uninstall_text': " user_confirmation
+    if [[ "$user_confirmation" != "$confirm_uninstall_text" ]]; then
+        handle_error "ERROR" "Confirmation text did not match. Uninstallation aborted."; press_any_key; return 1; fi
     
     log_message "WARN" "Starting full uninstallation of EasyBackhaul..."
     
@@ -205,13 +234,6 @@ _perform_full_uninstall() {
     
     handle_success "EasyBackhaul uninstallation completed."
     print_info "Some manual cleanup of system logs (journalctl) might be desired if services were problematic."
-
-    # Self-delete the script
-    if [[ -n "$EASYBACKHAUL_INSTALL_PATH" && -f "$EASYBACKHAUL_INSTALL_PATH" ]]; then
-        secure_delete "$EASYBACKHAUL_INSTALL_PATH"
-        log_message "INFO" "Removed script from installation path: $EASYBACKHAUL_INSTALL_PATH"
-    fi
-
     print_info "Exiting now."
     exit 0
 }
@@ -229,20 +251,13 @@ _global_ctrl_c_handler() {
 main_menu_entry() {
     local binary_status_msg="Binary Status: "
     if [[ -f "$BIN_PATH" ]]; then
-        if [[ ! -x "$BIN_PATH" ]]; then
-            binary_status_msg+="${COLOR_YELLOW}Found but NOT EXECUTABLE${COLOR_RESET} at $BIN_PATH"
+        if [[ ! -x "$BIN_PATH" ]]; then binary_status_msg+="${COLOR_YELLOW}Found but NOT EXECUTABLE${COLOR_RESET} at $BIN_PATH"
         else
-            local version_info
-            version_info=$("$BIN_PATH" --version 2>/dev/null || "$BIN_PATH" -v 2>/dev/null | head -n1)
-            if [[ -n "$version_info" ]]; then
-                binary_status_msg+="${COLOR_GREEN}OK ($version_info)${COLOR_RESET}"
-            else
-                binary_status_msg+="${COLOR_GREEN}OK (Version unknown)${COLOR_RESET}"
-            fi
+            local version_info; version_info=$("$BIN_PATH" --version 2>/dev/null || "$BIN_PATH" -v 2>/dev/null | head -n1)
+            if [[ -n "$version_info" ]]; then binary_status_msg+="${COLOR_GREEN}OK ($version_info)${COLOR_RESET}"
+            else binary_status_msg+="${COLOR_GREEN}OK (Version unknown)${COLOR_RESET}"; fi
         fi
-    else
-        binary_status_msg+="${COLOR_RED}NOT INSTALLED${COLOR_RESET} (Expected: $BIN_PATH)"
-    fi
+    else binary_status_msg+="${COLOR_RED}NOT INSTALLED${COLOR_RESET} (Expected: $BIN_PATH)"; fi
     
     print_menu_header "primary" "EasyBackhaul Management Menu" "$binary_status_msg"
     
@@ -256,49 +271,93 @@ main_menu_entry() {
         "7. Manage UFW Firewall (if installed)"
         "8. Uninstall EasyBackhaul"
     )
-    local choice
-    if ! menu_loop "Select option" main_menu_options choice "_generic_main_menu_help"; then
-        return 0 # Re-display menu on invalid input
+    local user_choice menu_rc
+
+    local help_func_name="show_main_application_help"
+    if ! type "$help_func_name" &>/dev/null; then
+        _generic_main_menu_help() {
+            print_menu_header "secondary" "Main Menu Help"
+            echo "This is the main control panel for EasyBackhaul."
+            echo "Use the number keys to select an option from the menu."
+            echo "Follow prompts for each section."
+            echo "The footer shows navigation keys: [?] Help | [c] Cancel Op | [r] Return/Back | [m] Main Menu | [x] Exit Script."
+            press_any_key
+        }
+        help_func_name="_generic_main_menu_help"
     fi
 
-    case "$choice" in
-        "1") navigate_to_menu "configure_tunnel" ;;
-        "2") navigate_to_menu "manage_tunnels_menu" ;;
-        "3")
-            download_backhaul_binary_workflow
+    menu_loop "Select option" main_menu_options "$help_func_name"
+    local menu_rc=$?
+    local user_choice="$MENU_CHOICE" # Capture MENU_CHOICE after $? is captured
+    
+    case "$menu_rc" in
+        0) # Numeric choice
+            case "$user_choice" in
+                "1") navigate_to_menu "configure_tunnel" ;;
+                "2") navigate_to_menu "manage_tunnels_menu" ;;
+                "3")
+                    # download_backhaul_binary_workflow handles its own user feedback and press_any_key.
+                    # It returns 0 for actual install success, 1 for failure/cancel,
+                    # and will be updated to return 2 if only diagnostics were run then cancelled.
+                    local workflow_rc
+                    download_backhaul_binary_workflow
+                    workflow_rc=$?
+                    if [[ "$workflow_rc" -eq 0 ]]; then
+                        # Optionally, a very brief confirmation here if needed, but primary feedback is in workflow.
+                        log_message "INFO" "Backhaul binary workflow completed successfully (main_menu_entry)."
+                    elif [[ "$workflow_rc" -eq 1 ]]; then
+                        log_message "WARN" "Backhaul binary workflow cancelled or failed (main_menu_entry)."
+                    # else # e.g. rc=2, diagnostics run then cancelled - no specific message here needed yet
+                    fi
+                    # No generic handle_success/error or press_any_key here.
+                    ;;
+                "4")
+                    # generate_self_signed_tls_cert handles its own user feedback and press_any_key.
+                    generate_self_signed_tls_cert
+                    # No generic handle_success/error or press_any_key here.
+                    ;;
+                "5") navigate_to_menu "system_health_monitor_menu" ;;
+                "6") run_with_spinner "Cleaning stale processes and temporary files..." cleanup_stale_processes_and_files; press_any_key ;;
+                "7")
+                    if command -v ufw &>/dev/null; then
+                        navigate_to_menu "manage_ufw_main_menu"
+                    else
+                        handle_error "WARNING" "UFW is not installed or not found in PATH."
+                        press_any_key
+                    fi
+                    ;;
+                "8")
+                    _perform_full_uninstall
+                    # If uninstallation was cancelled (returns 1), we want to stay in the main menu loop.
+                    # main_menu_entry will be called again by the main script loop.
+                    if [[ $? -eq 1 ]]; then return 0; fi
+                    # If uninstallation happened (returns 0), script exits, so this path isn't critical.
+                    ;;
+                 *) print_warning "Invalid selection from main_menu_entry: $user_choice"; press_any_key ;;
+            esac
             ;;
-        "4")
-            local cert_path key_path
-            generate_self_signed_tls_cert cert_path key_path
-            ;;
-        "5") navigate_to_menu "system_health_monitor_menu" ;;
-        "6") run_with_spinner "Cleaning stale processes and temporary files..." cleanup_stale_processes_and_files; press_any_key ;;
-        "7")
-            if command -v ufw &>/dev/null; then
-                navigate_to_menu "manage_ufw_main_menu"
-            else
-                handle_error "WARNING" "UFW is not installed or not found in PATH."
-                press_any_key
-            fi
-            ;;
-        "8")
-            _perform_full_uninstall
-            ;;
-        "?") _generic_main_menu_help ;;
-        "m") # Already in main menu
-            ;;
-        "r"|"x") request_script_exit ;;
+        2) # '?' Help
+            # Help function was already called by menu_loop.
+            # Loop again to show the main menu.
+            return 0 ;;
+        3) # 'm' Main Menu
+            # Already in main menu, so just re-display.
+            return 0 ;;
+        4) # 'x' Exit Script
+            request_script_exit
+            return 0 ;;
+        5) # 'r' Return/Back/Cancel
+            # In main menu, 'r' acts as 'x' (exit).
+            request_script_exit
+            return 0 ;;
+        6)  # Invalid input from menu_loop (warning and press_any_key already done by menu_loop)
+            # Just need to ensure main_menu_entry is re-displayed.
+            return 0 ;; # Fall through to the end of function's return 0 is fine.
+        *)
+            print_warning "Unexpected menu_loop return code in main_menu_entry: $menu_rc (Choice: $user_choice)"
+            press_any_key ;; # Fall through to the end of function's return 0.
     esac
     return 0
-}
-
-_generic_main_menu_help() {
-    print_menu_header "secondary" "Main Menu Help"
-    echo "This is the main control panel for EasyBackhaul."
-    echo "Use the number keys to select an option from the menu."
-    echo "Follow prompts for each section."
-    echo "The footer shows navigation keys: [?] Help | [r] Return/Back/Cancel | [m] Main Menu | [x] Exit Script."
-    press_any_key
 }
 
 main_script_entry_point() {
@@ -306,7 +365,7 @@ main_script_entry_point() {
     if type init_logging &>/dev/null; then
         init_logging
     else
-        printf "FATAL ERROR: init_logging function not found. Cannot proceed.\n" >&2
+        echo "FATAL ERROR: init_logging function not found. Cannot proceed." >&2
         exit 1
     fi
 
