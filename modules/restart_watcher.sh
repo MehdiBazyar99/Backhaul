@@ -305,16 +305,16 @@ _enable_tunnel_watcher() {
     local w_delay_local=10 w_delay_remote=10 w_max_retries=3
 
     # Determine role and pre-fill some values based on tunnel config
-    if grep -q 'mode[[:space:]]*=[[:space:]]*"server"' "$config_file"; then
+    if grep -q '\[server\]' "$config_file"; then
         w_role="server"
         print_info "This is a SERVER tunnel. You need the CLIENT's public IP for watcher communication."
         read -r -p "Enter CLIENT's public IP address: " w_remote_host
         if ! validate_ip "$w_remote_host"; then handle_error "ERROR" "Invalid IP address for remote host."; press_any_key; return 1; fi
         w_listen_port="${WATCHER_SERVER_LISTEN_PORT:-45679}" # Server listens on one port
         w_remote_port="${WATCHER_CLIENT_LISTEN_PORT:-45680}" # Server sends to client's listen port
-    elif grep -q 'mode[[:space:]]*=[[:space:]]*"client"' "$config_file"; then
+    elif grep -q '\[client\]' "$config_file"; then
         w_role="client"
-        w_remote_host=$(grep 'server[[:space:]]*=' "$config_file" | sed 's/.*=[[:space:]]*"\(.*\):.*"/\1/')
+        w_remote_host=$(grep 'remote_addr[[:space:]]*=' "$config_file" | sed 's/.*=[[:space:]]*"\(.*\):.*"/\1/')
         if ! validate_ip "$w_remote_host"; then handle_error "ERROR" "Could not parse server IP from tunnel config."; press_any_key; return 1; fi
         print_info "This is a CLIENT tunnel. Remote server IP for watcher: $w_remote_host"
         w_listen_port="${WATCHER_CLIENT_LISTEN_PORT:-45680}" # Client listens on one port
