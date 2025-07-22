@@ -477,4 +477,6 @@ true # Ensure script is valid if sourced
 # <<< START OF SCRIPT EXECUTION >>>
 # This call should be the very last thing in the concatenated easybh.sh
 # Ensure all necessary files are sourced before this point by build.sh
-main_script_entry_point
+if [[ "${EASYBACKHAUL_SOURCED:-false}" != "true" ]]; then
+    main_script_entry_point
+fi

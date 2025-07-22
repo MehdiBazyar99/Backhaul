@@ -365,40 +365,51 @@ EOL
     log_message "INFO" "Watcher config file created: $watcher_conf_file_path"
 
     # Create watcher launcher script (e.g., /tmp/backhaul-watcher-suffix.sh)
-    # This launcher script will source globals.sh, then helpers.sh, then the watcher conf, then call _run_watcher_process
     local watcher_launcher_script_path="/tmp/backhaul-watcher-${tunnel_suffix}.sh"
+
+    # The main easybh.sh script's location is needed to reliably source modules.
+    # We assume it's in the user's PATH and find it.
+    local main_script_path
+    main_script_path=$(command -v easybh.sh)
+    if [[ -z "$main_script_path" ]]; then
+        # Fallback if not in PATH: check common locations.
+        if [[ -f "/usr/local/bin/easybh.sh" ]]; then
+            main_script_path="/usr/local/bin/easybh.sh"
+        elif [[ -f "./easybh.sh" ]]; then
+            main_script_path="./easybh.sh"
+        else
+            handle_error "ERROR" "Could not locate the main 'easybh.sh' script. Watcher cannot be started."
+            press_any_key
+            return 1
+        fi
+    fi
+
     cat > "$watcher_launcher_script_path" <<EOLSCRIPT
 #!/bin/bash
 # Launcher for EasyBackhaul Watcher: ${tunnel_suffix}
 
-# Determine script's own directory to find other modules if needed
-SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
-EASYBACKHAUL_BASE_DIR="\$(dirname "\$SCRIPT_DIR")" # Assuming modules are one level up from a bin dir or similar
+# The main easybh.sh script is a single file containing all modules.
+# We can source it directly to get access to all necessary functions.
+MAIN_SCRIPT_PATH="$main_script_path"
 
-# Source required global variables and helper functions
-# This assumes that when easybh.sh is built, globals.sh and helpers.sh contents are available
-# For a truly standalone script, these would need to be embedded or sourced differently.
-# For now, we rely on the main script's structure.
-if [[ -f "\${EASYBACKHAUL_BASE_DIR}/modules/globals.sh" ]]; then
-    source "\${EASYBACKHAUL_BASE_DIR}/modules/globals.sh"
-else
-    echo "FATAL: globals.sh not found for watcher." >&2; exit 1;
+if [[ ! -f "\$MAIN_SCRIPT_PATH" ]]; then
+    echo "FATAL: Main script not found at \$MAIN_SCRIPT_PATH" >&2
+    exit 1
 fi
-if [[ -f "\${EASYBACKHAUL_BASE_DIR}/modules/helpers.sh" ]]; then
-    source "\${EASYBACKHAUL_BASE_DIR}/modules/helpers.sh"
-else
-    echo "FATAL: helpers.sh not found for watcher." >&2; exit 1;
-fi
-# Source the watcher's own functions (this file itself, if structured for it)
-# This is tricky if restart_watcher.sh contains both UI and core logic.
-# For now, assume _run_watcher_process is available because this whole module is sourced by easybh.sh
-# This means the launcher is simpler, it just sets up env and calls the function.
 
-# Load specific watcher config
+# Source the entire easybh.sh script. This makes all functions available.
+# We add a guard to prevent the main_script_entry_point from running.
+export EASYBACKHAUL_SOURCED=true
+source "\$MAIN_SCRIPT_PATH"
+unset EASYBACKHAUL_SOURCED
+
+# Load the specific configuration for this watcher instance
 source "$watcher_conf_file_path"
 
-# Call the main watcher process function (defined in the sourced modules/restart_watcher.sh)
+# Now, call the watcher's main execution function, which was loaded
+# from the main script.
 _run_watcher_process
+
 EOLSCRIPT
     chmod +x "$watcher_launcher_script_path"
     log_message "INFO" "Watcher launcher script created: $watcher_launcher_script_path"

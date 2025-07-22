@@ -67,17 +67,24 @@ create_systemd_service() {
     fi
 
     # Ensure the service configuration file has correct ownership and permissions
-    # The CONFIG_DIR (/etc/easybackhaul/configs) itself should be root:nogroup 0770 (set by globals.sh)
-    # This allows 'nobody' (if in 'nogroup') to read files within it.
-    if [[ -f "$config_path" ]] && [[ "$(id -u)" -eq 0 ]]; then
+    if [[ ! -f "$config_path" ]]; then
+        handle_error "ERROR" "Configuration file $config_path not found. Cannot set permissions or create service."
+        return 1
+    fi
+    if [[ "$(id -u)" -eq 0 ]]; then
+        # Ensure parent directory has correct permissions for traversal
+        local config_parent_dir
+        config_parent_dir=$(dirname "$config_path")
+        if [[ -d "$config_parent_dir" ]]; then
+            chown root:nogroup "$config_parent_dir"
+            chmod 0750 "$config_parent_dir" # rwx r-x ---
+        fi
+
         log_message "DEBUG" "Setting ownership of $config_path to $effective_user:$effective_group"
         chown "${effective_user}:${effective_group}" "$config_path" || handle_error "WARN" "Failed to chown $config_path to $effective_user:$effective_group"
 
         log_message "DEBUG" "Setting permissions of $config_path to 0640"
         chmod 0640 "$config_path" || handle_error "WARN" "Failed to chmod $config_path to 0640"
-    elif [[ ! -f "$config_path" ]]; then
-        handle_error "ERROR" "Configuration file $config_path not found. Cannot set permissions or create service."
-        return 1
     fi
 
     # Ensure the directory for systemd service files exists
