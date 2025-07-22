@@ -52,10 +52,9 @@ _globals_ensure_config_dir_for_secret() {
                 echo "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create parent directory: $parent_dir. Please check permissions." >&2
                 return 1
             fi
-            # Set ownership to root:nogroup and permissions to 0750 for the parent directory
-            # This allows members of 'nogroup' (like 'nobody') to traverse into /etc/easybackhaul
-            chown root:nogroup "$parent_dir"
-            chmod 0750 "$parent_dir"
+            # Set ownership to root:easybackhaul and permissions to 0770 for the parent directory
+            chown root:easybackhaul "$parent_dir"
+            chmod 0770 "$parent_dir"
         fi
 
         mkdir -p "$CONFIG_DIR"
@@ -63,43 +62,32 @@ _globals_ensure_config_dir_for_secret() {
             echo "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create CONFIG_DIR: $CONFIG_DIR. Please check permissions." >&2
             return 1
         fi
-        # Set ownership to root:nogroup and permissions to 0770 for the configs directory
-        # This allows 'nogroup' to read/write/execute (list files) in this directory.
-        # Individual config files will be 'nobody:nogroup' and '640'.
-        chown root:nogroup "$CONFIG_DIR"
+        # Set ownership to root:easybackhaul and permissions to 0770 for the configs directory
+        chown root:easybackhaul "$CONFIG_DIR"
         chmod 0770 "$CONFIG_DIR"
         return 0
     fi
 
     # If directory already exists, ensure its permissions and ownership are correct.
-    # This handles cases where the script might have run before with different settings.
     if [[ -d "$CONFIG_DIR" ]]; then
-        # Ensure parent directory /etc/easybackhaul also has correct perms/owner
         local existing_parent_dir
         existing_parent_dir=$(dirname "$CONFIG_DIR")
         if [[ -d "$existing_parent_dir" ]]; then
-            if [[ $(stat -c "%U:%G" "$existing_parent_dir") != "root:nogroup" ]]; then
-                chown root:nogroup "$existing_parent_dir" || echo "WARNING: Failed to chown $existing_parent_dir to root:nogroup" >&2
+            if [[ $(stat -c "%U:%G" "$existing_parent_dir") != "root:easybackhaul" ]]; then
+                chown root:easybackhaul "$existing_parent_dir" || echo "WARNING: Failed to chown $existing_parent_dir to root:easybackhaul" >&2
             fi
-            if [[ $(stat -c "%a" "$existing_parent_dir") != "750" ]]; then
-                 # Check if current perms are more open, e.g. 755, if so, leave them. Otherwise set to 750.
-                current_perms_parent=$(stat -c "%a" "$existing_parent_dir")
-                if [[ "$current_perms_parent" -lt "750" && "$current_perms_parent" != "750" ]]; then # if less than 0750, set it
-                    chmod 0750 "$existing_parent_dir" || echo "WARNING: Failed to chmod $existing_parent_dir to 0750" >&2
-                fi
+            if [[ $(stat -c "%a" "$existing_parent_dir") != "770" ]]; then
+                chmod 0770 "$existing_parent_dir" || echo "WARNING: Failed to chmod $existing_parent_dir to 0770" >&2
             fi
         fi
 
         # Check and set CONFIG_DIR permissions
-        if [[ $(stat -c "%U:%G" "$CONFIG_DIR") != "root:nogroup" ]]; then
-            chown root:nogroup "$CONFIG_DIR" || {
-                echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to chown existing CONFIG_DIR $CONFIG_DIR to root:nogroup." >&2
+        if [[ $(stat -c "%U:%G" "$CONFIG_DIR") != "root:easybackhaul" ]]; then
+            chown root:easybackhaul "$CONFIG_DIR" || {
+                echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to chown existing CONFIG_DIR $CONFIG_DIR to root:easybackhaul." >&2
             }
         fi
-        # Current permissions for CONFIG_DIR should be 0770.
-        # If they are more permissive (e.g., 775, 777), that's okay. If less, set to 0770.
-        current_perms_config_dir=$(stat -c "%a" "$CONFIG_DIR")
-        if [[ "$current_perms_config_dir" -lt "770" && "$current_perms_config_dir" != "770" ]]; then # if less than 0770, set it
+        if [[ $(stat -c "%a" "$CONFIG_DIR") != "770" ]]; then
             chmod 0770 "$CONFIG_DIR" || {
                 echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to ensure 0770 permissions on existing CONFIG_DIR: $CONFIG_DIR." >&2
             }
@@ -266,28 +254,12 @@ init_logging() {
     fi
 
     # Set ownership and permissions for LOG_DIR
-    # Try chown to root:adm, then root:nogroup as fallback, then root:root.
-    # Permissions 0775 allow owner/group to write, others to read/execute.
-    if id -g adm >/dev/null 2>&1; then
-        chown root:adm "$LOG_DIR" && chmod 0775 "$LOG_DIR"
-    elif id -g nogroup >/dev/null 2>&1; then
-        chown root:nogroup "$LOG_DIR" && chmod 0775 "$LOG_DIR"
-    else
-        chown root:root "$LOG_DIR" && chmod 0755 "$LOG_DIR" # Fallback to root:root 0755
-    fi
+    chown root:easybackhaul "$LOG_DIR" && chmod 0770 "$LOG_DIR"
     
     # Main log file
     local main_log_file="$LOG_DIR/easybackhaul.log"
     touch "$main_log_file" || { handle_error "WARN" "Failed to touch main log file: $main_log_file"; }
-    # Set permissions for the main log file. If services write here as 'nobody',
-    # they'll need write permission. root:adm 664 or nobody:nogroup 664.
-    if id -g adm >/dev/null 2>&1; then
-        chown root:adm "$main_log_file" && chmod 0664 "$main_log_file"
-    elif id -g nogroup >/dev/null 2>&1; then
-        chown nobody:nogroup "$main_log_file" && chmod 0664 "$main_log_file" # Allow easybackhaul_binary to write if it runs as nobody
-    else
-        chown root:root "$main_log_file" && chmod 0640 "$main_log_file"
-    fi
+    chown root:easybackhaul "$main_log_file" && chmod 0660 "$main_log_file"
 
 
     # Specific log files (health, performance) - these are typically written by easybh.sh itself (root)
@@ -312,14 +284,8 @@ setup_log_rotation() {
     local max_files_to_rotate="${LOG_MAX_FILES:-5}"
 
     # Determine user/group for created log files by logrotate.
-    # Default to root:adm if adm group exists, else root:root or root:nogroup.
     local logrotate_create_user="root"
-    local logrotate_create_group="root"
-    if id -g adm >/dev/null 2>&1; then
-        logrotate_create_group="adm"
-    elif id -g nogroup >/dev/null 2>&1; then
-         logrotate_create_group="nogroup" # If backhaul binary logs as nobody:nogroup
-    fi
+    local logrotate_create_group="easybackhaul"
 
     log_message "INFO" "Attempting to create/update logrotate configuration at $logrotate_conf_target."
 
@@ -512,41 +478,62 @@ check_port_availability() {
 }
 
 check_nc_compatibility() {
-    # Test for OpenBSD netcat compatibility with timeout to prevent hanging
-    local nc_test_result=""
+    # Test for OpenBSD netcat compatibility.
+    # The key features we need are '-l' for listen, '-p' for port, and '-w' for timeout.
+    # Using a high, non-standard port to avoid conflicts.
+    local test_port=49151 # A high, ephemeral port
+    local nc_test_output=""
+    local nc_command_successful=false
 
-    if command -v timeout &>/dev/null; then
-        nc_test_result=$(timeout 3s bash -c 'echo | nc -l -p 0 -w 1 2>&1' 2>/dev/null || echo "timeout_or_error")
-    else
-        # Fallback without timeout command - riskier
-        ( nc -l -p 0 -w 1 >/dev/null 2>&1 & )
-        local nc_pid=$!
-        sleep 3
-        if kill -0 $nc_pid 2>/dev/null; then
-            kill -9 $nc_pid 2>/dev/null
-            nc_test_result="timeout_or_error"
-        else
-            # This path is tricky; if nc fails very fast due to incompatibility, it might seem like success.
-            # A more robust check here is difficult without 'timeout'.
-            # We'll assume if it exited quickly without error output, it might be okay, or it failed too fast to capture output.
-            # The subsequent grep will try to catch known error patterns.
-            nc_test_result="success_or_immediate_fail"
-        fi
+    # Ensure the test port is free before starting
+    if ! check_port_availability "$test_port"; then
+        log_message "WARN" "Netcat compatibility check: Test port $test_port is in use. Skipping check for now."
+        # We can't be certain, so we cautiously assume it's compatible to not block functionality.
+        # A more robust solution might try a different port.
+        NC_COMPATIBLE="true"
+        return 0
     fi
 
-    if [[ "$nc_test_result" == "timeout_or_error" ]] || \
-       echo "$nc_test_result" | grep -qiE 'usage|invalid|unknown option|must be used with|Ncat: Could not resolve hostname'; then
-        log_message "WARN" "Netcat (nc) may not support '-l -p -w 1' or test timed out/errored. Restart watcher and some features might not work reliably."
-        print_warning "Netcat (nc) may not be fully compatible. Restart watcher might be unreliable."
-        print_info "Consider installing 'netcat-openbsd' (Debian/Ubuntu) or 'nmap-ncat' (CentOS/RHEL/Fedora)."
+    # The test: listen on a port for 2 seconds, and send a message to it.
+    # If the message is received, 'nc' is likely compatible.
+    # We use a subshell and backgrounding to run listener and sender concurrently.
+    (
+        # Listener part
+        # Redirect stderr to stdout to capture any error messages from 'nc -l'
+        nc -l -p "$test_port" -w 3 2>&1
+    ) > /tmp/nc_test_output.txt &
+    local listener_pid=$!
+
+    sleep 0.5 # Give the listener a moment to start
+
+    # Sender part
+    echo "test" | nc 127.0.0.1 "$test_port" -w 1 >/dev/null 2>&1
+
+    # Wait for the listener to exit (it should after receiving data or timing out)
+    wait "$listener_pid" 2>/dev/null
+
+    nc_test_output=$(cat /tmp/nc_test_output.txt 2>/dev/null)
+    rm -f /tmp/nc_test_output.txt
+
+    # Check if the listener received the "test" message.
+    if echo "$nc_test_output" | grep -q "test"; then
+        nc_command_successful=true
+    fi
+
+    # Check for common error messages in the output of 'nc -l'.
+    if ! $nc_command_successful || echo "$nc_test_output" | grep -qiE 'usage:|invalid option|requires an argument|refused'; then
+        log_message "ERROR" "Netcat (nc) compatibility check failed. Output: $nc_test_output"
+        print_error "Netcat (nc) is not compatible. The watcher feature will not work."
+        print_info "Please install 'netcat-openbsd' (Debian/Ubuntu) or 'nmap-ncat' (CentOS/RHEL/Fedora)."
         if command -v ncat &>/dev/null; then
-            print_info "Found 'ncat' (from nmap) - this is usually a good alternative if 'nc' is problematic."
+            print_info "Found 'ncat'. You might need to make it the default 'nc' via alternatives or symlink."
         fi
-        NC_COMPATIBLE="false" # Global hint for other parts of the script
+        NC_COMPATIBLE="false"
         return 1
     fi
-    log_message "DEBUG" "Netcat compatibility check passed."
-    NC_COMPATIBLE="true" # Global hint
+
+    log_message "DEBUG" "Netcat compatibility check passed. Output: $nc_test_output"
+    NC_COMPATIBLE="true"
     return 0
 }
 
@@ -1113,7 +1100,7 @@ menu_loop() {
     # All other paths (special keys, valid numeric, invalid non-empty) will RETURN from the function.
     while true; do
         for opt_str in "${options_ref[@]}"; do
-            echo "  $opt_str"
+            echo -e "  $opt_str" # Use -e to interpret escape sequences
         done
 
         print_menu_footer # Display updated footer
@@ -4484,8 +4471,8 @@ true # Ensure script is valid
 create_systemd_service() {
     local name_suffix="$1"
     local config_path="$2"
-    local service_user="${3:-}" # User to run as
-    local service_group="${4:-}" # Group to run as
+    local service_user="easybackhaul" # User to run as
+    local service_group="easybackhaul" # Group to run as
 
     # Ensure SERVICE_DIR and BIN_PATH are available (should be from globals.sh)
     if [[ -z "$SERVICE_DIR" || -z "$BIN_PATH" ]]; then
@@ -4519,38 +4506,28 @@ create_systemd_service() {
     log_message "INFO" "Creating systemd service file: $service_file_path for tunnel $name_suffix"
 
     # Determine User and Group for the service
-    local effective_user="$service_user"
-    local effective_group="$service_group"
-
-    if [[ "$(id -u)" -eq 0 ]]; then # Running as root
-        if [[ -z "$effective_user" ]]; then effective_user="nobody"; fi
-        if [[ -z "$effective_group" ]]; then effective_group="nogroup"; fi
-
-        if ! id -u "$effective_user" >/dev/null 2>&1; then
-            log_message "WARN" "User '$effective_user' not found, service will run as root. Consider creating a dedicated user."
-            effective_user="root"
-            effective_group="root"
-        elif ! getent group "$effective_group" >/dev/null 2>&1; then
-             log_message "WARN" "Group '$effective_group' not found, service will run as root. Consider creating a dedicated group or using an existing one."
-            effective_user="root" # Revert user to root too if group is invalid for nobody
-            effective_group="root"
-        fi
-    elif [[ -n "$effective_user" ]]; then
-         log_message "WARN" "Running as non-root. Service User/Group might not be applied effectively by systemd unless root manages it."
-    fi
+    local effective_user="easybackhaul"
+    local effective_group="easybackhaul"
 
     # Ensure the service configuration file has correct ownership and permissions
-    # The CONFIG_DIR (/etc/easybackhaul/configs) itself should be root:nogroup 0770 (set by globals.sh)
-    # This allows 'nobody' (if in 'nogroup') to read files within it.
-    if [[ -f "$config_path" ]] && [[ "$(id -u)" -eq 0 ]]; then
+    if [[ ! -f "$config_path" ]]; then
+        handle_error "ERROR" "Configuration file $config_path not found. Cannot set permissions or create service."
+        return 1
+    fi
+    if [[ "$(id -u)" -eq 0 ]]; then
+        # Ensure parent directory has correct permissions for traversal
+        local config_parent_dir
+        config_parent_dir=$(dirname "$config_path")
+        if [[ -d "$config_parent_dir" ]]; then
+            chown root:easybackhaul "$config_parent_dir"
+            chmod 0770 "$config_parent_dir"
+        fi
+
         log_message "DEBUG" "Setting ownership of $config_path to $effective_user:$effective_group"
         chown "${effective_user}:${effective_group}" "$config_path" || handle_error "WARN" "Failed to chown $config_path to $effective_user:$effective_group"
 
-        log_message "DEBUG" "Setting permissions of $config_path to 0640"
-        chmod 0640 "$config_path" || handle_error "WARN" "Failed to chmod $config_path to 0640"
-    elif [[ ! -f "$config_path" ]]; then
-        handle_error "ERROR" "Configuration file $config_path not found. Cannot set permissions or create service."
-        return 1
+        log_message "DEBUG" "Setting permissions of $config_path to 0660"
+        chmod 0660 "$config_path" || handle_error "WARN" "Failed to chmod $config_path to 0660"
     fi
 
     # Ensure the directory for systemd service files exists
@@ -5145,16 +5122,16 @@ _enable_tunnel_watcher() {
     local w_delay_local=10 w_delay_remote=10 w_max_retries=3
 
     # Determine role and pre-fill some values based on tunnel config
-    if grep -q 'mode[[:space:]]*=[[:space:]]*"server"' "$config_file"; then
+    if grep -q '\[server\]' "$config_file"; then
         w_role="server"
         print_info "This is a SERVER tunnel. You need the CLIENT's public IP for watcher communication."
         read -r -p "Enter CLIENT's public IP address: " w_remote_host
         if ! validate_ip "$w_remote_host"; then handle_error "ERROR" "Invalid IP address for remote host."; press_any_key; return 1; fi
         w_listen_port="${WATCHER_SERVER_LISTEN_PORT:-45679}" # Server listens on one port
         w_remote_port="${WATCHER_CLIENT_LISTEN_PORT:-45680}" # Server sends to client's listen port
-    elif grep -q 'mode[[:space:]]*=[[:space:]]*"client"' "$config_file"; then
+    elif grep -q '\[client\]' "$config_file"; then
         w_role="client"
-        w_remote_host=$(grep 'server[[:space:]]*=' "$config_file" | sed 's/.*=[[:space:]]*"\(.*\):.*"/\1/')
+        w_remote_host=$(grep 'remote_addr[[:space:]]*=' "$config_file" | sed 's/.*=[[:space:]]*"\(.*\):.*"/\1/')
         if ! validate_ip "$w_remote_host"; then handle_error "ERROR" "Could not parse server IP from tunnel config."; press_any_key; return 1; fi
         print_info "This is a CLIENT tunnel. Remote server IP for watcher: $w_remote_host"
         w_listen_port="${WATCHER_CLIENT_LISTEN_PORT:-45680}" # Client listens on one port
@@ -5204,40 +5181,31 @@ EOL
     chmod 600 "$watcher_conf_file_path"
     log_message "INFO" "Watcher config file created: $watcher_conf_file_path"
 
-    # Create watcher launcher script (e.g., /tmp/backhaul-watcher-suffix.sh)
-    # This launcher script will source globals.sh, then helpers.sh, then the watcher conf, then call _run_watcher_process
+    # Create a self-contained watcher launcher script
     local watcher_launcher_script_path="/tmp/backhaul-watcher-${tunnel_suffix}.sh"
+
+    # Capture the definitions of all required functions and variables
+    local function_definitions
+    function_definitions=$(
+        declare -f _run_watcher_process _watcher_cleanup _watcher_listen_for_requests _watcher_monitor_logs
+        declare -f log_message handle_error handle_success print_info print_error print_warning print_success
+        declare -f check_port_availability validate_port NC_COMPATIBLE
+        declare -p COLOR_BLUE COLOR_GREEN COLOR_YELLOW COLOR_RED COLOR_RESET ICON_INFO ICON_SUCCESS ICON_WARNING ICON_ERROR LOG_DIR
+    )
+
     cat > "$watcher_launcher_script_path" <<EOLSCRIPT
 #!/bin/bash
-# Launcher for EasyBackhaul Watcher: ${tunnel_suffix}
+# Self-contained Launcher for EasyBackhaul Watcher: ${tunnel_suffix}
 
-# Determine script's own directory to find other modules if needed
-SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
-EASYBACKHAUL_BASE_DIR="\$(dirname "\$SCRIPT_DIR")" # Assuming modules are one level up from a bin dir or similar
+# --- Embedded Functions and Variables ---
+$function_definitions
 
-# Source required global variables and helper functions
-# This assumes that when easybh.sh is built, globals.sh and helpers.sh contents are available
-# For a truly standalone script, these would need to be embedded or sourced differently.
-# For now, we rely on the main script's structure.
-if [[ -f "\${EASYBACKHAUL_BASE_DIR}/modules/globals.sh" ]]; then
-    source "\${EASYBACKHAUL_BASE_DIR}/modules/globals.sh"
-else
-    echo "FATAL: globals.sh not found for watcher." >&2; exit 1;
-fi
-if [[ -f "\${EASYBACKHAUL_BASE_DIR}/modules/helpers.sh" ]]; then
-    source "\${EASYBACKHAUL_BASE_DIR}/modules/helpers.sh"
-else
-    echo "FATAL: helpers.sh not found for watcher." >&2; exit 1;
-fi
-# Source the watcher's own functions (this file itself, if structured for it)
-# This is tricky if restart_watcher.sh contains both UI and core logic.
-# For now, assume _run_watcher_process is available because this whole module is sourced by easybh.sh
-# This means the launcher is simpler, it just sets up env and calls the function.
+# --- Main Logic ---
 
-# Load specific watcher config
+# Load the specific configuration for this watcher instance
 source "$watcher_conf_file_path"
 
-# Call the main watcher process function (defined in the sourced modules/restart_watcher.sh)
+# Call the watcher's main execution function
 _run_watcher_process
 EOLSCRIPT
     chmod +x "$watcher_launcher_script_path"
@@ -5704,7 +5672,9 @@ manage_tunnels_menu() {
                  status_color="$COLOR_RED"
             fi
 
-            tunnel_options+=("$idx. $current_tunnel_suffix [${status_color}${status_str}${COLOR_RESET}]")
+            local formatted_status="[ ${status_color}${status_str}${COLOR_RESET} ]"
+            local formatted_line=$(printf "%-3s %-40s %-20s" "$idx." "$current_tunnel_suffix" "$formatted_status")
+            tunnel_options+=("$formatted_line")
             service_name_map[$idx]="$current_service_name"
             tunnel_suffix_map[$idx]="$current_tunnel_suffix"
             ((idx++))
@@ -6563,7 +6533,7 @@ main_menu_entry() {
 }
 
 main_script_entry_point() {
-
+    # Initialize logging as the very first step
     if type init_logging &>/dev/null; then
         init_logging
     else
@@ -6571,41 +6541,68 @@ main_script_entry_point() {
         exit 1
     fi
 
+    # Set up a global trap for Ctrl+C
     trap '_global_ctrl_c_handler' INT
 
     log_message "INFO" "EasyBackhaul script started."
 
-    : "${CONFIG_DIR:=$EASYBACKHAUL_APP_DIR/config}"
-    : "${BACKUP_DIR:=$EASYBACKHAUL_APP_DIR/backup}"
-    : "${BIN_PATH:=$EASYBACKHAUL_APP_DIR/bin/easybackhaul_binary}"
-    : "${SERVICE_DIR:=/etc/systemd/system}"
-    : "${CRON_COMMENT_TAG:=EasyBackhaul}"
-    : "${HEALTH_LOG_FILE:=${LOG_DIR:-/var/log/easybackhaul}/easybackhaul_health.log}"
-    : "${PERFORMANCE_LOG_FILE:=${LOG_DIR:-/var/log/easybackhaul}/easybackhaul_performance.log}"
+    # --- Variable Definitions ---
+    # Define the base application directory. Default to /usr/local/share/easybackhaul if not set.
+    # This is a more appropriate default location for shared application data.
+    : "${EASYBACKHAUL_APP_DIR:=/usr/local/share/easybackhaul}"
 
+    # All other paths are derived from globals.sh defaults, which are now set early.
+    # The : a=b syntax is a fallback, but globals.sh should have already set these.
+    # We ensure they are not empty.
+    : "${CONFIG_DIR:?CONFIG_DIR not set by globals.sh}"
+    : "${BACKUP_DIR:?BACKUP_DIR not set by globals.sh}"
+    : "${BIN_PATH:?BIN_PATH not set by globals.sh}"
+    : "${LOG_DIR:?LOG_DIR not set by globals.sh}"
+    : "${SERVICE_DIR:=/etc/systemd/system}" # This one is standard system path
+    : "${CRON_COMMENT_TAG:=EasyBackhaul}"   # This is a script constant
+
+    # --- Directory and Permission Setup ---
+    # This wrapper is a temporary solution for ensuring directories exist.
+    # It will be removed once the logic is fully integrated into init_logging and other setup functions.
     ensure_dir_wrapper() {
         local dir_path="$1"
-        local permissions="${2:-700}"
+        local permissions="${2:-750}" # Default to 750
         if [[ -z "$dir_path" ]]; then
             log_message "WARN" "ensure_dir_wrapper: Directory path is empty. Skipping."
             return
         fi
+
+        # Use the robust ensure_dir from helpers.sh if available
         if type ensure_dir &>/dev/null; then
             ensure_dir "$dir_path" "$permissions"
         else
+            # Fallback for unexpected cases where helpers.sh might not be sourced
             mkdir -p "$dir_path" && chmod "$permissions" "$dir_path"
             log_message "WARN" "ensure_dir function not found. Used basic mkdir -p."
         fi
     }
 
-    ensure_dir_wrapper "$EASYBACKHAUL_APP_DIR" "755"
+    # With variables now properly defined, create the necessary directories.
     ensure_dir_wrapper "$(dirname "$BIN_PATH")" "755"
-    ensure_dir_wrapper "$CONFIG_DIR" "700"
-    ensure_dir_wrapper "$BACKUP_DIR" "700"
-    ensure_dir_wrapper "$LOG_DIR" "700"
+    ensure_dir_wrapper "$CONFIG_DIR" "0770"
+    ensure_dir_wrapper "$BACKUP_DIR" "0770"
+    ensure_dir_wrapper "$LOG_DIR" "0770"
 
+    chown -R root:easybackhaul "$CONFIG_DIR"
+    chown -R root:easybackhaul "$BACKUP_DIR"
+    chown -R root:easybackhaul "$LOG_DIR"
+
+    # --- Prerequisite Checks ---
     if [[ $EUID -ne 0 ]]; then handle_critical_error "This script must be run as root or with sudo."; fi
     
+    # Create a dedicated user and group for the service
+    if ! getent group easybackhaul >/dev/null; then
+        run_with_spinner "Creating group 'easybackhaul'..." addgroup --system easybackhaul
+    fi
+    if ! id -u easybackhaul >/dev/null 2>&1; then
+        run_with_spinner "Creating user 'easybackhaul'..." adduser --system --ingroup easybackhaul --no-create-home --disabled-password easybackhaul
+    fi
+
     if type check_dependencies &>/dev/null; then check_dependencies;
     else handle_critical_error "check_dependencies function not found."; fi
 
@@ -6659,4 +6656,6 @@ true # Ensure script is valid if sourced
 # <<< START OF SCRIPT EXECUTION >>>
 # This call should be the very last thing in the concatenated easybh.sh
 # Ensure all necessary files are sourced before this point by build.sh
-main_script_entry_point
+if [[ "${EASYBACKHAUL_SOURCED:-false}" != "true" ]]; then
+    main_script_entry_point
+fi
