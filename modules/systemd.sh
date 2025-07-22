@@ -11,8 +11,8 @@
 create_systemd_service() {
     local name_suffix="$1"
     local config_path="$2"
-    local service_user="${3:-}" # User to run as
-    local service_group="${4:-}" # Group to run as
+    local service_user="easybackhaul" # User to run as
+    local service_group="easybackhaul" # Group to run as
 
     # Ensure SERVICE_DIR and BIN_PATH are available (should be from globals.sh)
     if [[ -z "$SERVICE_DIR" || -z "$BIN_PATH" ]]; then

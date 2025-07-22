@@ -364,52 +364,32 @@ EOL
     chmod 600 "$watcher_conf_file_path"
     log_message "INFO" "Watcher config file created: $watcher_conf_file_path"
 
-    # Create watcher launcher script (e.g., /tmp/backhaul-watcher-suffix.sh)
+    # Create a self-contained watcher launcher script
     local watcher_launcher_script_path="/tmp/backhaul-watcher-${tunnel_suffix}.sh"
 
-    # The main easybh.sh script's location is needed to reliably source modules.
-    # We assume it's in the user's PATH and find it.
-    local main_script_path
-    main_script_path=$(command -v easybh.sh)
-    if [[ -z "$main_script_path" ]]; then
-        # Fallback if not in PATH: check common locations.
-        if [[ -f "/usr/local/bin/easybh.sh" ]]; then
-            main_script_path="/usr/local/bin/easybh.sh"
-        elif [[ -f "./easybh.sh" ]]; then
-            main_script_path="./easybh.sh"
-        else
-            handle_error "ERROR" "Could not locate the main 'easybh.sh' script. Watcher cannot be started."
-            press_any_key
-            return 1
-        fi
-    fi
+    # Capture the definitions of all required functions and variables
+    local function_definitions
+    function_definitions=$(
+        declare -f _run_watcher_process _watcher_cleanup _watcher_listen_for_requests _watcher_monitor_logs
+        declare -f log_message handle_error handle_success print_info print_error print_warning print_success
+        declare -f check_port_availability validate_port NC_COMPATIBLE
+        declare -p COLOR_BLUE COLOR_GREEN COLOR_YELLOW COLOR_RED COLOR_RESET ICON_INFO ICON_SUCCESS ICON_WARNING ICON_ERROR LOG_DIR
+    )
 
     cat > "$watcher_launcher_script_path" <<EOLSCRIPT
 #!/bin/bash
-# Launcher for EasyBackhaul Watcher: ${tunnel_suffix}
+# Self-contained Launcher for EasyBackhaul Watcher: ${tunnel_suffix}
 
-# The main easybh.sh script is a single file containing all modules.
-# We can source it directly to get access to all necessary functions.
-MAIN_SCRIPT_PATH="$main_script_path"
+# --- Embedded Functions and Variables ---
+$function_definitions
 
-if [[ ! -f "\$MAIN_SCRIPT_PATH" ]]; then
-    echo "FATAL: Main script not found at \$MAIN_SCRIPT_PATH" >&2
-    exit 1
-fi
-
-# Source the entire easybh.sh script. This makes all functions available.
-# We add a guard to prevent the main_script_entry_point from running.
-export EASYBACKHAUL_SOURCED=true
-source "\$MAIN_SCRIPT_PATH"
-unset EASYBACKHAUL_SOURCED
+# --- Main Logic ---
 
 # Load the specific configuration for this watcher instance
 source "$watcher_conf_file_path"
 
-# Now, call the watcher's main execution function, which was loaded
-# from the main script.
+# Call the watcher's main execution function
 _run_watcher_process
-
 EOLSCRIPT
     chmod +x "$watcher_launcher_script_path"
     log_message "INFO" "Watcher launcher script created: $watcher_launcher_script_path"

@@ -44,28 +44,12 @@ init_logging() {
     fi
 
     # Set ownership and permissions for LOG_DIR
-    # Try chown to root:adm, then root:nogroup as fallback, then root:root.
-    # Permissions 0775 allow owner/group to write, others to read/execute.
-    if id -g adm >/dev/null 2>&1; then
-        chown root:adm "$LOG_DIR" && chmod 0775 "$LOG_DIR"
-    elif id -g nogroup >/dev/null 2>&1; then
-        chown root:nogroup "$LOG_DIR" && chmod 0775 "$LOG_DIR"
-    else
-        chown root:root "$LOG_DIR" && chmod 0755 "$LOG_DIR" # Fallback to root:root 0755
-    fi
+    chown root:easybackhaul "$LOG_DIR" && chmod 0770 "$LOG_DIR"
     
     # Main log file
     local main_log_file="$LOG_DIR/easybackhaul.log"
     touch "$main_log_file" || { handle_error "WARN" "Failed to touch main log file: $main_log_file"; }
-    # Set permissions for the main log file. If services write here as 'nobody',
-    # they'll need write permission. root:adm 664 or nobody:nogroup 664.
-    if id -g adm >/dev/null 2>&1; then
-        chown root:adm "$main_log_file" && chmod 0664 "$main_log_file"
-    elif id -g nogroup >/dev/null 2>&1; then
-        chown nobody:nogroup "$main_log_file" && chmod 0664 "$main_log_file" # Allow easybackhaul_binary to write if it runs as nobody
-    else
-        chown root:root "$main_log_file" && chmod 0640 "$main_log_file"
-    fi
+    chown root:easybackhaul "$main_log_file" && chmod 0660 "$main_log_file"
 
 
     # Specific log files (health, performance) - these are typically written by easybh.sh itself (root)

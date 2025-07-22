@@ -411,19 +411,26 @@ main_script_entry_point() {
     }
 
     # With variables now properly defined, create the necessary directories.
-    # These calls are now safe from the "Directory path is empty" warning.
     ensure_dir_wrapper "$(dirname "$BIN_PATH")" "755"
-    # Config, Backup, and Log directories are handled by their respective setup functions
-    # (e.g., _globals_ensure_config_dir_for_secret, init_logging).
-    # Explicit calls here can be removed if those functions are guaranteed to run first.
-    # For safety during refactoring, we can leave them.
-    ensure_dir_wrapper "$CONFIG_DIR" # Uses default 750
-    ensure_dir_wrapper "$BACKUP_DIR" "700"
-    ensure_dir_wrapper "$LOG_DIR"    # Uses default 750, init_logging will refine permissions
+    ensure_dir_wrapper "$CONFIG_DIR" "0770"
+    ensure_dir_wrapper "$BACKUP_DIR" "0770"
+    ensure_dir_wrapper "$LOG_DIR" "0770"
+
+    chown -R root:easybackhaul "$CONFIG_DIR"
+    chown -R root:easybackhaul "$BACKUP_DIR"
+    chown -R root:easybackhaul "$LOG_DIR"
 
     # --- Prerequisite Checks ---
     if [[ $EUID -ne 0 ]]; then handle_critical_error "This script must be run as root or with sudo."; fi
     
+    # Create a dedicated user and group for the service
+    if ! getent group easybackhaul >/dev/null; then
+        run_with_spinner "Creating group 'easybackhaul'..." addgroup --system easybackhaul
+    fi
+    if ! id -u easybackhaul >/dev/null 2>&1; then
+        run_with_spinner "Creating user 'easybackhaul'..." adduser --system --ingroup easybackhaul --no-create-home --disabled-password easybackhaul
+    fi
+
     if type check_dependencies &>/dev/null; then check_dependencies;
     else handle_critical_error "check_dependencies function not found."; fi
 
