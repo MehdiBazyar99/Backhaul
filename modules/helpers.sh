@@ -290,41 +290,62 @@ check_port_availability() {
 }
 
 check_nc_compatibility() {
-    # Test for OpenBSD netcat compatibility with timeout to prevent hanging
-    local nc_test_result=""
-    
-    if command -v timeout &>/dev/null; then
-        nc_test_result=$(timeout 3s bash -c 'echo | nc -l -p 0 -w 1 2>&1' 2>/dev/null || echo "timeout_or_error")
-    else
-        # Fallback without timeout command - riskier
-        ( nc -l -p 0 -w 1 >/dev/null 2>&1 & )
-        local nc_pid=$!
-        sleep 3
-        if kill -0 $nc_pid 2>/dev/null; then
-            kill -9 $nc_pid 2>/dev/null
-            nc_test_result="timeout_or_error"
-        else
-            # This path is tricky; if nc fails very fast due to incompatibility, it might seem like success.
-            # A more robust check here is difficult without 'timeout'.
-            # We'll assume if it exited quickly without error output, it might be okay, or it failed too fast to capture output.
-            # The subsequent grep will try to catch known error patterns.
-            nc_test_result="success_or_immediate_fail"
-        fi
+    # Test for OpenBSD netcat compatibility.
+    # The key features we need are '-l' for listen, '-p' for port, and '-w' for timeout.
+    # Using a high, non-standard port to avoid conflicts.
+    local test_port=49151 # A high, ephemeral port
+    local nc_test_output=""
+    local nc_command_successful=false
+
+    # Ensure the test port is free before starting
+    if ! check_port_availability "$test_port"; then
+        log_message "WARN" "Netcat compatibility check: Test port $test_port is in use. Skipping check for now."
+        # We can't be certain, so we cautiously assume it's compatible to not block functionality.
+        # A more robust solution might try a different port.
+        NC_COMPATIBLE="true"
+        return 0
     fi
-    
-    if [[ "$nc_test_result" == "timeout_or_error" ]] || \
-       echo "$nc_test_result" | grep -qiE 'usage|invalid|unknown option|must be used with|Ncat: Could not resolve hostname'; then
-        log_message "WARN" "Netcat (nc) may not support '-l -p -w 1' or test timed out/errored. Restart watcher and some features might not work reliably."
-        print_warning "Netcat (nc) may not be fully compatible. Restart watcher might be unreliable."
-        print_info "Consider installing 'netcat-openbsd' (Debian/Ubuntu) or 'nmap-ncat' (CentOS/RHEL/Fedora)."
+
+    # The test: listen on a port for 2 seconds, and send a message to it.
+    # If the message is received, 'nc' is likely compatible.
+    # We use a subshell and backgrounding to run listener and sender concurrently.
+    (
+        # Listener part
+        # Redirect stderr to stdout to capture any error messages from 'nc -l'
+        nc -l -p "$test_port" -w 3 2>&1
+    ) > /tmp/nc_test_output.txt &
+    local listener_pid=$!
+
+    sleep 0.5 # Give the listener a moment to start
+
+    # Sender part
+    echo "test" | nc 127.0.0.1 "$test_port" -w 1 >/dev/null 2>&1
+
+    # Wait for the listener to exit (it should after receiving data or timing out)
+    wait "$listener_pid" 2>/dev/null
+
+    nc_test_output=$(cat /tmp/nc_test_output.txt 2>/dev/null)
+    rm -f /tmp/nc_test_output.txt
+
+    # Check if the listener received the "test" message.
+    if echo "$nc_test_output" | grep -q "test"; then
+        nc_command_successful=true
+    fi
+
+    # Check for common error messages in the output of 'nc -l'.
+    if ! $nc_command_successful || echo "$nc_test_output" | grep -qiE 'usage:|invalid option|requires an argument|refused'; then
+        log_message "ERROR" "Netcat (nc) compatibility check failed. Output: $nc_test_output"
+        print_error "Netcat (nc) is not compatible. The watcher feature will not work."
+        print_info "Please install 'netcat-openbsd' (Debian/Ubuntu) or 'nmap-ncat' (CentOS/RHEL/Fedora)."
         if command -v ncat &>/dev/null; then
-            print_info "Found 'ncat' (from nmap) - this is usually a good alternative if 'nc' is problematic."
+            print_info "Found 'ncat'. You might need to make it the default 'nc' via alternatives or symlink."
         fi
-        NC_COMPATIBLE="false" # Global hint for other parts of the script
+        NC_COMPATIBLE="false"
         return 1
     fi
-    log_message "DEBUG" "Netcat compatibility check passed."
-    NC_COMPATIBLE="true" # Global hint
+
+    log_message "DEBUG" "Netcat compatibility check passed. Output: $nc_test_output"
+    NC_COMPATIBLE="true"
     return 0
 }
 
@@ -891,7 +912,7 @@ menu_loop() {
     # All other paths (special keys, valid numeric, invalid non-empty) will RETURN from the function.
     while true; do
         for opt_str in "${options_ref[@]}"; do
-            echo "  $opt_str"
+            echo -e "  $opt_str" # Use -e to interpret escape sequences
         done
 
         print_menu_footer # Display updated footer

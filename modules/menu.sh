@@ -361,7 +361,7 @@ main_menu_entry() {
 }
 
 main_script_entry_point() {
-
+    # Initialize logging as the very first step
     if type init_logging &>/dev/null; then
         init_logging
     else
@@ -369,39 +369,59 @@ main_script_entry_point() {
         exit 1
     fi
 
+    # Set up a global trap for Ctrl+C
     trap '_global_ctrl_c_handler' INT
 
     log_message "INFO" "EasyBackhaul script started."
 
-    : "${CONFIG_DIR:=$EASYBACKHAUL_APP_DIR/config}"
-    : "${BACKUP_DIR:=$EASYBACKHAUL_APP_DIR/backup}"
-    : "${BIN_PATH:=$EASYBACKHAUL_APP_DIR/bin/easybackhaul_binary}"
-    : "${SERVICE_DIR:=/etc/systemd/system}"
-    : "${CRON_COMMENT_TAG:=EasyBackhaul}"
-    : "${HEALTH_LOG_FILE:=${LOG_DIR:-/var/log/easybackhaul}/easybackhaul_health.log}"
-    : "${PERFORMANCE_LOG_FILE:=${LOG_DIR:-/var/log/easybackhaul}/easybackhaul_performance.log}"
+    # --- Variable Definitions ---
+    # Define the base application directory. Default to /usr/local/share/easybackhaul if not set.
+    # This is a more appropriate default location for shared application data.
+    : "${EASYBACKHAUL_APP_DIR:=/usr/local/share/easybackhaul}"
 
+    # All other paths are derived from globals.sh defaults, which are now set early.
+    # The : a=b syntax is a fallback, but globals.sh should have already set these.
+    # We ensure they are not empty.
+    : "${CONFIG_DIR:?CONFIG_DIR not set by globals.sh}"
+    : "${BACKUP_DIR:?BACKUP_DIR not set by globals.sh}"
+    : "${BIN_PATH:?BIN_PATH not set by globals.sh}"
+    : "${LOG_DIR:?LOG_DIR not set by globals.sh}"
+    : "${SERVICE_DIR:=/etc/systemd/system}" # This one is standard system path
+    : "${CRON_COMMENT_TAG:=EasyBackhaul}"   # This is a script constant
+
+    # --- Directory and Permission Setup ---
+    # This wrapper is a temporary solution for ensuring directories exist.
+    # It will be removed once the logic is fully integrated into init_logging and other setup functions.
     ensure_dir_wrapper() {
         local dir_path="$1"
-        local permissions="${2:-700}"
+        local permissions="${2:-750}" # Default to 750
         if [[ -z "$dir_path" ]]; then
             log_message "WARN" "ensure_dir_wrapper: Directory path is empty. Skipping."
             return
         fi
+
+        # Use the robust ensure_dir from helpers.sh if available
         if type ensure_dir &>/dev/null; then
             ensure_dir "$dir_path" "$permissions"
         else
+            # Fallback for unexpected cases where helpers.sh might not be sourced
             mkdir -p "$dir_path" && chmod "$permissions" "$dir_path"
             log_message "WARN" "ensure_dir function not found. Used basic mkdir -p."
         fi
     }
-    
-    ensure_dir_wrapper "$EASYBACKHAUL_APP_DIR" "755"
-    ensure_dir_wrapper "$(dirname "$BIN_PATH")" "755"
-    ensure_dir_wrapper "$CONFIG_DIR" "700"
-    ensure_dir_wrapper "$BACKUP_DIR" "700"
-    ensure_dir_wrapper "$LOG_DIR" "700"
 
+    # With variables now properly defined, create the necessary directories.
+    # These calls are now safe from the "Directory path is empty" warning.
+    ensure_dir_wrapper "$(dirname "$BIN_PATH")" "755"
+    # Config, Backup, and Log directories are handled by their respective setup functions
+    # (e.g., _globals_ensure_config_dir_for_secret, init_logging).
+    # Explicit calls here can be removed if those functions are guaranteed to run first.
+    # For safety during refactoring, we can leave them.
+    ensure_dir_wrapper "$CONFIG_DIR" # Uses default 750
+    ensure_dir_wrapper "$BACKUP_DIR" "700"
+    ensure_dir_wrapper "$LOG_DIR"    # Uses default 750, init_logging will refine permissions
+
+    # --- Prerequisite Checks ---
     if [[ $EUID -ne 0 ]]; then handle_critical_error "This script must be run as root or with sudo."; fi
     
     if type check_dependencies &>/dev/null; then check_dependencies;

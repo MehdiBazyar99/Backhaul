@@ -101,7 +101,9 @@ manage_tunnels_menu() {
                  status_color="$COLOR_RED"
             fi
 
-            tunnel_options+=("$idx. $current_tunnel_suffix [${status_color}${status_str}${COLOR_RESET}]")
+            local formatted_status="[ ${status_color}${status_str}${COLOR_RESET} ]"
+            local formatted_line=$(printf "%-3s %-40s %-20s" "$idx." "$current_tunnel_suffix" "$formatted_status")
+            tunnel_options+=("$formatted_line")
             service_name_map[$idx]="$current_service_name"
             tunnel_suffix_map[$idx]="$current_tunnel_suffix"
             ((idx++))
