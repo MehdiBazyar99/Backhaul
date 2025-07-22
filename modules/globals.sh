@@ -32,10 +32,9 @@ _globals_ensure_config_dir_for_secret() {
                 echo "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create parent directory: $parent_dir. Please check permissions." >&2
                 return 1
             fi
-            # Set ownership to root:nogroup and permissions to 0750 for the parent directory
-            # This allows members of 'nogroup' (like 'nobody') to traverse into /etc/easybackhaul
-            chown root:nogroup "$parent_dir"
-            chmod 0750 "$parent_dir"
+            # Set ownership to root:easybackhaul and permissions to 0770 for the parent directory
+            chown root:easybackhaul "$parent_dir"
+            chmod 0770 "$parent_dir"
         fi
 
         mkdir -p "$CONFIG_DIR"
@@ -43,43 +42,32 @@ _globals_ensure_config_dir_for_secret() {
             echo "ERROR: [_globals_ensure_config_dir_for_secret] Failed to create CONFIG_DIR: $CONFIG_DIR. Please check permissions." >&2
             return 1
         fi
-        # Set ownership to root:nogroup and permissions to 0770 for the configs directory
-        # This allows 'nogroup' to read/write/execute (list files) in this directory.
-        # Individual config files will be 'nobody:nogroup' and '640'.
-        chown root:nogroup "$CONFIG_DIR"
+        # Set ownership to root:easybackhaul and permissions to 0770 for the configs directory
+        chown root:easybackhaul "$CONFIG_DIR"
         chmod 0770 "$CONFIG_DIR"
         return 0
     fi
 
     # If directory already exists, ensure its permissions and ownership are correct.
-    # This handles cases where the script might have run before with different settings.
     if [[ -d "$CONFIG_DIR" ]]; then
-        # Ensure parent directory /etc/easybackhaul also has correct perms/owner
         local existing_parent_dir
         existing_parent_dir=$(dirname "$CONFIG_DIR")
         if [[ -d "$existing_parent_dir" ]]; then
-            if [[ $(stat -c "%U:%G" "$existing_parent_dir") != "root:nogroup" ]]; then
-                chown root:nogroup "$existing_parent_dir" || echo "WARNING: Failed to chown $existing_parent_dir to root:nogroup" >&2
+            if [[ $(stat -c "%U:%G" "$existing_parent_dir") != "root:easybackhaul" ]]; then
+                chown root:easybackhaul "$existing_parent_dir" || echo "WARNING: Failed to chown $existing_parent_dir to root:easybackhaul" >&2
             fi
-            if [[ $(stat -c "%a" "$existing_parent_dir") != "750" ]]; then
-                 # Check if current perms are more open, e.g. 755, if so, leave them. Otherwise set to 750.
-                current_perms_parent=$(stat -c "%a" "$existing_parent_dir")
-                if [[ "$current_perms_parent" -lt "750" && "$current_perms_parent" != "750" ]]; then # if less than 0750, set it
-                    chmod 0750 "$existing_parent_dir" || echo "WARNING: Failed to chmod $existing_parent_dir to 0750" >&2
-                fi
+            if [[ $(stat -c "%a" "$existing_parent_dir") != "770" ]]; then
+                chmod 0770 "$existing_parent_dir" || echo "WARNING: Failed to chmod $existing_parent_dir to 0770" >&2
             fi
         fi
 
         # Check and set CONFIG_DIR permissions
-        if [[ $(stat -c "%U:%G" "$CONFIG_DIR") != "root:nogroup" ]]; then
-            chown root:nogroup "$CONFIG_DIR" || {
-                echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to chown existing CONFIG_DIR $CONFIG_DIR to root:nogroup." >&2
+        if [[ $(stat -c "%U:%G" "$CONFIG_DIR") != "root:easybackhaul" ]]; then
+            chown root:easybackhaul "$CONFIG_DIR" || {
+                echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to chown existing CONFIG_DIR $CONFIG_DIR to root:easybackhaul." >&2
             }
         fi
-        # Current permissions for CONFIG_DIR should be 0770.
-        # If they are more permissive (e.g., 775, 777), that's okay. If less, set to 0770.
-        current_perms_config_dir=$(stat -c "%a" "$CONFIG_DIR")
-        if [[ "$current_perms_config_dir" -lt "770" && "$current_perms_config_dir" != "770" ]]; then # if less than 0770, set it
+        if [[ $(stat -c "%a" "$CONFIG_DIR") != "770" ]]; then
             chmod 0770 "$CONFIG_DIR" || {
                 echo "WARNING: [_globals_ensure_config_dir_for_secret] Failed to ensure 0770 permissions on existing CONFIG_DIR: $CONFIG_DIR." >&2
             }

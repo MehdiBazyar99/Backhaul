@@ -46,25 +46,8 @@ create_systemd_service() {
     log_message "INFO" "Creating systemd service file: $service_file_path for tunnel $name_suffix"
 
     # Determine User and Group for the service
-    local effective_user="$service_user"
-    local effective_group="$service_group"
-
-    if [[ "$(id -u)" -eq 0 ]]; then # Running as root
-        if [[ -z "$effective_user" ]]; then effective_user="nobody"; fi
-        if [[ -z "$effective_group" ]]; then effective_group="nogroup"; fi
-
-        if ! id -u "$effective_user" >/dev/null 2>&1; then
-            log_message "WARN" "User '$effective_user' not found, service will run as root. Consider creating a dedicated user."
-            effective_user="root"
-            effective_group="root"
-        elif ! getent group "$effective_group" >/dev/null 2>&1; then
-             log_message "WARN" "Group '$effective_group' not found, service will run as root. Consider creating a dedicated group or using an existing one."
-            effective_user="root" # Revert user to root too if group is invalid for nobody
-            effective_group="root"
-        fi
-    elif [[ -n "$effective_user" ]]; then
-         log_message "WARN" "Running as non-root. Service User/Group might not be applied effectively by systemd unless root manages it."
-    fi
+    local effective_user="easybackhaul"
+    local effective_group="easybackhaul"
 
     # Ensure the service configuration file has correct ownership and permissions
     if [[ ! -f "$config_path" ]]; then
@@ -76,15 +59,15 @@ create_systemd_service() {
         local config_parent_dir
         config_parent_dir=$(dirname "$config_path")
         if [[ -d "$config_parent_dir" ]]; then
-            chown root:nogroup "$config_parent_dir"
-            chmod 0750 "$config_parent_dir" # rwx r-x ---
+            chown root:easybackhaul "$config_parent_dir"
+            chmod 0770 "$config_parent_dir"
         fi
 
         log_message "DEBUG" "Setting ownership of $config_path to $effective_user:$effective_group"
         chown "${effective_user}:${effective_group}" "$config_path" || handle_error "WARN" "Failed to chown $config_path to $effective_user:$effective_group"
 
-        log_message "DEBUG" "Setting permissions of $config_path to 0640"
-        chmod 0640 "$config_path" || handle_error "WARN" "Failed to chmod $config_path to 0640"
+        log_message "DEBUG" "Setting permissions of $config_path to 0660"
+        chmod 0660 "$config_path" || handle_error "WARN" "Failed to chmod $config_path to 0660"
     fi
 
     # Ensure the directory for systemd service files exists

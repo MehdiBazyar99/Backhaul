@@ -74,14 +74,8 @@ setup_log_rotation() {
     local max_files_to_rotate="${LOG_MAX_FILES:-5}"
 
     # Determine user/group for created log files by logrotate.
-    # Default to root:adm if adm group exists, else root:root or root:nogroup.
     local logrotate_create_user="root"
-    local logrotate_create_group="root"
-    if id -g adm >/dev/null 2>&1; then
-        logrotate_create_group="adm"
-    elif id -g nogroup >/dev/null 2>&1; then
-         logrotate_create_group="nogroup" # If backhaul binary logs as nobody:nogroup
-    fi
+    local logrotate_create_group="easybackhaul"
 
     log_message "INFO" "Attempting to create/update logrotate configuration at $logrotate_conf_target."
 
