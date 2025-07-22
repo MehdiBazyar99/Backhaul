@@ -1,0 +1,6 @@
+# Automatically normalize all text files to LF
+* text=auto
+
+# Force specific endings for certain file types
+*.sh  text eol=lf
+*.ps1 text eol=crlf
